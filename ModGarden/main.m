@@ -1,0 +1,1909 @@
+#import <UIKit/UIKit.h>
+#import <QuartzCore/QuartzCore.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#import <ifaddrs.h>
+#import <arpa/inet.h>
+#import <net/if.h>
+#import <sys/socket.h>
+#import <netinet/in.h>
+#import <unistd.h>
+#import "History.m"
+#import "UiConfig.m"
+#import "AppleTheme.m"
+#import "RamMonitor.m"
+
+static NSString *sdvAppDisplayName(void) {
+    NSString *n = NSBundle.mainBundle.infoDictionary[@"CFBundleDisplayName"];
+    return n.length ? n : @"Garden Launcher";
+}
+
+// ---- POSIX Network Helpers (universal iOS 14 - iOS 26+) ----
+static NSArray<NSDictionary *> *sdvLocalIPv4Interfaces(void) {
+    NSMutableArray *list = [NSMutableArray array];
+    struct ifaddrs *addrs = NULL;
+    if (getifaddrs(&addrs) != 0 || !addrs) return list;
+    for (struct ifaddrs *cur = addrs; cur != NULL; cur = cur->ifa_next) {
+        if (!cur->ifa_addr || cur->ifa_addr->sa_family != AF_INET) continue;
+        unsigned int flags = cur->ifa_flags;
+        if (!(flags & IFF_UP) || (flags & IFF_LOOPBACK)) continue;
+        char ipBuf[INET_ADDRSTRLEN] = {0};
+        struct sockaddr_in *sin = (struct sockaddr_in *)cur->ifa_addr;
+        if (!inet_ntop(AF_INET, &sin->sin_addr, ipBuf, sizeof(ipBuf))) continue;
+        NSString *name = [NSString stringWithUTF8String:cur->ifa_name ?: ""];
+        NSString *ip = [NSString stringWithUTF8String:ipBuf];
+        if ([ip hasPrefix:@"169.254."] || [ip hasPrefix:@"127."]) continue;
+        NSString *kind = @"Mạng khác";
+        NSInteger order = 2;
+        if ([name isEqualToString:@"en0"] || [name hasPrefix:@"en"]) {
+            kind = @"Wi-Fi / LAN";
+            order = 0;
+        } else if ([name hasPrefix:@"utun"] || [name hasPrefix:@"ipsec"] || [name hasPrefix:@"ppp"]) {
+            kind = @"VPN / Tailscale / ZeroTier";
+            order = 1;
+        } else if ([name hasPrefix:@"pdp_ip"]) {
+            kind = @"Di động (4G/5G)";
+            order = 3;
+        }
+        [list addObject:@{@"iface": name, @"ip": ip, @"kind": kind, @"order": @(order)}];
+    }
+    freeifaddrs(addrs);
+    [list sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        NSComparisonResult r = [a[@"order"] compare:b[@"order"]];
+        return r != NSOrderedSame ? r : [a[@"iface"] compare:b[@"iface"]];
+    }];
+    return list;
+}
+
+static NSString *sdvProbeLocalNetwork(void) {
+    int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (fd < 0) return @"Không mở được UDP socket trên thiết bị.";
+    int yes = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &yes, sizeof(yes));
+
+    struct sockaddr_in bindAddr;
+    memset(&bindAddr, 0, sizeof(bindAddr));
+    bindAddr.sin_family = AF_INET;
+    bindAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    bindAddr.sin_port = htons(0);
+    if (bind(fd, (struct sockaddr *)&bindAddr, sizeof(bindAddr)) != 0) {
+        int e = errno;
+        close(fd);
+        return [NSString stringWithFormat:@"Lỗi bind UDP (errno %d).", e];
+    }
+
+    struct sockaddr_in dst;
+    memset(&dst, 0, sizeof(dst));
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(24642);
+    dst.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+    unsigned char ping[1] = {0};
+    ssize_t sent = sendto(fd, ping, 1, 0, (struct sockaddr *)&dst, sizeof(dst));
+    int sendErr = (sent < 0) ? errno : 0;
+
+    NSArray<NSDictionary *> *ifaces = sdvLocalIPv4Interfaces();
+    for (NSDictionary *info in ifaces) {
+        if ([info[@"order"] integerValue] == 0) {
+            NSArray *oct = [info[@"ip"] componentsSeparatedByString:@"."];
+            if (oct.count == 4) {
+                NSString *subBc = [NSString stringWithFormat:@"%@.%@.%@.255", oct[0], oct[1], oct[2]];
+                if (inet_pton(AF_INET, subBc.UTF8String, &dst.sin_addr) == 1) {
+                    ssize_t s2 = sendto(fd, ping, 1, 0, (struct sockaddr *)&dst, sizeof(dst));
+                    if (s2 >= 0) { sent = s2; sendErr = 0; }
+                }
+            }
+            break;
+        }
+    }
+    close(fd);
+
+    if (sent >= 0) {
+        return @"UDP cổng 24642 đã sẵn sàng! Nếu iOS hiện bảng hỏi 'Mạng cục bộ', hãy chọn Cho phép (Allow).";
+    }
+    if (sendErr == EHOSTUNREACH || sendErr == EACCES || sendErr == EPERM) {
+        return [NSString stringWithFormat:@"iOS đang chặn quyền Mạng cục bộ. Vào Cài đặt → Quyền riêng tư & Bảo mật → Mạng cục bộ → bật %@.", sdvAppDisplayName()];
+    }
+    return [NSString stringWithFormat:@"Đã kiểm tra UDP (mã %d). Đảm bảo iPhone đang bật Wi-Fi hoặc Tailscale/ZeroTier.", sendErr];
+}
+
+// ---- Native iOS Rounded Screen Preview for Menu Bar ----
+@interface SDVMenuBarPreviewView : UIView
+@property(nonatomic, strong) SDVUiConfig *config;
+-(void)updateWithConfig:(SDVUiConfig *)cfg;
+@end
+
+@implementation SDVMenuBarPreviewView {
+    UIView *_island;
+    UIView *_clockBox;
+    UILabel *_clockLabel;
+    UIView *_barContainer;
+    NSArray<UIView *> *_pills;
+    NSArray<UILabel *> *_pillLabels;
+}
+
+-(instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.backgroundColor = rgb(0x4EA354);
+        self.layer.cornerRadius = 11.0;
+        self.layer.cornerCurve = kCACornerCurveContinuous;
+        self.layer.borderWidth = 0.5;
+        self.layer.borderColor = kSepColor.CGColor;
+        self.clipsToBounds = YES;
+
+        UIView *sky = [UIView new];
+        sky.backgroundColor = rgb(0x52B2DE);
+        sky.translatesAutoresizingMaskIntoConstraints = NO;
+        [self addSubview:sky];
+        [NSLayoutConstraint activateConstraints:@[
+            [sky.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+            [sky.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+            [sky.topAnchor constraintEqualToAnchor:self.topAnchor],
+            [sky.heightAnchor constraintEqualToConstant:36]
+        ]];
+
+        UIView *ground = [UIView new];
+        ground.backgroundColor = rgb(0xC28B4E);
+        ground.translatesAutoresizingMaskIntoConstraints = NO;
+        [self addSubview:ground];
+        [NSLayoutConstraint activateConstraints:@[
+            [ground.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+            [ground.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+            [ground.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
+            [ground.heightAnchor constraintEqualToConstant:10]
+        ]];
+
+        _island = [UIView new];
+        _island.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.92];
+        _island.layer.cornerRadius = 3.0;
+        [self addSubview:_island];
+
+        _clockBox = [UIView new];
+        _clockBox.backgroundColor = rgba(0xFFF6DE, 0.94);
+        _clockBox.layer.cornerRadius = 5.0;
+        _clockBox.layer.borderWidth = 0.5;
+        _clockBox.layer.borderColor = rgba(0x6E4222, 0.45).CGColor;
+        _clockLabel = mkLabel(@"9:40 AM", 9, UIFontWeightSemibold, rgb(0x4B2B14));
+        _clockLabel.font = iosMonoDigits(9, UIFontWeightSemibold);
+        _clockLabel.textAlignment = NSTextAlignmentCenter;
+        [_clockBox addSubview:_clockLabel];
+        pinAll(_clockLabel, _clockBox, 1);
+        [self addSubview:_clockBox];
+
+        _barContainer = [UIView new];
+        [self addSubview:_barContainer];
+
+        NSArray *titles = @[@"HIDE", @"SET", @"KEY", @"MENU", @"MODS"];
+        NSArray *colors = @[rgba(0x1C2A32, 0.88), rgba(0x1C2A32, 0.88), rgba(0x224455, 0.88), rgba(0x664024, 0.88), rgba(0x483B66, 0.88)];
+        NSMutableArray *ps = [NSMutableArray array];
+        NSMutableArray *ls = [NSMutableArray array];
+        for (NSUInteger i = 0; i < titles.count; i++) {
+            UIView *pill = [UIView new];
+            pill.backgroundColor = colors[i];
+            pill.layer.cornerRadius = 4.0;
+            pill.layer.cornerCurve = kCACornerCurveContinuous;
+            UILabel *lbl = mkLabel(titles[i], 8.5, UIFontWeightSemibold, UIColor.whiteColor);
+            lbl.textAlignment = NSTextAlignmentCenter;
+            lbl.adjustsFontSizeToFitWidth = YES;
+            lbl.minimumScaleFactor = 0.5;
+            [pill addSubview:lbl];
+            pinInsets(lbl, pill, UIEdgeInsetsMake(1, 2, 1, 2));
+            [_barContainer addSubview:pill];
+            [ps addObject:pill];
+            [ls addObject:lbl];
+        }
+        _pills = ps;
+        _pillLabels = ls;
+    }
+    return self;
+}
+
+-(void)updateWithConfig:(SDVUiConfig *)cfg {
+    _config = cfg;
+    [self setNeedsLayout];
+    [self layoutIfNeeded];
+}
+
+-(void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat w = self.bounds.size.width;
+    CGFloat h = self.bounds.size.height;
+    if (w < 10 || h < 10) return;
+
+    _island.frame = CGRectMake(4, (h - 24) * 0.5, 5, 24);
+    _clockBox.frame = CGRectMake(w - 58, 6, 52, 20);
+    _barContainer.frame = self.bounds;
+
+    SDVUiConfig *c = _config ?: [SDVUiConfig new];
+    CGFloat ratio = w / 1600.0;
+    CGFloat mbScale = c.menuBarScale;
+    CGFloat topY = MAX(4.0, c.menuBarTopY * ratio * 1.15);
+    CGFloat curX = MAX(14.0, c.menuBarLeftX * ratio * 1.15);
+    CGFloat btnH = MAX(12.0, MIN(h - topY - 4.0, 42.0 * mbScale * ratio * 1.35));
+    CGFloat baseW = 64.0 * mbScale * ratio * 1.35;
+    CGFloat gap = MAX(2.0, c.menuBarGap * ratio * 1.25);
+
+    NSArray<NSNumber *> *widths = @[@(baseW), @(baseW), @(baseW), @(68.0 * mbScale * ratio * 1.35), @(72.0 * mbScale * ratio * 1.35)];
+    NSArray<NSNumber *> *visible = @[@YES, @YES, @(c.showKeyboardBtn), @(c.showMenuBtn), @(c.showHotkeyDrawerBtn)];
+    CGFloat alpha = sdvClampf(c.menuBarOpacity, 0.10f, 1.00f);
+
+    for (NSUInteger i = 0; i < _pills.count; i++) {
+        UIView *p = _pills[i];
+        BOOL show = visible[i].boolValue;
+        p.hidden = !show;
+        if (!show) continue;
+        CGFloat bw = MAX(18.0, widths[i].doubleValue);
+        p.frame = CGRectMake(curX, topY, bw, btnH);
+        p.alpha = alpha;
+        _pillLabels[i].font = iosFont(MAX(7.0, MIN(12.0, btnH * 0.42)), UIFontWeightSemibold);
+        curX += bw + gap;
+    }
+}
+@end
+
+#ifdef GARDEN_IN_GAME
+#define Home SDVGardenManagerController
+#endif
+
+@interface Home : UIViewController <UIDocumentPickerDelegate>
+#ifdef GARDEN_IN_GAME
+@property(nonatomic, copy) void (^onRequestLiveMenuBarMode)(void);
+@property(nonatomic, copy) void (^onRequestClose)(void);
+#endif
+@end
+
+@implementation Home {
+    UIVisualEffectView *_sidebar;
+    UIStackView *_sidebarTabs;
+    UILabel *_statusLabel;
+    UILabel *_navTitleLabel;
+    UIScrollView *_scroll;
+    UIStackView *_pane;
+    UIView *_veil;
+
+    // 0 = Cài Mod, 1 = Thư viện, 2 = Hiệu năng & Nút, 3 = Co-op LAN, 4 = Hướng dẫn
+    NSInteger _tab;
+    NSInteger _uiSubTab; // 0 = Menu Bar, 1 = Nút & Joystick, 2 = Bảng SET/MODS
+    NSArray<SDVAppleButton *> *_tabButtons;
+    UIView *_creditCard;
+
+    NSURL *_root;
+    NSString *_stage;
+    NSMutableArray<NSString *> *_stagedFiles;
+    NSInteger _nextPkgIdx;
+    BOOL _appendPick;
+    NSString *_last;
+    NSString *_message;
+    BOOL _messageIsError;
+    NSDictionary *_plan;
+    NSDictionary *_library;
+    NSArray<NSDictionary *> *_catalog;
+    NSArray *_prefs;
+    NSMutableDictionary *_translations;
+    BOOL _choosingFolder;
+    BOOL _importingGameData;
+
+    // Live UI Studio refs
+    SDVUiConfig *_uiCfg;
+    SDVMenuBarPreviewView *_preview;
+    UILabel *_lblPreviewMeta;
+    NSMutableDictionary<NSNumber *, UILabel *> *_sliderLabels;
+    NSArray<SDVAppleButton *> *_presetButtons;
+    NSTimeInterval _lastLiveSave;
+
+    // Live RAM Monitor refs
+    UILabel *_ramHeadlineLbl;
+    UILabel *_ramDetailLbl;
+    UIView *_ramBarTrack;
+    UIView *_ramBarFill;
+    NSLayoutConstraint *_ramBarFillW;
+    NSTimer *_ramUiTimer;
+}
+
+-(void)dealloc {
+    [_ramUiTimer invalidate];
+    _ramUiTimer = nil;
+}
+
+-(void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    [_ramUiTimer invalidate];
+    _ramUiTimer = nil;
+}
+
+-(BOOL)prefersStatusBarHidden { return YES; }
+
+#ifdef GARDEN_IN_GAME
+-(UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    return UIInterfaceOrientationMaskLandscape;
+}
+#endif
+
+-(void)presentSafely:(UIViewController *)vc {
+    if (vc.popoverPresentationController) {
+        vc.popoverPresentationController.sourceView = self.view;
+        CGRect b = self.view.bounds;
+        vc.popoverPresentationController.sourceRect = CGRectMake(CGRectGetMidX(b), CGRectGetMidY(b), 1, 1);
+        vc.popoverPresentationController.permittedArrowDirections = (UIPopoverArrowDirection)0;
+    }
+    [self presentViewController:vc animated:YES completion:nil];
+}
+
+-(void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = kBgCanvas;
+    self.overrideUserInterfaceStyle = UIUserInterfaceStyleUnspecified; // Follow iOS system Light/Dark Mode!
+
+    _stage = join(NSTemporaryDirectory(), @"ModGardenBatch");
+    _stagedFiles = [NSMutableArray array];
+    _sliderLabels = [NSMutableDictionary dictionary];
+    [fm() removeItemAtPath:_stage error:nil];
+
+#ifdef GARDEN_IN_GAME
+    _root = [fm() URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
+#else
+    NSData *bm = [NSUserDefaults.standardUserDefaults dataForKey:@"gameFolder"];
+    if (bm) {
+        BOOL stale = NO;
+        _root = [NSURL URLByResolvingBookmarkData:bm options:0 relativeToURL:nil bookmarkDataIsStale:&stale error:nil];
+    }
+#endif
+    _uiCfg = [SDVUiConfig loadFromDocuments:_root.path];
+    _tab = 0;
+    _uiSubTab = 0;
+
+    [self buildShell];
+    [self renderAll:NO];
+#ifdef GARDEN_IN_GAME
+    if (_root && [gameDataStatus(_root.path)[@"ready"] boolValue]) [self refresh];
+#else
+    if (_root) [self refresh];
+#endif
+}
+
+-(void)buildShell {
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+
+    // Translucent Apple Split-View Sidebar (adapts natively to iOS 14–18 Material & iOS 26 Glass)
+    _sidebar = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterial]];
+    _sidebar.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:_sidebar];
+
+    UIView *divider = [UIView new];
+    divider.backgroundColor = kSepColor;
+    divider.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:divider];
+
+    // Native Apple Top Navigation Header Bar above detail pane
+    UIVisualEffectView *topBar = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterial]];
+    topBar.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:topBar];
+
+    UIView *topSep = mkHairline();
+    [topBar.contentView addSubview:topSep];
+    [NSLayoutConstraint activateConstraints:@[
+        [topSep.leadingAnchor constraintEqualToAnchor:topBar.contentView.leadingAnchor],
+        [topSep.trailingAnchor constraintEqualToAnchor:topBar.contentView.trailingAnchor],
+        [topSep.bottomAnchor constraintEqualToAnchor:topBar.contentView.bottomAnchor]
+    ]];
+
+    UIStackView *topBarRow = mkHStack(8);
+    _navTitleLabel = mkLabel(@"Cài Mod", 17, UIFontWeightSemibold, kInkPrimary);
+    _navTitleLabel.numberOfLines = 1;
+    [topBarRow addArrangedSubview:_navTitleLabel];
+    [topBarRow addArrangedSubview:[UIView new]];
+    UILabel *verPill = mkBadgePill(@"v6 · 2.0×", [kTintBlue colorWithAlphaComponent:0.12], kTintBlue, 11);
+    [topBarRow addArrangedSubview:verPill];
+    [topBar.contentView addSubview:topBarRow];
+    pinInsets(topBarRow, topBar.contentView, UIEdgeInsetsMake(0, 16, 0, 16));
+
+    _scroll = [UIScrollView new];
+    _scroll.backgroundColor = kBgCanvas;
+    _scroll.alwaysBounceVertical = YES;
+    _scroll.showsVerticalScrollIndicator = YES;
+    _scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:_scroll];
+
+    _pane = mkVStack(12);
+    _pane.translatesAutoresizingMaskIntoConstraints = NO;
+    [_scroll addSubview:_pane];
+
+    // Scene-safe layout width (no deprecated UIScreen.mainScreen!)
+    CGFloat sideW = 196.0;
+
+    [NSLayoutConstraint activateConstraints:@[
+        [_sidebar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [_sidebar.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [_sidebar.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+        [_sidebar.trailingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:sideW],
+
+        [divider.leadingAnchor constraintEqualToAnchor:_sidebar.trailingAnchor],
+        [divider.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [divider.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+        [divider.widthAnchor constraintEqualToConstant:0.5],
+
+        [topBar.leadingAnchor constraintEqualToAnchor:divider.trailingAnchor],
+        [topBar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [topBar.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [topBar.bottomAnchor constraintEqualToAnchor:safe.topAnchor constant:44],
+
+        [_scroll.leadingAnchor constraintEqualToAnchor:divider.trailingAnchor],
+        [_scroll.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+        [_scroll.topAnchor constraintEqualToAnchor:topBar.bottomAnchor],
+        [_scroll.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+
+        [_pane.leadingAnchor constraintEqualToAnchor:_scroll.contentLayoutGuide.leadingAnchor constant:16],
+        [_pane.trailingAnchor constraintEqualToAnchor:_scroll.contentLayoutGuide.trailingAnchor constant:-16],
+        [_pane.topAnchor constraintEqualToAnchor:_scroll.contentLayoutGuide.topAnchor constant:12],
+        [_pane.bottomAnchor constraintEqualToAnchor:_scroll.contentLayoutGuide.bottomAnchor constant:-22],
+        [_pane.widthAnchor constraintEqualToAnchor:_scroll.frameLayoutGuide.widthAnchor constant:-32]
+    ]];
+
+    UIStackView *sideStack = mkVStack(8);
+    sideStack.translatesAutoresizingMaskIntoConstraints = NO;
+    [_sidebar.contentView addSubview:sideStack];
+    [NSLayoutConstraint activateConstraints:@[
+        [sideStack.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:10],
+        [sideStack.trailingAnchor constraintEqualToAnchor:_sidebar.contentView.trailingAnchor constant:-10],
+        [sideStack.topAnchor constraintEqualToAnchor:safe.topAnchor constant:10],
+        [sideStack.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-10]
+    ]];
+
+    // Native Apple App Brand Header
+    UIStackView *brandRow = mkHStack(9);
+    UIImage *appIconImg = [UIImage imageNamed:@"AppIcon60x60"] ?: [UIImage imageNamed:@"orchard.png"];
+    UIImageView *iconView = [[UIImageView alloc] initWithImage:appIconImg];
+    iconView.contentMode = UIViewContentModeScaleAspectFill;
+    iconView.layer.cornerRadius = 8.5;
+    iconView.layer.cornerCurve = kCACornerCurveContinuous;
+    iconView.clipsToBounds = YES;
+    iconView.layer.borderWidth = 0.5;
+    iconView.layer.borderColor = kSepColor.CGColor;
+    iconView.translatesAutoresizingMaskIntoConstraints = NO;
+    [iconView.widthAnchor constraintEqualToConstant:34].active = YES;
+    [iconView.heightAnchor constraintEqualToConstant:34].active = YES;
+
+    UIStackView *brandText = mkVStack(1);
+    UILabel *appTitle = mkLabel(@"Mod Garden", 15, UIFontWeightSemibold, kInkPrimary);
+    appTitle.numberOfLines = 1;
+    _statusLabel = mkLabel(@"Đang tải…", 11.5, UIFontWeightRegular, kInkSecondary);
+    _statusLabel.numberOfLines = 1;
+    [brandText addArrangedSubview:appTitle];
+    [brandText addArrangedSubview:_statusLabel];
+    [brandRow addArrangedSubview:iconView];
+    [brandRow addArrangedSubview:brandText];
+    UIView *brandWrap = [UIView new];
+    [brandWrap addSubview:brandRow];
+    pinInsets(brandRow, brandWrap, UIEdgeInsetsMake(2, 4, 4, 2));
+    [sideStack addArrangedSubview:brandWrap];
+
+    // 5 Native iOS Split-View Sidebar Rows
+    _sidebarTabs = mkVStack(3);
+    NSMutableArray *tBtns = [NSMutableArray array];
+    for (NSInteger i = 0; i < 5; i++) {
+        SDVAppleButton *b = [SDVAppleButton buttonWithType:UIButtonTypeCustom];
+        b.tag = i;
+        b.layer.cornerRadius = 10.0;
+        b.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeading;
+        b.contentEdgeInsets = UIEdgeInsetsMake(0, 10, 0, 10);
+        b.imageEdgeInsets = UIEdgeInsetsMake(0, 0, 0, 8);
+        b.titleEdgeInsets = UIEdgeInsetsMake(0, 8, 0, -8);
+        [b.heightAnchor constraintEqualToConstant:35].active = YES;
+        [b addTarget:self action:@selector(selectTab:) forControlEvents:UIControlEventTouchUpInside];
+        [_sidebarTabs addArrangedSubview:b];
+        [tBtns addObject:b];
+    }
+    _tabButtons = tBtns;
+    [sideStack addArrangedSubview:_sidebarTabs];
+
+    UIView *spacer = [UIView new];
+    [spacer setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisVertical];
+    [sideStack addArrangedSubview:spacer];
+
+    UILabel *hint = mkLabel(@"Chạm 3 ngón × 2 để mở", 11, UIFontWeightRegular, kInkTertiary);
+    hint.textAlignment = NSTextAlignmentCenter;
+    [sideStack addArrangedSubview:hint];
+
+#ifdef GARDEN_IN_GAME
+    SDVAppleButton *closeBtn = mkIOSButton(@"Về game", @"play.fill", kTintBlue, UIColor.whiteColor, 14, UIEdgeInsetsMake(8, 12, 8, 12));
+    [closeBtn.heightAnchor constraintEqualToConstant:38].active = YES;
+    [closeBtn addTarget:self action:@selector(closeManager) forControlEvents:UIControlEventTouchUpInside];
+    [sideStack addArrangedSubview:closeBtn];
+#endif
+}
+
+-(void)updateSidebarChrome {
+    NSInteger enabledCount = 0;
+    for (NSDictionary *m in _catalog) if ([m[@"enabled"] boolValue]) enabledCount++;
+    _statusLabel.text = _library
+        ? [NSString stringWithFormat:@"%ld mod · 2.0×", (long)enabledCount]
+        : @"Stardew 1.6.15 · 2.0×";
+
+    NSArray *titles = @[
+        _stagedFiles.count > 0 ? [NSString stringWithFormat:@"Cài Mod (%lu)", (unsigned long)_stagedFiles.count] : @"Cài Mod",
+        _catalog.count > 0 ? [NSString stringWithFormat:@"Thư viện (%lu)", (unsigned long)_catalog.count] : @"Thư viện",
+        @"Hiệu năng & Nút",
+        @"Co-op LAN",
+        @"Hướng dẫn"
+    ];
+    NSArray *navTitles = @[@"Cài đặt Mod", @"Thư viện Mod", @"Hiệu năng & Điều khiển", @"Co-op LAN / IP", @"Hướng dẫn & Credit"];
+    NSArray *icons = @[@"square.and.arrow.down.fill", @"square.stack.3d.up.fill", @"slider.horizontal.3", @"wifi", @"info.circle.fill"];
+    NSArray *iconTints = @[kTintBlue, kTintIndigo, kTintGreen, kTintTeal, kTintOrange];
+
+    if (_tab >= 0 && _tab < (NSInteger)navTitles.count) {
+        _navTitleLabel.text = navTitles[_tab];
+    }
+
+    for (NSInteger i = 0; i < (NSInteger)_tabButtons.count; i++) {
+        SDVAppleButton *b = _tabButtons[i];
+        BOOL active = (i == _tab);
+        b.backgroundColor = active ? kTintBlue : UIColor.clearColor;
+        UIColor *fg = active ? UIColor.whiteColor : kInkPrimary;
+        b.tintColor = active ? UIColor.whiteColor : iconTints[i];
+        [b setImage:sfIcon(icons[i], 14.5, active ? UIImageSymbolWeightSemibold : UIImageSymbolWeightMedium) forState:UIControlStateNormal];
+        [b setTitle:titles[i] forState:UIControlStateNormal];
+        [b setTitleColor:fg forState:UIControlStateNormal];
+        b.titleLabel.font = iosFont(13.5, active ? UIFontWeightSemibold : UIFontWeightRegular);
+    }
+}
+
+-(void)selectTab:(UIButton *)sender {
+    if (_tab == sender.tag) return;
+    _tab = sender.tag;
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+    if (_tab == 2) _uiCfg = [SDVUiConfig loadFromDocuments:_root.path];
+    [self renderAll:YES];
+    [_scroll setContentOffset:CGPointZero animated:NO];
+}
+
+-(void)renderAll:(BOOL)animate {
+    [self updateSidebarChrome];
+    for (UIView *v in _pane.arrangedSubviews) {
+        [_pane removeArrangedSubview:v];
+        [v removeFromSuperview];
+    }
+    _preview = nil;
+    _presetButtons = nil;
+    _creditCard = nil;
+    _ramHeadlineLbl = nil;
+    _ramDetailLbl = nil;
+    _ramBarTrack = nil;
+    _ramBarFill = nil;
+    _ramBarFillW = nil;
+    [_ramUiTimer invalidate];
+    _ramUiTimer = nil;
+    [_sliderLabels removeAllObjects];
+
+    if (_message.length) {
+        UIStackView *row = mkHStack(10);
+        UIColor *tint = _messageIsError ? kTintRed : kTintGreen;
+        UIImageView *ic = [[UIImageView alloc] initWithImage:sfIcon(_messageIsError ? @"exclamationmark.triangle.fill" : @"checkmark.circle.fill", 18, UIImageSymbolWeightSemibold)];
+        ic.tintColor = tint;
+        [ic setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        UILabel *ml = mkLabel(_message, 13, UIFontWeightMedium, kInkPrimary);
+        SDVAppleButton *x = mkIOSButton(@"", @"xmark", kBgCardSubtle, kInkSecondary, 11.5, UIEdgeInsetsMake(5, 6, 5, 6));
+        x.layer.cornerRadius = 11;
+        [x setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        [x addTarget:self action:@selector(clearMessage) forControlEvents:UIControlEventTouchUpInside];
+        [row addArrangedSubview:ic];
+        [row addArrangedSubview:ml];
+        [row addArrangedSubview:x];
+        UIView *banner = mkGroupedCard(row, UIEdgeInsetsMake(10, 12, 10, 10));
+        banner.backgroundColor = [tint colorWithAlphaComponent:0.12];
+        [_pane addArrangedSubview:banner];
+    }
+
+    if (_tab == 0) [self renderInstallTab];
+    else if (_tab == 1) [self renderLibraryTab];
+    else if (_tab == 2) [self renderUiStudioTab];
+    else if (_tab == 3) [self renderCoopTab];
+    else [self renderGuideCreditTab];
+
+    if (animate && !UIAccessibilityIsReduceMotionEnabled()) {
+        _pane.alpha = 0.35;
+        [UIView animateWithDuration:0.16 delay:0 options:UIViewAnimationOptionCurveEaseOut animations:^{
+            self->_pane.alpha = 1.0;
+        } completion:nil];
+    }
+}
+
+-(void)clearMessage { _message = nil; [self renderAll:NO]; }
+
+// ============================================================
+// TAB 0: CÀI MOD & THIẾT LẬP LAUNCHER (NHẬP DỮ LIỆU GAME PC)
+// ============================================================
+-(UIView *)mkChecklistRow:(NSString *)title sub:(NSString *)sub ok:(BOOL)ok {
+    UIStackView *row = mkHStack(10);
+    UIImageView *ic = [[UIImageView alloc] initWithImage:sfIcon(ok ? @"checkmark.circle.fill" : @"exclamationmark.circle.fill", 20, UIImageSymbolWeightMedium)];
+    ic.tintColor = ok ? kTintGreen : kTintRed;
+    [ic setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    UIStackView *txt = mkVStack(1);
+    [txt addArrangedSubview:mkLabel(title, 13.5, UIFontWeightSemibold, kInkPrimary)];
+    [txt addArrangedSubview:mkLabel(sub, 12, UIFontWeightRegular, kInkSecondary)];
+    [row addArrangedSubview:ic];
+    [row addArrangedSubview:txt];
+    [row addArrangedSubview:[UIView new]];
+    [row addArrangedSubview:mkBadgePill(ok ? @"Đã có" : @"Thiếu", [ok ? kTintGreen : kTintRed colorWithAlphaComponent:0.14], ok ? kTintGreen : kTintRed, 11)];
+    return row;
+}
+
+-(void)renderInstallTab {
+#ifdef GARDEN_IN_GAME
+    NSDictionary *gstat = gameDataStatus(_root.path);
+    if (![gstat[@"ready"] boolValue]) {
+        NSString *appNm = sdvAppDisplayName();
+        UIStackView *hero = mkVStack(12);
+        UIStackView *top = mkHStack(12);
+        [top addArrangedSubview:mkSettingsIconBadge(@"arrow.down.doc.fill", kTintBlue, 42)];
+        UIStackView *ht = mkVStack(3);
+        [ht addArrangedSubview:mkLabel([NSString stringWithFormat:@"Thiết lập %@", appNm], 17, UIFontWeightSemibold, kInkPrimary)];
+        [ht addArrangedSubview:mkLabel(@"Launcher sạch tích hợp sẵn SMAPI 4.5.2, bản vá Co-op LAN và tối ưu 2.0× (không kèm tệp bản quyền). Nạp thư mục Stardew Valley PC 1.6.15 để bắt đầu.", 13, UIFontWeightRegular, kInkSecondary)];
+        [top addArrangedSubview:ht];
+        [hero addArrangedSubview:top];
+
+        UIStackView *btns = mkHStack(8);
+        SDVAppleButton *impBtn = mkIOSButton(@"Nhập gói dữ liệu game (.ZIP)", @"square.and.arrow.down.fill", kTintBlue, UIColor.whiteColor, 14, UIEdgeInsetsMake(11, 14, 11, 14));
+        [impBtn addTarget:self action:@selector(importGameDataTapped) forControlEvents:UIControlEventTouchUpInside];
+        SDVAppleButton *chkBtn = mkIOSButton(@"Kiểm tra lại", @"arrow.clockwise", kBgCardSubtle, kInkPrimary, 13.5, UIEdgeInsetsMake(11, 13, 11, 13));
+        [chkBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        [chkBtn addTarget:self action:@selector(recheckGameData) forControlEvents:UIControlEventTouchUpInside];
+        [btns addArrangedSubview:impBtn];
+        [btns addArrangedSubview:chkBtn];
+        [hero addArrangedSubview:btns];
+        [_pane addArrangedSubview:mkGroupedCard(hero, UIEdgeInsetsMake(14, 14, 14, 14))];
+
+        [_pane addArrangedSubview:mkSectionTitle([NSString stringWithFormat:@"Trạng thái tệp · Tệp → Trên iPhone → %@", appNm])];
+        [_pane addArrangedSubview:mkGroupedRows(@[
+            [self mkChecklistRow:@"Stardew Valley.dll" sub:@"Bắt buộc — tệp chạy bản PC 1.6.15" ok:[gstat[@"hasSdvDll"] boolValue]],
+            [self mkChecklistRow:@"Thư mục Content/" sub:@"Bắt buộc — tài nguyên hình ảnh, bản đồ, âm thanh" ok:[gstat[@"hasContent"] boolValue]],
+            [self mkChecklistRow:@"SMAPI 4.5.2" sub:@"Đã tích hợp sẵn trong Launcher — tự nạp mod" ok:[gstat[@"hasSmapi"] boolValue]],
+            [self mkChecklistRow:@"Thư mục smapi-internal/" sub:@"Đã tích hợp sẵn (mã nguồn mở Pathoschild)" ok:[gstat[@"hasSmapiInternal"] boolValue]]
+        ], 44)];
+
+        [_pane addArrangedSubview:mkSectionTitle(@"Hướng dẫn nạp dữ liệu PC")];
+        UILabel *howLbl = mkLabel([NSString stringWithFormat:@"• Cách 1 (Nhanh nhất): Nén thư mục Stardew Valley PC 1.6.15 thành 1 tệp .ZIP rồi bấm Nhập gói dữ liệu game (.ZIP).\n• Cách 2 (Thủ công): Mở ứng dụng Tệp → Trên iPhone của tôi → %@ rồi chép Content/, Stardew Valley.dll, xTile.dll, BmFont.dll và StardewValley.GameData.dll vào đó.\n• Hoàn tất: Vuốt tắt hẳn ứng dụng rồi mở lại để vào game.", appNm], 13, UIFontWeightRegular, kInkSecondary);
+        [_pane addArrangedSubview:mkGroupedCard(howLbl, UIEdgeInsetsMake(12, 14, 12, 14))];
+        return;
+    }
+    if (!_library) {
+        UIStackView *box = mkVStack(10);
+        [box addArrangedSubview:mkLabel(@"Dữ liệu game đã sẵn sàng", 16, UIFontWeightSemibold, kInkPrimary)];
+        [box addArrangedSubview:mkLabel(@"Đã phát hiện đầy đủ Stardew Valley.dll và Content/. Bấm nút dưới để nạp danh sách mod, hoặc mở lại app để vào game.", 13, UIFontWeightRegular, kInkSecondary)];
+        SDVAppleButton *btn = mkIOSButton(@"Đọc dữ liệu & danh sách Mod", @"arrow.clockwise", kTintBlue, UIColor.whiteColor, 14, UIEdgeInsetsMake(10, 14, 10, 14));
+        [btn addTarget:self action:@selector(refresh) forControlEvents:UIControlEventTouchUpInside];
+        [box addArrangedSubview:btn];
+        [_pane addArrangedSubview:mkGroupedCard(box, UIEdgeInsetsMake(14, 14, 14, 14))];
+        return;
+    }
+#else
+    if (!_library) {
+        UIStackView *box = mkVStack(10);
+        [box addArrangedSubview:mkLabel(@"Kết nối Stardew Mobile", 16, UIFontWeightSemibold, kInkPrimary)];
+        SDVAppleButton *btn = mkIOSButton(@"Chọn thư mục game", @"folder.fill", kTintBlue, UIColor.whiteColor, 14, UIEdgeInsetsMake(10, 14, 10, 14));
+        [btn addTarget:self action:@selector(folder) forControlEvents:UIControlEventTouchUpInside];
+        [box addArrangedSubview:btn];
+        [_pane addArrangedSubview:mkGroupedCard(box, UIEdgeInsetsMake(14, 14, 14, 14))];
+        return;
+    }
+#endif
+
+    // Active Batch Preview
+    if (_plan) {
+        [_pane addArrangedSubview:mkSectionTitle(@"Hàng chờ cài đặt")];
+        UIStackView *ps = mkVStack(10);
+        UIStackView *hdr = mkHStack(8);
+        [hdr addArrangedSubview:mkBadgePill([NSString stringWithFormat:@"%lu GÓI", (unsigned long)_stagedFiles.count], [kTintBlue colorWithAlphaComponent:0.14], kTintBlue, 11)];
+        [hdr addArrangedSubview:mkLabel(@"Sẵn sàng cài vào game", 15, UIFontWeightSemibold, kInkPrimary)];
+        [hdr addArrangedSubview:[UIView new]];
+        [hdr addArrangedSubview:mkBadgePill([NSString stringWithFormat:@"%lu tệp", (unsigned long)[_plan[@"map"] count]], [kTintGreen colorWithAlphaComponent:0.14], kTintGreen, 11)];
+        [ps addArrangedSubview:hdr];
+
+        if (_stagedFiles.count) {
+            UIStackView *fBox = mkVStack(4);
+            [fBox addArrangedSubview:mkLabel(@"Tệp nguồn đã chọn", 12, UIFontWeightSemibold, kInkSecondary)];
+            for (NSString *fn in _stagedFiles) {
+                UILabel *fl = mkLabel([@"• " stringByAppendingString:fn], 13, UIFontWeightRegular, kInkPrimary);
+                fl.numberOfLines = 1;
+                fl.lineBreakMode = NSLineBreakByTruncatingMiddle;
+                [fBox addArrangedSubview:fl];
+            }
+            UIView *fWrap = [UIView new];
+            fWrap.backgroundColor = kBgCardSubtle;
+            fWrap.layer.cornerRadius = 10;
+            fWrap.layer.cornerCurve = kCACornerCurveContinuous;
+            [fWrap addSubview:fBox];
+            pinInsets(fBox, fWrap, UIEdgeInsetsMake(8, 10, 8, 10));
+            [ps addArrangedSubview:fWrap];
+        }
+
+        NSArray *names = _plan[@"names"];
+        if (names.count) {
+            UIStackView *modList = mkVStack(3);
+            [modList addArrangedSubview:mkLabel(@"Nội dung sẽ cài", 12, UIFontWeightSemibold, kInkSecondary)];
+            for (NSString *n in names) {
+                [modList addArrangedSubview:mkLabel([@"✓ " stringByAppendingString:n], 13.5, UIFontWeightSemibold, kTintGreen)];
+            }
+            [ps addArrangedSubview:modList];
+        }
+
+        for (NSString *w in _plan[@"warnings"]) {
+            UILabel *wl = mkLabel(w, 12.5, UIFontWeightMedium, kTintRed);
+            UIView *wBox = [UIView new];
+            wBox.backgroundColor = [kTintRed colorWithAlphaComponent:0.11];
+            wBox.layer.cornerRadius = 9;
+            [wBox addSubview:wl];
+            pinInsets(wl, wBox, UIEdgeInsetsMake(7, 10, 7, 10));
+            [ps addArrangedSubview:wBox];
+        }
+
+        UIStackView *acts = mkHStack(8);
+        SDVAppleButton *bApply = mkIOSButton([NSString stringWithFormat:@"Cài tất cả (%lu)", (unsigned long)_stagedFiles.count], @"arrow.down.circle.fill", kTintBlue, UIColor.whiteColor, 13.5, UIEdgeInsetsMake(10, 12, 10, 12));
+        [bApply addTarget:self action:@selector(apply) forControlEvents:UIControlEventTouchUpInside];
+        SDVAppleButton *bAdd = mkIOSButton(@"Thêm", @"plus", kBgCardSubtle, kTintBlue, 13, UIEdgeInsetsMake(10, 10, 10, 10));
+        [bAdd addTarget:self action:@selector(addMorePackages) forControlEvents:UIControlEventTouchUpInside];
+        SDVAppleButton *bPaths = mkIOSButton(@"Xem tệp", @"list.bullet", kBgCardSubtle, kInkPrimary, 13, UIEdgeInsetsMake(10, 10, 10, 10));
+        [bPaths addTarget:self action:@selector(paths) forControlEvents:UIControlEventTouchUpInside];
+        SDVAppleButton *bCancel = mkIOSButton(@"Hủy", @"xmark", [kTintRed colorWithAlphaComponent:0.13], kTintRed, 13, UIEdgeInsetsMake(10, 10, 10, 10));
+        [bCancel addTarget:self action:@selector(cancelPlan) forControlEvents:UIControlEventTouchUpInside];
+        [acts addArrangedSubview:bApply];
+        [acts addArrangedSubview:bAdd];
+        [acts addArrangedSubview:bPaths];
+        [acts addArrangedSubview:bCancel];
+        [ps addArrangedSubview:acts];
+
+        [_pane addArrangedSubview:mkGroupedCard(ps, UIEdgeInsetsMake(14, 14, 14, 14))];
+        return;
+    }
+
+    // Hero Multi-File Picker Card
+    UIStackView *hero = mkVStack(12);
+    UIStackView *heroTop = mkHStack(12);
+    [heroTop addArrangedSubview:mkSettingsIconBadge(@"shippingbox.fill", kTintBlue, 40)];
+    UIStackView *heroTxt = mkVStack(2);
+    [heroTxt addArrangedSubview:mkLabel(@"Cài Mod từ ứng dụng Tệp", 16, UIFontWeightSemibold, kInkPrimary)];
+    [heroTxt addArrangedSubview:mkLabel(@"Chọn 1 hoặc nhiều tệp .ZIP / .XNB cùng lúc (tự gộp mod gốc + Việt hóa i18n trong 1 lượt).", 13, UIFontWeightRegular, kInkSecondary)];
+    [heroTop addArrangedSubview:heroTxt];
+    [hero addArrangedSubview:heroTop];
+
+    SDVAppleButton *pickBtn = mkIOSButton(@"Chọn tệp Mod (.ZIP / .XNB)", @"plus.circle.fill", kTintBlue, UIColor.whiteColor, 14.5, UIEdgeInsetsMake(11, 14, 11, 14));
+    [pickBtn addTarget:self action:@selector(package) forControlEvents:UIControlEventTouchUpInside];
+    [hero addArrangedSubview:pickBtn];
+
+    UIStackView *chips = mkHStack(6);
+    [chips addArrangedSubview:mkBadgePill(@"Chọn nhiều file", [kTintBlue colorWithAlphaComponent:0.12], kTintBlue, 11)];
+    [chips addArrangedSubview:mkBadgePill(@"Tự gộp i18n", [kTintGreen colorWithAlphaComponent:0.12], kTintGreen, 11)];
+    [chips addArrangedSubview:mkBadgePill(@"Tự sao lưu", kBgCardSubtle, kInkSecondary, 11)];
+    [chips addArrangedSubview:[UIView new]];
+    [hero addArrangedSubview:chips];
+
+    [_pane addArrangedSubview:mkGroupedCard(hero, UIEdgeInsetsMake(14, 14, 14, 14))];
+
+    // Undo Row
+    if (_last.length) {
+        [_pane addArrangedSubview:mkSectionTitle(@"Hoàn tác gần nhất")];
+        UIStackView *uRow = mkHStack(10);
+        [uRow addArrangedSubview:mkSettingsIconBadge(@"arrow.uturn.backward", kTintOrange, 28)];
+        UIStackView *uText = mkVStack(1);
+        [uText addArrangedSubview:mkLabel(@"Gói vừa cài đặt", 13.5, UIFontWeightSemibold, kInkPrimary)];
+        UILabel *ul = mkLabel(_last, 12, UIFontWeightRegular, kInkSecondary);
+        ul.numberOfLines = 1;
+        ul.lineBreakMode = NSLineBreakByTruncatingTail;
+        [uText addArrangedSubview:ul];
+        SDVAppleButton *uBtn = mkIOSButton(@"Hoàn tác", nil, [kTintOrange colorWithAlphaComponent:0.14], kTintOrange, 13, UIEdgeInsetsMake(7, 12, 7, 12));
+        [uBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        [uBtn addTarget:self action:@selector(askUndo) forControlEvents:UIControlEventTouchUpInside];
+        [uRow addArrangedSubview:uText];
+        [uRow addArrangedSubview:uBtn];
+        [_pane addArrangedSubview:mkGroupedCard(uRow, UIEdgeInsetsMake(10, 14, 10, 14))];
+    }
+
+    [_pane addArrangedSubview:mkSectionFooter(@"Mẹo: Trong cửa sổ Tệp, chạm vào từng tệp .ZIP / .XNB để chọn nhiều gói một lượt rồi bấm Mở ở góc trên phải.")];
+}
+
+// ============================================================
+// TAB 1: THƯ VIỆN MOD (Apple Inset Grouped List)
+// ============================================================
+-(void)renderLibraryTab {
+    NSInteger onCount = 0;
+    for (NSDictionary *m in _catalog) if ([m[@"enabled"] boolValue]) onCount++;
+
+    UIStackView *hdr = mkHStack(8);
+    UILabel *secLbl = mkSectionHeader([NSString stringWithFormat:@"Đã cài đặt (%ld/%lu đang bật)", (long)onCount, (unsigned long)_catalog.count]);
+    [hdr addArrangedSubview:secLbl];
+    [hdr addArrangedSubview:[UIView new]];
+    SDVAppleButton *ref = mkIOSButton(@"Làm mới", @"arrow.clockwise", [kTintBlue colorWithAlphaComponent:0.12], kTintBlue, 12.5, UIEdgeInsetsMake(5, 10, 5, 10));
+    [ref addTarget:self action:@selector(refresh) forControlEvents:UIControlEventTouchUpInside];
+    [hdr addArrangedSubview:ref];
+    UIView *hdrWrap = [UIView new];
+    [hdrWrap addSubview:hdr];
+    pinInsets(hdr, hdrWrap, UIEdgeInsetsMake(2, 12, 0, 4));
+    [_pane addArrangedSubview:hdrWrap];
+
+    if (!_catalog.count) {
+        UILabel *empty = mkLabel(@"Chưa có mod nào ngoài mod hệ thống.", 13.5, UIFontWeightRegular, kInkSecondary);
+        [_pane addArrangedSubview:mkGroupedCard(empty, UIEdgeInsetsMake(14, 14, 14, 14))];
+        return;
+    }
+
+    NSMutableArray<UIView *> *rows = [NSMutableArray array];
+    for (NSUInteger i = 0; i < _catalog.count; i++) {
+        NSDictionary *m = _catalog[i];
+        BOOL enabled = [m[@"enabled"] boolValue];
+        BOOL sys = [m[@"protected"] boolValue];
+
+        UIStackView *row = mkHStack(10);
+        UIView *dot = [UIView new];
+        dot.backgroundColor = enabled ? kTintGreen : kInkTertiary;
+        dot.layer.cornerRadius = 4.0;
+        dot.translatesAutoresizingMaskIntoConstraints = NO;
+        [dot.widthAnchor constraintEqualToConstant:8].active = YES;
+        [dot.heightAnchor constraintEqualToConstant:8].active = YES;
+        [row addArrangedSubview:dot];
+
+        UIStackView *info = mkVStack(2);
+        UIStackView *topLine = mkHStack(6);
+        UILabel *nameLbl = mkLabel(m[@"name"], 14, UIFontWeightSemibold, enabled ? kInkPrimary : kInkSecondary);
+        nameLbl.numberOfLines = 1;
+        nameLbl.lineBreakMode = NSLineBreakByTruncatingTail;
+        [topLine addArrangedSubview:nameLbl];
+        [topLine addArrangedSubview:mkBadgePill([@"v" stringByAppendingString:m[@"version"]], kBgCardSubtle, kInkSecondary, 10.5)];
+        if ([m[@"packCount"] integerValue] > 1) {
+            [topLine addArrangedSubview:mkBadgePill([NSString stringWithFormat:@"%@ gói", m[@"packCount"]], [kTintBlue colorWithAlphaComponent:0.12], kTintBlue, 10.5)];
+        }
+        [topLine addArrangedSubview:[UIView new]];
+        [info addArrangedSubview:topLine];
+
+        NSString *author = m[@"author"];
+        NSString *subText = author.length ? [NSString stringWithFormat:@"%@ · %@", author, m[@"cleanFolder"]] : m[@"cleanFolder"];
+        UILabel *subLbl = mkLabel(subText, 12, UIFontWeightRegular, kInkSecondary);
+        subLbl.numberOfLines = 1;
+        subLbl.lineBreakMode = NSLineBreakByTruncatingTail;
+        [info addArrangedSubview:subLbl];
+        [row addArrangedSubview:info];
+
+        if (sys) {
+            [row addArrangedSubview:mkBadgePill(@"Hệ thống", [kTintOrange colorWithAlphaComponent:0.14], kTintOrange, 11)];
+        } else {
+            UISwitch *sw = [UISwitch new];
+            sw.on = enabled;
+            sw.onTintColor = kTintGreen;
+            sw.tag = (NSInteger)i;
+            sw.transform = CGAffineTransformMakeScale(0.86, 0.86);
+            [sw addTarget:self action:@selector(toggleModSwitch:) forControlEvents:UIControlEventValueChanged];
+            [row addArrangedSubview:sw];
+
+            SDVAppleButton *del = mkIOSButton(@"", @"trash.fill", [kTintRed colorWithAlphaComponent:0.12], kTintRed, 13, UIEdgeInsetsMake(7, 8, 7, 8));
+            del.layer.cornerRadius = 9;
+            del.tag = (NSInteger)i;
+            [del addTarget:self action:@selector(askDeleteMod:) forControlEvents:UIControlEventTouchUpInside];
+            [row addArrangedSubview:del];
+        }
+        [rows addObject:row];
+    }
+    [_pane addArrangedSubview:mkGroupedRows(rows, 32)];
+    [_pane addArrangedSubview:mkSectionFooter(@"Bật/tắt hoặc xóa mod sẽ có hiệu lực ở lần mở lại ứng dụng tiếp theo.")];
+}
+
+// ============================================================
+// TAB 2: HIỆU NĂNG (v6 KHÓA 2.0×) & TÙY CHỈNH NÚT BẤM
+// ============================================================
+-(UIView *)mkSliderRow:(NSString *)title min:(float)lo max:(float)hi val:(float)val valText:(NSString *)valText tag:(NSInteger)tag {
+    UIStackView *box = mkVStack(4);
+    UIStackView *hdr = mkHStack(8);
+    [hdr addArrangedSubview:mkLabel(title, 13.5, UIFontWeightRegular, kInkPrimary)];
+    [hdr addArrangedSubview:[UIView new]];
+    UILabel *vl = mkLabel(valText, 13.5, UIFontWeightSemibold, kTintBlue);
+    vl.font = iosMonoDigits(13.5, UIFontWeightSemibold);
+    vl.textAlignment = NSTextAlignmentRight;
+    [hdr addArrangedSubview:vl];
+    _sliderLabels[@(tag)] = vl;
+
+    UISlider *sl = [UISlider new];
+    sl.minimumValue = lo;
+    sl.maximumValue = hi;
+    sl.value = val;
+    sl.minimumTrackTintColor = kTintBlue;
+    sl.tag = tag;
+    [sl addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
+    [sl addTarget:self action:@selector(sliderEnded:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel];
+
+    [box addArrangedSubview:hdr];
+    [box addArrangedSubview:sl];
+    return box;
+}
+
+-(UIView *)mkSettingsSwitchRow:(NSString *)title icon:(NSString *)sym color:(UIColor *)col on:(BOOL)on tag:(NSInteger)tag {
+    UIStackView *row = mkHStack(10);
+    if (sym.length) [row addArrangedSubview:mkSettingsIconBadge(sym, col ?: kTintBlue, 28)];
+    [row addArrangedSubview:mkLabel(title, 13.5, UIFontWeightRegular, kInkPrimary)];
+    [row addArrangedSubview:[UIView new]];
+    UISwitch *sw = [UISwitch new];
+    sw.on = on;
+    sw.onTintColor = kTintGreen;
+    sw.tag = tag;
+    sw.transform = CGAffineTransformMakeScale(0.88, 0.88);
+    [sw addTarget:self action:@selector(uiSwitchChanged:) forControlEvents:UIControlEventValueChanged];
+    [row addArrangedSubview:sw];
+    return row;
+}
+
+-(void)renderUiStudioTab {
+    if (!_uiCfg) _uiCfg = [SDVUiConfig loadFromDocuments:_root.path];
+
+#ifdef GARDEN_IN_GAME
+    // Quick Live In-Game Glass HUD Row
+    UIStackView *liveRow = mkHStack(10);
+    [liveRow addArrangedSubview:mkSettingsIconBadge(@"sparkles", kTintBlue, 32)];
+    UIStackView *liveTxt = mkVStack(1);
+    [liveTxt addArrangedSubview:mkLabel(@"Chỉnh trực tiếp trên game", 14.5, UIFontWeightSemibold, kInkPrimary)];
+    [liveTxt addArrangedSubview:mkLabel(@"Thu gọn thành thanh kính nổi dưới đáy để vừa chơi vừa kéo cỡ & độ rõ.", 12, UIFontWeightRegular, kInkSecondary)];
+    SDVAppleButton *liveBtn = mkIOSButton(@"Mở thanh nổi", nil, kTintBlue, UIColor.whiteColor, 13, UIEdgeInsetsMake(8, 12, 8, 12));
+    [liveBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [liveBtn addTarget:self action:@selector(enterLiveMenuBarMode) forControlEvents:UIControlEventTouchUpInside];
+    [liveRow addArrangedSubview:liveTxt];
+    [liveRow addArrangedSubview:liveBtn];
+    [_pane addArrangedSubview:mkGroupedCard(liveRow, UIEdgeInsetsMake(11, 14, 11, 14))];
+#endif
+
+    // Section: Hiệu năng & Bộ nhớ (v6 — Locked 2.0×)
+    [_pane addArrangedSubview:mkSectionTitle(@"Hiệu năng & Bộ nhớ (v6)")];
+
+    // Row 1: RAM Meter
+    UIStackView *ramRow = mkVStack(7);
+    UIStackView *ramHdr = mkHStack(8);
+    [ramHdr addArrangedSubview:mkSettingsIconBadge(@"memorychip.fill", kTintPurple, 28)];
+    [ramHdr addArrangedSubview:mkLabel(@"Bộ nhớ RAM", 14, UIFontWeightSemibold, kInkPrimary)];
+    [ramHdr addArrangedSubview:[UIView new]];
+    _ramHeadlineLbl = mkLabel(@"-- MB", 13.5, UIFontWeightSemibold, kTintGreen);
+    _ramHeadlineLbl.font = iosMonoDigits(13.5, UIFontWeightSemibold);
+    [ramHdr addArrangedSubview:_ramHeadlineLbl];
+    [ramRow addArrangedSubview:ramHdr];
+
+    _ramBarTrack = [UIView new];
+    _ramBarTrack.backgroundColor = kBgCardSubtle;
+    _ramBarTrack.layer.cornerRadius = 4.0;
+    _ramBarTrack.clipsToBounds = YES;
+    [_ramBarTrack.heightAnchor constraintEqualToConstant:8].active = YES;
+
+    _ramBarFill = [UIView new];
+    _ramBarFill.backgroundColor = kTintGreen;
+    _ramBarFill.layer.cornerRadius = 4.0;
+    _ramBarFill.translatesAutoresizingMaskIntoConstraints = NO;
+    [_ramBarTrack addSubview:_ramBarFill];
+    _ramBarFillW = [_ramBarFill.widthAnchor constraintEqualToConstant:40];
+    [NSLayoutConstraint activateConstraints:@[
+        [_ramBarFill.leadingAnchor constraintEqualToAnchor:_ramBarTrack.leadingAnchor],
+        [_ramBarFill.topAnchor constraintEqualToAnchor:_ramBarTrack.topAnchor],
+        [_ramBarFill.bottomAnchor constraintEqualToAnchor:_ramBarTrack.bottomAnchor],
+        _ramBarFillW
+    ]];
+    [ramRow addArrangedSubview:_ramBarTrack];
+
+    _ramDetailLbl = mkLabel(@"Đang đọc bộ nhớ…", 12, UIFontWeightRegular, kInkSecondary);
+    _ramDetailLbl.font = iosMonoDigits(12, UIFontWeightRegular);
+    [ramRow addArrangedSubview:_ramDetailLbl];
+
+    // Row 2: Locked 2.0x Resolution Row
+    UIStackView *resRow = mkHStack(10);
+    [resRow addArrangedSubview:mkSettingsIconBadge(@"display", kTintIndigo, 28)];
+    UIStackView *resTxt = mkVStack(1);
+    [resTxt addArrangedSubview:mkLabel(@"Độ phân giải đồ họa", 13.5, UIFontWeightRegular, kInkPrimary)];
+    [resTxt addArrangedSubview:mkLabel(@"Tỷ lệ nguyên sắc nét, giảm 55% tải GPU & chống nóng", 11.5, UIFontWeightRegular, kInkSecondary)];
+    [resRow addArrangedSubview:resTxt];
+    [resRow addArrangedSubview:[UIView new]];
+    [resRow addArrangedSubview:mkBadgePill(@"2.0× Khóa tối ưu", [kTintGreen colorWithAlphaComponent:0.14], kTintGreen, 11.5)];
+
+    // Row 3 & 4: Native Apple Switches
+    UIView *hudSwRow = [self mkSettingsSwitchRow:@"Thanh đo RAM & FPS nổi" icon:@"gauge.medium" color:kTintGreen on:SDVRamMonitor.shared.hudEnabled tag:20];
+    UIView *logSwRow = [self mkSettingsSwitchRow:@"Giảm ghi log TRACE thừa" icon:@"doc.text.magnifyingglass" color:kTintOrange on:[SDVRamMonitor.shared trimLogsEnabledForDocs:_root.path] tag:21];
+
+    // Row 5: Quick Memory Action Buttons
+    UIStackView *ramBtns = mkHStack(8);
+    SDVAppleButton *gcBtn = mkIOSButton(@"Dọn RAM ngay", @"sparkles", [kTintBlue colorWithAlphaComponent:0.14], kTintBlue, 13, UIEdgeInsetsMake(8, 12, 8, 12));
+    [gcBtn addTarget:self action:@selector(forceGcNowTapped) forControlEvents:UIControlEventTouchUpInside];
+    SDVAppleButton *rstPeak = mkIOSButton(@"Đặt lại Peak", @"arrow.counterclockwise", kBgCardSubtle, kInkPrimary, 12.5, UIEdgeInsetsMake(8, 10, 8, 10));
+    [rstPeak addTarget:self action:@selector(resetRamPeakTapped) forControlEvents:UIControlEventTouchUpInside];
+    SDVAppleButton *rstPos = mkIOSButton(@"Về góc trên", @"arrow.up.to.line", kBgCardSubtle, kInkPrimary, 12.5, UIEdgeInsetsMake(8, 10, 8, 10));
+    [rstPos addTarget:self action:@selector(resetRamHudPosTapped) forControlEvents:UIControlEventTouchUpInside];
+    [ramBtns addArrangedSubview:gcBtn];
+    [ramBtns addArrangedSubview:rstPeak];
+    [ramBtns addArrangedSubview:rstPos];
+    [ramBtns addArrangedSubview:[UIView new]];
+
+    [_pane addArrangedSubview:mkGroupedRows(@[ramRow, resRow, hudSwRow, logSwRow, ramBtns], 52)];
+    [self refreshRamCardNow];
+    __weak typeof(self) weakSelf = self;
+    _ramUiTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
+        [weakSelf refreshRamCardNow];
+    }];
+
+    // Native iOS Segmented Control for Touch Controls Studio
+    [_pane addArrangedSubview:mkSectionTitle(@"Tùy chỉnh điều khiển cảm ứng")];
+    UISegmentedControl *subSeg = [[UISegmentedControl alloc] initWithItems:@[@"Menu Bar", @"Nút & Joystick", @"Bảng SET / MODS"]];
+    subSeg.selectedSegmentIndex = _uiSubTab;
+    [subSeg addTarget:self action:@selector(uiSubTabChanged:) forControlEvents:UIControlEventValueChanged];
+    [_pane addArrangedSubview:subSeg];
+
+    if (_uiSubTab == 0) {
+        UIStackView *prevCard = mkVStack(8);
+        UIStackView *prevHdr = mkHStack(8);
+        [prevHdr addArrangedSubview:mkLabel(@"Xem trước thanh Menu Bar", 13.5, UIFontWeightSemibold, kInkPrimary)];
+        [prevHdr addArrangedSubview:[UIView new]];
+        _lblPreviewMeta = mkLabel([NSString stringWithFormat:@"%d%% · Rõ %d%% · L%d T%d",
+            (int)roundf(_uiCfg.menuBarScale * 100), (int)roundf(_uiCfg.menuBarOpacity * 100),
+            (int)roundf(_uiCfg.menuBarLeftX), (int)roundf(_uiCfg.menuBarTopY)], 12, UIFontWeightMedium, kTintBlue);
+        _lblPreviewMeta.font = iosMonoDigits(12, UIFontWeightMedium);
+        [prevHdr addArrangedSubview:_lblPreviewMeta];
+        [prevCard addArrangedSubview:prevHdr];
+
+        _preview = [[SDVMenuBarPreviewView alloc] initWithFrame:CGRectZero];
+        [_preview.heightAnchor constraintEqualToConstant:68].active = YES;
+        [_preview updateWithConfig:_uiCfg];
+        [prevCard addArrangedSubview:_preview];
+
+        UIStackView *presetRow = mkHStack(6);
+        presetRow.distribution = UIStackViewDistributionFillEqually;
+        NSArray *presetNames = @[@"Gọn 75%", @"Chuẩn 100%", @"Lớn 135%", @"Rất lớn 175%"];
+        float presetVals[4] = {0.75f, 1.00f, 1.35f, 1.75f};
+        NSMutableArray *pBtns = [NSMutableArray array];
+        for (int i = 0; i < 4; i++) {
+            BOOL sel = fabsf(_uiCfg.menuBarScale - presetVals[i]) < 0.04f;
+            SDVAppleButton *pb = mkIOSButton(presetNames[i], nil, sel ? kTintBlue : kBgCardSubtle, sel ? UIColor.whiteColor : kInkPrimary, 12, UIEdgeInsetsMake(7, 4, 7, 4));
+            pb.layer.cornerRadius = 8.5;
+            pb.tag = 100 + i;
+            [pb addTarget:self action:@selector(applyPreset:) forControlEvents:UIControlEventTouchUpInside];
+            [presetRow addArrangedSubview:pb];
+            [pBtns addObject:pb];
+        }
+        _presetButtons = pBtns;
+        [prevCard addArrangedSubview:presetRow];
+        [_pane addArrangedSubview:mkGroupedCard(prevCard, UIEdgeInsetsMake(12, 14, 12, 14))];
+
+        [_pane addArrangedSubview:mkGroupedRows(@[
+            [self mkSliderRow:@"Kích thước Menu Bar" min:0.55f max:2.20f val:_uiCfg.menuBarScale valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.menuBarScale * 100)] tag:1],
+            [self mkSliderRow:@"Độ rõ / trong suốt" min:0.10f max:1.00f val:_uiCfg.menuBarOpacity valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.menuBarOpacity * 100)] tag:7],
+            [self mkSliderRow:@"Lề trái (tránh Dynamic Island)" min:8.0f max:240.0f val:_uiCfg.menuBarLeftX valText:[NSString stringWithFormat:@"%d px", (int)roundf(_uiCfg.menuBarLeftX)] tag:2],
+            [self mkSliderRow:@"Lề trên" min:4.0f max:160.0f val:_uiCfg.menuBarTopY valText:[NSString stringWithFormat:@"%d px", (int)roundf(_uiCfg.menuBarTopY)] tag:3],
+            [self mkSliderRow:@"Khoảng cách giữa các nút" min:2.0f max:22.0f val:_uiCfg.menuBarGap valText:[NSString stringWithFormat:@"%d px", (int)roundf(_uiCfg.menuBarGap)] tag:4]
+        ], 14)];
+
+        [_pane addArrangedSubview:mkSectionTitle(@"Nút hiển thị trên Menu Bar")];
+        [_pane addArrangedSubview:mkGroupedRows(@[
+            [self mkSettingsSwitchRow:@"Nút KEY (Bàn phím ảo)" icon:@"keyboard" color:kTintTeal on:_uiCfg.showKeyboardBtn tag:10],
+            [self mkSettingsSwitchRow:@"Nút MENU (Túi đồ / ESC)" icon:@"line.3.horizontal" color:kTintOrange on:_uiCfg.showMenuBtn tag:11],
+            [self mkSettingsSwitchRow:@"Nút MODS (Ngăn phím tắt)" icon:@"square.grid.2x2.fill" color:kTintIndigo on:_uiCfg.showHotkeyDrawerBtn tag:12]
+        ], 52)];
+
+    } else if (_uiSubTab == 1) {
+        [_pane addArrangedSubview:mkSectionTitle(@"Cụm nút hành động X · Y · A · B")];
+        [_pane addArrangedSubview:mkGroupedRows(@[
+            [self mkSliderRow:@"Kích thước nút X / Y / A / B" min:0.50f max:2.20f val:_uiCfg.abxyScale valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.abxyScale * 100)] tag:8],
+            [self mkSliderRow:@"Độ rõ / trong suốt (5%–100%)" min:0.05f max:1.00f val:_uiCfg.abxyOpacity valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.abxyOpacity * 100)] tag:9],
+            [self mkSliderRow:@"Khoảng cách giãn nút" min:0.60f max:1.80f val:_uiCfg.abxySpacing valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.abxySpacing * 100)] tag:10]
+        ], 14)];
+
+        [_pane addArrangedSubview:mkSectionTitle(@"Nút vai LT · RT")];
+        [_pane addArrangedSubview:mkGroupedRows(@[
+            [self mkSliderRow:@"Kích thước nút LT / RT" min:0.50f max:2.20f val:_uiCfg.trigScale valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.trigScale * 100)] tag:11],
+            [self mkSliderRow:@"Độ rõ / trong suốt (5%–100%)" min:0.05f max:1.00f val:_uiCfg.trigOpacity valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.trigOpacity * 100)] tag:12]
+        ], 14)];
+
+        [_pane addArrangedSubview:mkSectionTitle(@"Cần gạt Joystick & Chuột")];
+        UIStackView *mRow = mkHStack(10);
+        [mRow addArrangedSubview:mkLabel(@"Chế độ chuột", 13.5, UIFontWeightRegular, kInkPrimary)];
+        [mRow addArrangedSubview:[UIView new]];
+        UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"Chạm", @"Trackpad", @"Tắt"]];
+        seg.selectedSegmentIndex = _uiCfg.mouseMode;
+        [seg addTarget:self action:@selector(mouseModeChanged:) forControlEvents:UIControlEventValueChanged];
+        [mRow addArrangedSubview:seg];
+
+        [_pane addArrangedSubview:mkGroupedRows(@[
+            [self mkSliderRow:@"Kích thước Joystick" min:0.50f max:2.20f val:_uiCfg.joyScale valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.joyScale * 100)] tag:13],
+            [self mkSliderRow:@"Độ rõ / trong suốt Joystick" min:0.05f max:1.00f val:_uiCfg.joyOpacity valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.joyOpacity * 100)] tag:14],
+            [self mkSliderRow:@"Tỉ lệ chung toàn bộ tay cầm" min:0.50f max:2.00f val:_uiCfg.padScale valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.padScale * 100)] tag:5],
+            [self mkSettingsSwitchRow:@"Bố cục thuận tay trái" icon:@"hand.raised.fill" color:kTintPurple on:_uiCfg.leftHanded tag:13],
+            mRow
+        ], 14)];
+
+    } else {
+        [_pane addArrangedSubview:mkSectionTitle(@"Kích thước bảng SET & MODS")];
+        UIStackView *mPresets = mkHStack(8);
+        mPresets.distribution = UIStackViewDistributionFillEqually;
+        NSArray *mpTitles = @[@"Vừa (125%)", @"To rõ (155%)", @"Rất to (185%)"];
+        for (int i = 0; i < 3; i++) {
+            SDVAppleButton *b = mkIOSButton(mpTitles[i], nil, kBgCardSubtle, kInkPrimary, 12.5, UIEdgeInsetsMake(8, 6, 8, 6));
+            b.layer.cornerRadius = 9;
+            b.tag = 150 + i;
+            [b addTarget:self action:@selector(applyModalPreset:) forControlEvents:UIControlEventTouchUpInside];
+            [mPresets addArrangedSubview:b];
+        }
+        [_pane addArrangedSubview:mkGroupedRows(@[
+            [self mkSliderRow:@"Cỡ bảng Touch Settings (nút SET)" min:1.00f max:2.00f val:_uiCfg.modalScale valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.modalScale * 100)] tag:15],
+            [self mkSliderRow:@"Cỡ ngăn phím tắt MODS" min:0.80f max:2.00f val:_uiCfg.drawerScale valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.drawerScale * 100)] tag:16],
+            mPresets
+        ], 14)];
+
+        SDVAppleButton *resetBtn = mkIOSButton(@"Khôi phục mặc định toàn bộ giao diện", @"arrow.counterclockwise", kBgCard, kTintRed, 14, UIEdgeInsetsMake(12, 14, 12, 14));
+        resetBtn.layer.cornerRadius = 13;
+        [resetBtn addTarget:self action:@selector(resetUiConfig) forControlEvents:UIControlEventTouchUpInside];
+        [_pane addArrangedSubview:resetBtn];
+    }
+}
+
+-(void)uiSubTabChanged:(UISegmentedControl *)seg {
+    _uiSubTab = seg.selectedSegmentIndex;
+    [self renderAll:NO];
+}
+
+-(void)syncLiveLabels {
+    NSDictionary<NSNumber *, NSString *> *txt = @{
+        @1:  [NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.menuBarScale * 100)],
+        @2:  [NSString stringWithFormat:@"%d px", (int)roundf(_uiCfg.menuBarLeftX)],
+        @3:  [NSString stringWithFormat:@"%d px", (int)roundf(_uiCfg.menuBarTopY)],
+        @4:  [NSString stringWithFormat:@"%d px", (int)roundf(_uiCfg.menuBarGap)],
+        @5:  [NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.padScale * 100)],
+        @7:  [NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.menuBarOpacity * 100)],
+        @8:  [NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.abxyScale * 100)],
+        @9:  [NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.abxyOpacity * 100)],
+        @10: [NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.abxySpacing * 100)],
+        @11: [NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.trigScale * 100)],
+        @12: [NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.trigOpacity * 100)],
+        @13: [NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.joyScale * 100)],
+        @14: [NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.joyOpacity * 100)],
+        @15: [NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.modalScale * 100)],
+        @16: [NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.drawerScale * 100)]
+    };
+    for (NSNumber *k in txt) {
+        UILabel *l = _sliderLabels[k];
+        if (l) l.text = txt[k];
+    }
+    if (_lblPreviewMeta) {
+        _lblPreviewMeta.text = [NSString stringWithFormat:@"%d%% · Rõ %d%% · L%d T%d",
+            (int)roundf(_uiCfg.menuBarScale * 100), (int)roundf(_uiCfg.menuBarOpacity * 100),
+            (int)roundf(_uiCfg.menuBarLeftX), (int)roundf(_uiCfg.menuBarTopY)];
+    }
+    if (_preview) [_preview updateWithConfig:_uiCfg];
+}
+
+-(void)sliderChanged:(UISlider *)sl {
+    float q = roundf(sl.value * 20.0f) / 20.0f;
+    switch (sl.tag) {
+        case 1:  _uiCfg.menuBarScale   = sdvClampf(q, 0.55f, 2.20f); break;
+        case 2:  _uiCfg.menuBarLeftX   = roundf(sl.value); break;
+        case 3:  _uiCfg.menuBarTopY    = roundf(sl.value); break;
+        case 4:  _uiCfg.menuBarGap     = roundf(sl.value); break;
+        case 5:  _uiCfg.padScale       = sdvClampf(q, 0.50f, 2.00f); break;
+        case 7:  _uiCfg.menuBarOpacity = sdvClampf(q, 0.10f, 1.00f); break;
+        case 8:  _uiCfg.abxyScale      = sdvClampf(q, 0.50f, 2.20f); break;
+        case 9:  _uiCfg.abxyOpacity    = sdvClampf(q, 0.05f, 1.00f); break;
+        case 10: _uiCfg.abxySpacing    = sdvClampf(q, 0.60f, 1.80f); break;
+        case 11: _uiCfg.trigScale      = sdvClampf(q, 0.50f, 2.20f); break;
+        case 12: _uiCfg.trigOpacity    = sdvClampf(q, 0.05f, 1.00f); break;
+        case 13: _uiCfg.joyScale       = sdvClampf(q, 0.50f, 2.20f); break;
+        case 14: _uiCfg.joyOpacity     = sdvClampf(q, 0.05f, 1.00f); break;
+        case 15: _uiCfg.modalScale     = sdvClampf(q, 1.00f, 2.00f); break;
+        case 16: _uiCfg.drawerScale    = sdvClampf(q, 0.80f, 2.00f); break;
+    }
+    [self syncLiveLabels];
+    NSTimeInterval now = NSDate.date.timeIntervalSinceReferenceDate;
+    if (now - _lastLiveSave > 0.10) {
+        _lastLiveSave = now;
+        [_uiCfg saveToDocuments:_root.path];
+    }
+}
+
+-(void)sliderEnded:(UISlider *)sl {
+    [_uiCfg saveToDocuments:_root.path];
+}
+
+-(void)applyPreset:(UIButton *)btn {
+    float presetVals[4] = {0.75f, 1.00f, 1.35f, 1.75f};
+    NSInteger idx = btn.tag - 100;
+    if (idx < 0 || idx > 3) return;
+    _uiCfg.menuBarScale = presetVals[idx];
+    [_uiCfg saveToDocuments:_root.path];
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+    [self renderAll:NO];
+}
+
+-(void)applyModalPreset:(UIButton *)btn {
+    float vals[3] = {1.25f, 1.55f, 1.85f};
+    float dVals[3] = {1.15f, 1.35f, 1.65f};
+    NSInteger idx = btn.tag - 150;
+    if (idx < 0 || idx > 2) return;
+    _uiCfg.modalScale = vals[idx];
+    _uiCfg.drawerScale = dVals[idx];
+    [_uiCfg saveToDocuments:_root.path];
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+    [self renderAll:NO];
+}
+
+-(void)uiSwitchChanged:(UISwitch *)sw {
+    if (sw.tag == 20) {
+        [SDVRamMonitor.shared setHudEnabled:sw.isOn];
+        [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+        return;
+    }
+    if (sw.tag == 21) {
+        [SDVRamMonitor.shared savePerfConfig:1 trimLogs:sw.isOn toDocs:_root.path];
+        [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+        _message = sw.isOn
+            ? @"Đã bật giảm ghi log TRACE thừa xuống ổ đĩa."
+            : @"Đã tắt lọc log TRACE (ghi đầy đủ dòng TRACE vào engine-latest.log).";
+        _messageIsError = NO;
+        [self renderAll:NO];
+        return;
+    }
+    switch (sw.tag) {
+        case 10: _uiCfg.showKeyboardBtn = sw.isOn; break;
+        case 11: _uiCfg.showMenuBtn = sw.isOn; break;
+        case 12: _uiCfg.showHotkeyDrawerBtn = sw.isOn; break;
+        case 13: _uiCfg.leftHanded = sw.isOn; break;
+    }
+    [_uiCfg saveToDocuments:_root.path];
+    [self syncLiveLabels];
+}
+
+-(void)forceGcNowTapped {
+    [SDVRamMonitor.shared triggerManualGCInDocs:_root.path];
+    [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];
+    _message = @"Đã gửi lệnh Dọn RAM & nén bộ nhớ (Compacting GC).";
+    _messageIsError = NO;
+    [self renderAll:NO];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self refreshRamCardNow];
+    });
+}
+
+-(void)refreshRamCardNow {
+    if (!_ramHeadlineLbl || !_ramDetailLbl) return;
+    SDVRamSnapshot s = [SDVRamMonitor.shared sample];
+    UIColor *col = (s.usagePct >= 82.0) ? kTintRed : ((s.usagePct >= 65.0) ? kTintOrange : kTintGreen);
+    _ramHeadlineLbl.text = [NSString stringWithFormat:@"%@ / %@ (%.0f%%)", sdvFmtMemMB(s.usedBytes), sdvFmtMemMB(s.budgetBytes), s.usagePct];
+    _ramHeadlineLbl.textColor = col;
+    _ramDetailLbl.text = [NSString stringWithFormat:@"Dư trước Jetsam: %@ · Peak: %@ · Máy: %.1f GB · Nhiệt: %@",
+        sdvFmtMemMB(s.availBytes), sdvFmtMemMB(s.peakBytes), (double)s.deviceBytes / (1024.0 * 1024.0 * 1024.0), sdvThermalLabel(s.thermal)];
+    _ramBarFill.backgroundColor = col;
+    CGFloat trackW = _ramBarTrack.bounds.size.width;
+    if (trackW > 8) {
+        CGFloat frac = MAX(0.02, MIN(1.0, s.usagePct / 100.0));
+        _ramBarFillW.constant = trackW * frac;
+    }
+}
+
+-(void)resetRamPeakTapped {
+    [SDVRamMonitor.shared resetPeak];
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+    [self refreshRamCardNow];
+}
+
+-(void)resetRamHudPosTapped {
+    [SDVRamMonitor.shared resetHudOffset];
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+    _message = @"Đã đưa thanh đo RAM & FPS về giữa mép trên.";
+    _messageIsError = NO;
+    [self renderAll:NO];
+}
+
+-(void)mouseModeChanged:(UISegmentedControl *)seg {
+    _uiCfg.mouseMode = seg.selectedSegmentIndex;
+    [_uiCfg saveToDocuments:_root.path];
+}
+
+-(void)resetUiConfig {
+    [_uiCfg resetDefaults];
+    [_uiCfg saveToDocuments:_root.path];
+    _message = @"Đã khôi phục mặc định toàn bộ giao diện nút bấm.";
+    _messageIsError = NO;
+    [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];
+    [self renderAll:NO];
+}
+
+// ============================================================
+// TAB 3: CO-OP LAN / IP (iOS 14 - iOS 26+)
+// ============================================================
+-(void)renderCoopTab {
+    NSArray<NSDictionary *> *ifaces = sdvLocalIPv4Interfaces();
+
+    UIStackView *hdrBox = mkVStack(10);
+    UIStackView *hdrTop = mkHStack(10);
+    [hdrTop addArrangedSubview:mkSettingsIconBadge(@"wifi", kTintTeal, 32)];
+    UIStackView *ht = mkVStack(1);
+    [ht addArrangedSubview:mkLabel(@"Co-op LAN / IP trực tiếp", 15.5, UIFontWeightSemibold, kInkPrimary)];
+    [ht addArrangedSubview:mkLabel(@"Đã tích hợp bản vá Lidgren.Network & quyền Mạng cục bộ.", 12.5, UIFontWeightRegular, kInkSecondary)];
+    [hdrTop addArrangedSubview:ht];
+    [hdrTop addArrangedSubview:[UIView new]];
+    [hdrTop addArrangedSubview:mkBadgePill(@"UDP 24642", [kTintTeal colorWithAlphaComponent:0.14], kTintTeal, 11)];
+    [hdrBox addArrangedSubview:hdrTop];
+
+    UIStackView *btnRow = mkHStack(8);
+    SDVAppleButton *probeBtn = mkIOSButton(@"Kích hoạt & kiểm tra quyền LAN", @"antenna.radiowaves.left.and.right", kTintBlue, UIColor.whiteColor, 13, UIEdgeInsetsMake(9, 12, 9, 12));
+    [probeBtn addTarget:self action:@selector(runLanProbe) forControlEvents:UIControlEventTouchUpInside];
+    SDVAppleButton *refBtn = mkIOSButton(@"Cập nhật IP", @"arrow.clockwise", kBgCardSubtle, kInkPrimary, 13, UIEdgeInsetsMake(9, 12, 9, 12));
+    [refBtn addTarget:self action:@selector(refreshCoopTab) forControlEvents:UIControlEventTouchUpInside];
+    [btnRow addArrangedSubview:probeBtn];
+    [btnRow addArrangedSubview:refBtn];
+    [hdrBox addArrangedSubview:btnRow];
+    [_pane addArrangedSubview:mkGroupedCard(hdrBox, UIEdgeInsetsMake(13, 14, 13, 14))];
+
+    [_pane addArrangedSubview:mkSectionTitle(@"Địa chỉ IP thiết bị (dùng khi làm Host)")];
+    if (!ifaces.count) {
+        [_pane addArrangedSubview:mkGroupedCard(mkLabel(@"Chưa thấy IP Wi-Fi / VPN. Hãy kết nối Wi-Fi hoặc bật Tailscale / ZeroTier rồi bấm Cập nhật IP.", 13, UIFontWeightRegular, kInkSecondary), UIEdgeInsetsMake(12, 14, 12, 14))];
+    } else {
+        NSMutableArray<UIView *> *ipRows = [NSMutableArray array];
+        for (NSDictionary *info in ifaces) {
+            UIStackView *row = mkHStack(10);
+            UIStackView *left = mkVStack(1);
+            UILabel *ipLbl = mkLabel(info[@"ip"], 16, UIFontWeightSemibold, kInkPrimary);
+            ipLbl.font = iosMonoDigits(16, UIFontWeightSemibold);
+            [left addArrangedSubview:ipLbl];
+            [left addArrangedSubview:mkLabel([NSString stringWithFormat:@"%@  (%@)", info[@"kind"], info[@"iface"]], 12, UIFontWeightRegular, kInkSecondary)];
+            [row addArrangedSubview:left];
+            [row addArrangedSubview:[UIView new]];
+            SDVAppleButton *cp = mkIOSButton(@"Chép IP", @"doc.on.doc", [kTintBlue colorWithAlphaComponent:0.13], kTintBlue, 12.5, UIEdgeInsetsMake(7, 11, 7, 11));
+            cp.accessibilityValue = info[@"ip"];
+            [cp addTarget:self action:@selector(copyCoopIP:) forControlEvents:UIControlEventTouchUpInside];
+            [row addArrangedSubview:cp];
+            [ipRows addObject:row];
+        }
+        [_pane addArrangedSubview:mkGroupedRows(ipRows, 14)];
+    }
+
+    [_pane addArrangedSubview:mkSectionTitle(@"Hướng dẫn kết nối")];
+    UILabel *guide = mkLabel(@"1. Cùng Wi-Fi (LAN): Chủ phòng vào Co-op → Tạo phòng (Host) và gửi IP Wi-Fi ở trên. Máy kia vào Co-op → Tham gia LAN → bấm KEY để gõ IP → OK.\n2. Online khác mạng: Cả 2 máy cài Tailscale hoặc ZeroTier, vào chung 1 mạng ảo rồi nhập IP mạng ảo (100.x.x.x).\nLưu ý: Các máy cần trùng bản 1.6.15, trùng mod gameplay và farm máy Host phải có sẵn nhà phụ (Cabin).", 13, UIFontWeightRegular, kInkSecondary);
+    [_pane addArrangedSubview:mkGroupedCard(guide, UIEdgeInsetsMake(12, 14, 12, 14))];
+}
+
+-(void)refreshCoopTab {
+    _message = @"Đã cập nhật danh sách IP mạng.";
+    _messageIsError = NO;
+    [self renderAll:NO];
+}
+
+-(void)copyCoopIP:(UIButton *)btn {
+    NSString *ip = btn.accessibilityValue;
+    if (!ip.length) return;
+    UIPasteboard.generalPasteboard.string = ip;
+    [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];
+    _message = [NSString stringWithFormat:@"Đã sao chép IP %@ (cổng UDP 24642).", ip];
+    _messageIsError = NO;
+    [self renderAll:NO];
+}
+
+-(void)runLanProbe {
+    NSString *res = sdvProbeLocalNetwork();
+    _message = res;
+    _messageIsError = [res containsString:@"chặn"] || [res containsString:@"Lỗi"];
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
+    [self renderAll:NO];
+}
+
+// ============================================================
+// TAB 4: HƯỚNG DẪN & CREDIT / ỦNG HỘ NHÀ PHÁT HÀNH
+// ============================================================
+-(UIView *)mkGuideStep:(NSString *)num title:(NSString *)title body:(NSString *)body color:(UIColor *)col {
+    UIStackView *row = mkHStack(11);
+    row.alignment = UIStackViewAlignmentTop;
+    UILabel *badge = mkLabel(num, 13, UIFontWeightBold, UIColor.whiteColor);
+    badge.textAlignment = NSTextAlignmentCenter;
+    badge.backgroundColor = col;
+    badge.layer.cornerRadius = 12;
+    badge.clipsToBounds = YES;
+    badge.translatesAutoresizingMaskIntoConstraints = NO;
+    [badge.widthAnchor constraintEqualToConstant:24].active = YES;
+    [badge.heightAnchor constraintEqualToConstant:24].active = YES;
+
+    UIStackView *txt = mkVStack(2);
+    [txt addArrangedSubview:mkLabel(title, 13.5, UIFontWeightSemibold, kInkPrimary)];
+    [txt addArrangedSubview:mkLabel(body, 12.5, UIFontWeightRegular, kInkSecondary)];
+    [row addArrangedSubview:badge];
+    [row addArrangedSubview:txt];
+    return row;
+}
+
+-(UIView *)mkCreditRow:(NSString *)role name:(NSString *)name detail:(NSString *)detail url:(NSString *)urlStr urlLabel:(NSString *)urlLabel {
+    UIStackView *row = mkHStack(10);
+    UIStackView *left = mkVStack(2);
+    [left addArrangedSubview:mkLabel(role, 10.5, UIFontWeightSemibold, kTintBlue)];
+    [left addArrangedSubview:mkLabel(name, 14, UIFontWeightSemibold, kInkPrimary)];
+    if (detail.length) [left addArrangedSubview:mkLabel(detail, 12.5, UIFontWeightRegular, kInkSecondary)];
+    [row addArrangedSubview:left];
+    if (urlStr.length) {
+        [row addArrangedSubview:[UIView new]];
+        SDVAppleButton *btn = mkIOSButton(urlLabel ?: @"Mở", @"arrow.up.right", [kTintBlue colorWithAlphaComponent:0.12], kTintBlue, 12, UIEdgeInsetsMake(6, 10, 6, 10));
+        btn.accessibilityValue = urlStr;
+        [btn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        [btn addTarget:self action:@selector(openExternalLink:) forControlEvents:UIControlEventTouchUpInside];
+        [row addArrangedSubview:btn];
+    }
+    return row;
+}
+
+-(void)renderGuideCreditTab {
+    NSString *appNm = sdvAppDisplayName();
+
+    UIStackView *topRow = mkHStack(10);
+    [topRow addArrangedSubview:mkSettingsIconBadge(@"book.fill", kTintOrange, 34)];
+    UIStackView *topTxt = mkVStack(1);
+    [topTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"%@ v6", appNm], 15.5, UIFontWeightSemibold, kInkPrimary)];
+    [topTxt addArrangedSubview:mkLabel(@"Đồ họa 2.0× · SMAPI 4.5.2 · Giao diện iOS gốc (iOS 14–26+)", 12, UIFontWeightRegular, kInkSecondary)];
+    SDVAppleButton *jumpBtn = mkIOSButton(@"Credit", @"heart.fill", [kTintPink colorWithAlphaComponent:0.13], kTintPink, 12.5, UIEdgeInsetsMake(7, 11, 7, 11));
+    [jumpBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [jumpBtn addTarget:self action:@selector(scrollToCreditCard) forControlEvents:UIControlEventTouchUpInside];
+    [topRow addArrangedSubview:topTxt];
+    [topRow addArrangedSubview:jumpBtn];
+    [_pane addArrangedSubview:mkGroupedCard(topRow, UIEdgeInsetsMake(12, 14, 12, 14))];
+
+    [_pane addArrangedSubview:mkSectionTitle(@"Hướng dẫn cài Mod (5 bước)")];
+    [_pane addArrangedSubview:mkGroupedRows(@[
+        [self mkGuideStep:@"1" title:@"Tải file mod về iPhone" body:@"Tải tệp mod .zip hoặc .xnb vào ứng dụng Tệp (Files). Giữ nguyên tệp .zip, không cần giải nén trước." color:kTintBlue],
+        [self mkGuideStep:@"2" title:@"Mở Mod Garden ngay trong game" body:[NSString stringWithFormat:@"Mở %@ → chạm 3 ngón tay 2 lần lên màn hình bất kỳ lúc nào.", appNm] color:kTintGreen],
+        [self mkGuideStep:@"3" title:@"Chọn 1 hoặc nhiều file mod" body:@"Tại tab Cài Mod, bấm Chọn tệp Mod rồi chọn nhiều gói một lượt (có thể chọn kèm bản Việt hóa i18n)." color:kTintOrange],
+        [self mkGuideStep:@"4" title:@"Kiểm tra & Cài đặt" body:@"Mod Garden tự kiểm tra phụ thuộc, tránh trùng thư mục cũ và lưu lịch sử để Hoàn tác bất cứ lúc nào." color:kTintPurple],
+        [self mkGuideStep:@"5" title:@"Mở lại game & quản lý" body:@"Vuốt tắt hẳn ứng dụng rồi mở lại để SMAPI nạp mod mới. Quản lý Bật/Tắt/Xóa tại tab Thư viện." color:kTintTeal]
+    ], 48)];
+
+    [_pane addArrangedSubview:mkSectionTitle(@"Lưu ý & Tương thích iOS 14 – iOS 26+")];
+    UILabel *tipsLbl = mkLabel(@"• Chạy thuần Mono Interpreter (không cần JIT), tương thích hoàn toàn với iOS 14 đến iOS 26+ (kể cả thiết bị có TXM).\n• Khi cập nhật bản IPA mới: chỉ cần cài đè cùng Bundle ID để giữ nguyên toàn bộ save và mod đã cài.\n• Với các mod lớn như Stardew Valley Expanded (SVE), nhớ cài kèm Content Patcher và Farm Type Manager.", 13, UIFontWeightRegular, kInkSecondary);
+    [_pane addArrangedSubview:mkGroupedCard(tipsLbl, UIEdgeInsetsMake(12, 14, 12, 14))];
+
+    [_pane addArrangedSubview:mkSectionTitle(@"Credit & Ghi nhận đóng góp")];
+    _creditCard = mkGroupedRows(@[
+        [self mkCreditRow:@"GAME GỐC — NHÀ PHÁT TRIỂN" name:@"ConcernedApe (Eric Barone)" detail:@"Tác giả toàn bộ trò chơi Stardew Valley. Mọi bản quyền thuộc về ConcernedApe LLC." url:@"https://www.stardewvalley.net" urlLabel:@"Web"],
+        [self mkCreditRow:@"NỀN TẢNG iOS PORT (MIT)" name:@"DeadAKJ — SDViosport" detail:@"Mã nguồn host .NET 8 iOS, MonoGame, tích hợp SMAPI và tay cầm cảm ứng SDViOSTouchControls." url:@"https://github.com/DeadAKJ/SDViosport" urlLabel:@"GitHub"],
+        [self mkCreditRow:@"NỀN TẢNG MODDING" name:@"SMAPI — Pathoschild & Cộng đồng" detail:@"Stardew Modding API cùng các tác giả mod và nhóm Việt hóa cộng đồng." url:@"https://smapi.io" urlLabel:@"smapi.io"],
+        [self mkCreditRow:@"TRÌNH QUẢN LÝ TRONG GAME" name:@"Mod Garden iOS (v6 Native Edition)" detail:@"Giao diện iOS chuẩn Apple, khóa đồ họa 2.0× tối ưu, theo dõi RAM/Jetsam thời gian thực, tối ưu Menu lag và bản vá Lidgren Co-op." url:nil urlLabel:nil]
+    ], 14);
+    [_pane addArrangedSubview:_creditCard];
+
+    [_pane addArrangedSubview:mkSectionTitle(@"Ủng hộ nhà phát hành")];
+    UIStackView *supBox = mkVStack(10);
+    UIStackView *supHdr = mkHStack(10);
+    [supHdr addArrangedSubview:mkSettingsIconBadge(@"heart.fill", kTintPink, 28)];
+    [supHdr addArrangedSubview:mkLabel(@"Hãy mua game bản quyền để ủng hộ NPH!", 14.5, UIFontWeightSemibold, kInkPrimary)];
+    [supBox addArrangedSubview:supHdr];
+    [supBox addArrangedSubview:mkLabel(@"Stardew Valley là tác phẩm tâm huyết của nhà phát triển độc lập ConcernedApe. Nếu yêu thích trò chơi, hãy mua bản quyền chính thức trên App Store hoặc Steam để ủng hộ tác giả nhé!", 13, UIFontWeightRegular, kInkSecondary)];
+
+    UIStackView *storeRow = mkHStack(8);
+    storeRow.distribution = UIStackViewDistributionFillEqually;
+    SDVAppleButton *appStoreBtn = mkIOSButton(@"App Store (iOS)", @"bag.fill", kTintBlue, UIColor.whiteColor, 13.5, UIEdgeInsetsMake(10, 10, 10, 10));
+    appStoreBtn.accessibilityValue = @"https://apps.apple.com/app/id1406710800";
+    [appStoreBtn addTarget:self action:@selector(openExternalLink:) forControlEvents:UIControlEventTouchUpInside];
+    SDVAppleButton *steamBtn = mkIOSButton(@"Steam (PC)", @"desktopcomputer", kBgCardSubtle, kInkPrimary, 13.5, UIEdgeInsetsMake(10, 10, 10, 10));
+    steamBtn.accessibilityValue = @"https://store.steampowered.com/app/413150/Stardew_Valley/";
+    [steamBtn addTarget:self action:@selector(openExternalLink:) forControlEvents:UIControlEventTouchUpInside];
+    [storeRow addArrangedSubview:appStoreBtn];
+    [storeRow addArrangedSubview:steamBtn];
+    [supBox addArrangedSubview:storeRow];
+    [_pane addArrangedSubview:mkGroupedCard(supBox, UIEdgeInsetsMake(13, 14, 13, 14))];
+}
+
+-(void)scrollToCreditCard {
+    if (!_creditCard) return;
+    [_scroll layoutIfNeeded];
+    CGRect r = [_creditCard convertRect:_creditCard.bounds toView:_scroll];
+    CGFloat maxY = MAX(0, _scroll.contentSize.height - _scroll.bounds.size.height);
+    CGFloat targetY = MIN(MAX(0, r.origin.y - 10), maxY);
+    [_scroll setContentOffset:CGPointMake(0, targetY) animated:YES];
+}
+
+-(void)openExternalLink:(UIButton *)btn {
+    NSString *s = btn.accessibilityValue;
+    if (!s.length) return;
+    NSURL *u = [NSURL URLWithString:s];
+    if (u) {
+        [UIApplication.sharedApplication openURL:u options:@{} completionHandler:nil];
+    }
+    UIPasteboard.generalPasteboard.string = s;
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+    _message = [NSString stringWithFormat:@"Đã mở và sao chép liên kết: %@", s];
+    _messageIsError = NO;
+    [self renderAll:NO];
+}
+
+#ifdef GARDEN_IN_GAME
+-(void)enterLiveMenuBarMode {
+    if (_veil) return;
+    [_uiCfg saveToDocuments:_root.path];
+    void (^cb)(void) = self.onRequestLiveMenuBarMode;
+    void (^closeCb)(void) = self.onRequestClose;
+    if (closeCb) {
+        closeCb();
+        if (cb) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.18 * NSEC_PER_SEC)), dispatch_get_main_queue(), cb);
+        return;
+    }
+    if (cb) cb();
+}
+#endif
+
+// ---- Mod Library Actions ----
+-(void)toggleModSwitch:(UISwitch *)sw {
+    NSInteger idx = sw.tag;
+    if (idx < 0 || idx >= (NSInteger)_catalog.count) return;
+    NSDictionary *m = _catalog[idx];
+    NSString *topFolder = m[@"topFolder"];
+    NSString *modName = m[@"name"];
+    BOOL targetOn = sw.isOn;
+    [self work:targetOn ? @"Đang bật mod…" : @"Đang tắt mod…" action:^{
+        [self access:YES block:^(NSURL *r) {
+            toggleModEnabled(r.path, topFolder);
+            [self scan:r];
+        }];
+    } done:^{
+        self->_plan = nil;
+        self->_message = [NSString stringWithFormat:@"Đã %@ %@. Mở lại game để áp dụng.", targetOn ? @"bật" : @"tắt", modName];
+        self->_messageIsError = NO;
+        [self renderAll:NO];
+    }];
+}
+
+-(void)askDeleteMod:(UIButton *)btn {
+    NSInteger idx = btn.tag;
+    if (idx < 0 || idx >= (NSInteger)_catalog.count) return;
+    NSDictionary *m = _catalog[idx];
+    NSString *topFolder = m[@"topFolder"];
+    NSString *modName = m[@"name"];
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Xóa mod này?" message:[NSString stringWithFormat:@"Xóa sạch %@ khỏi Mods. Bạn có thể cài lại bất kỳ lúc nào.", modName] preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"Giữ lại" style:UIAlertActionStyleCancel handler:nil]];
+    [a addAction:[UIAlertAction actionWithTitle:@"Xóa" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *ac) {
+        [self work:@"Đang xóa mod…" action:^{
+            [self access:YES block:^(NSURL *r) {
+                deleteModFolder(r.path, topFolder);
+                [self scan:r];
+            }];
+        } done:^{
+            self->_plan = nil;
+            [self->_stagedFiles removeAllObjects];
+            self->_message = [NSString stringWithFormat:@"Đã xóa sạch %@.", modName];
+            self->_messageIsError = NO;
+            [self renderAll:NO];
+        }];
+    }]];
+    [self presentSafely:a];
+}
+
+// ---- Core Work / Storage / Multi-File Picker / Batch Install Engine ----
+-(void)alert:(NSString *)title text:(NSString *)s {
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:title message:s preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentSafely:a];
+}
+
+-(void)work:(NSString *)title action:(void(^)(void))fn done:(void(^)(void))done {
+    if (_veil) return;
+    _veil = [UIView new];
+    _veil.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.35];
+    [self.view addSubview:_veil];
+    pinAll(_veil, self.view, 0);
+
+    UIVisualEffectView *hud = mkGlassCard(UIBlurEffectStyleSystemThickMaterial, 18);
+    hud.translatesAutoresizingMaskIntoConstraints = NO;
+    UIStackView *s = mkVStack(12);
+    s.alignment = UIStackViewAlignmentCenter;
+    UIActivityIndicatorView *spin = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
+    [spin startAnimating];
+    [s addArrangedSubview:spin];
+    [s addArrangedSubview:mkLabel(title, 14, UIFontWeightSemibold, kInkPrimary)];
+    [hud.contentView addSubview:s];
+    pinInsets(s, hud.contentView, UIEdgeInsetsMake(20, 26, 20, 26));
+    [_veil addSubview:hud];
+    [NSLayoutConstraint activateConstraints:@[
+        [hud.centerXAnchor constraintEqualToAnchor:_veil.centerXAnchor],
+        [hud.centerYAnchor constraintEqualToAnchor:_veil.centerYAnchor]
+    ]];
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        @autoreleasepool {
+            NSString *error = nil;
+            @try { fn(); }
+            @catch (NSException *e) { error = e.reason ?: @"Không hoàn thành được thao tác."; }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self->_veil removeFromSuperview];
+                self->_veil = nil;
+                [self renderAll:NO];
+                if (error) [self alert:@"Mod Garden" text:error];
+                else if (done) done();
+            });
+        }
+    });
+}
+
+-(void)access:(BOOL)write block:(void(^)(NSURL *))fn {
+#ifdef GARDEN_IN_GAME
+    NSURL *local = [fm() URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
+    if (!dir(join(local.path, @"Content")) || !dir(join(local.path, @"Mods"))) {
+        fail(@"Game đang giải nén dữ liệu. Đợi đến màn hình chính rồi thử lại.");
+    }
+    fn(local);
+    return;
+#endif
+    NSURL *u = _root;
+    if (!u) fail(@"Chọn lại thư mục game.");
+    BOOL scoped = [u startAccessingSecurityScopedResource];
+    @try {
+        NSFileCoordinator *c = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
+        NSError *e = nil;
+        __block NSException *problem = nil;
+        void (^accessor)(NSURL *) = ^(NSURL *r) {
+            @try {
+                if (!childScope(r.path) && (!dir(inside(r.path, @"Content")) || !dir(inside(r.path, @"Mods")) || ![fm() fileExistsAtPath:inside(r.path, @"Stardew Valley.dll")])) {
+                    fail(@"Hãy chọn thư mục chứa Mods, Content và Stardew Valley.dll.");
+                }
+                NSError *readError = nil;
+                if (![fm() contentsOfDirectoryAtPath:r.path error:&readError]) fail(readError.localizedDescription ?: @"iOS chưa cấp quyền đọc thư mục.");
+                fn(r);
+            } @catch (NSException *ex) { problem = ex; }
+        };
+        if (write) [c coordinateWritingItemAtURL:u options:NSFileCoordinatorWritingForMerging error:&e byAccessor:accessor];
+        else [c coordinateReadingItemAtURL:u options:0 error:&e byAccessor:accessor];
+        if (problem) @throw problem;
+        if (e) fail(e.localizedDescription);
+    } @finally {
+        if (scoped) [u stopAccessingSecurityScopedResource];
+    }
+}
+
+-(void)scan:(NSURL *)r {
+    _library = installed(r.path);
+    _catalog = modCatalog(r.path);
+    NSString *h = latest(r);
+    _last = h ? journal(h)[@"name"] : nil;
+}
+
+-(void)refresh {
+    [self work:@"Đang đọc dữ liệu game…" action:^{
+        [self access:NO block:^(NSURL *r) {
+            [self scan:r];
+#ifndef GARDEN_IN_GAME
+            NSData *b = [self->_root bookmarkDataWithOptions:NSURLBookmarkCreationMinimalBookmark includingResourceValuesForKeys:nil relativeToURL:nil error:nil];
+            if (b) [NSUserDefaults.standardUserDefaults setObject:b forKey:@"gameFolder"];
+#endif
+        }];
+    } done:nil];
+}
+
+-(void)folder { _choosingFolder = YES; _importingGameData = NO; _appendPick = NO; [self picker:@[UTTypeFolder] copy:NO multi:NO]; }
+-(void)package { _choosingFolder = NO; _importingGameData = NO; _appendPick = NO; [self picker:@[UTTypeZIP, UTTypeData] copy:YES multi:YES]; }
+-(void)addMorePackages { _choosingFolder = NO; _importingGameData = NO; _appendPick = YES; [self picker:@[UTTypeZIP, UTTypeData] copy:YES multi:YES]; }
+-(void)importGameDataTapped { _choosingFolder = NO; _importingGameData = YES; _appendPick = NO; [self picker:@[UTTypeZIP] copy:YES multi:NO]; }
+
+-(void)recheckGameData {
+    syncBundledLidgren(_root.path);
+    syncBundledSmapi(_root.path);
+    NSDictionary *st = gameDataStatus(_root.path);
+    if ([st[@"ready"] boolValue]) {
+        [self refresh];
+        _message = @"Đã tìm thấy đầy đủ dữ liệu game! Vuốt tắt hẳn app rồi mở lại để vào Stardew Valley.";
+        _messageIsError = NO;
+        [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];
+    } else {
+        NSMutableArray *miss = [NSMutableArray array];
+        if (![st[@"hasSdvDll"] boolValue]) [miss addObject:@"Stardew Valley.dll"];
+        if (![st[@"hasContent"] boolValue]) [miss addObject:@"thư mục Content/"];
+        _message = [NSString stringWithFormat:@"Vẫn còn thiếu: %@. Hãy nhập gói .ZIP hoặc chép vào Tệp → Trên iPhone → %@.", [miss componentsJoinedByString:@", "], sdvAppDisplayName()];
+        _messageIsError = YES;
+        [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
+        [self renderAll:NO];
+    }
+}
+
+-(void)picker:(NSArray *)types copy:(BOOL)copy multi:(BOOL)multi {
+    UIDocumentPickerViewController *p = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types asCopy:copy];
+    p.allowsMultipleSelection = multi;
+    p.modalPresentationStyle = UIModalPresentationFormSheet;
+    p.delegate = self;
+    [self presentSafely:p];
+}
+
+-(void)documentPicker:(UIDocumentPickerViewController *)picker didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    if (!urls.count) return;
+    NSArray<NSURL *> *picked = [urls copy];
+    if (picker.presentingViewController && !picker.isBeingDismissed) {
+        [picker dismissViewControllerAnimated:YES completion:^{ [self handlePickedURLs:picked]; }];
+    } else if (picker.isBeingDismissed && picker.transitionCoordinator && [picker.transitionCoordinator animateAlongsideTransition:nil completion:^(id<UIViewControllerTransitionCoordinatorContext> ctx) { [self handlePickedURLs:picked]; }]) {
+        return;
+    } else {
+        [self handlePickedURLs:picked];
+    }
+}
+
+-(void)handlePickedURLs:(NSArray<NSURL *> *)urls {
+    _message = nil;
+    if (_choosingFolder) {
+        _root = urls.firstObject; _library = nil; _last = nil; [self refresh]; return;
+    }
+    if (_importingGameData) {
+        _importingGameData = NO;
+        NSURL *zipUrl = urls.firstObject;
+        __block NSUInteger extracted = 0;
+        [self work:@"Đang giải nén dữ liệu game PC… (chờ 20–40 giây)" action:^{
+            @try {
+                extracted = importGameDataZip(zipUrl, self->_root.path);
+            } @finally {
+                if ([zipUrl.path containsString:@"/tmp/"] || [zipUrl.path containsString:@"/Inbox/"]) {
+                    [fm() removeItemAtURL:zipUrl error:nil];
+                }
+            }
+            if ([gameDataStatus(self->_root.path)[@"ready"] boolValue]) {
+                [self scan:self->_root];
+            }
+        } done:^{
+            BOOL ready = [gameDataStatus(self->_root.path)[@"ready"] boolValue];
+            self->_message = ready
+                ? [NSString stringWithFormat:@"Đã nhập xong %lu tệp dữ liệu game! Vuốt tắt hẳn app rồi mở lại để vào Stardew Valley.", (unsigned long)extracted]
+                : [NSString stringWithFormat:@"Đã giải nén %lu tệp. Kiểm tra mục còn thiếu bên dưới.", (unsigned long)extracted];
+            self->_messageIsError = NO;
+            [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];
+            [self renderAll:YES];
+        }];
+        return;
+    }
+    _tab = 0;
+    BOOL append = _appendPick;
+    if (!append) {
+        _plan = nil;
+        [_stagedFiles removeAllObjects];
+        _nextPkgIdx = 0;
+        _prefs = @[];
+        _translations = [NSMutableDictionary dictionary];
+    }
+    NSString *msg = (urls.count > 1)
+        ? [NSString stringWithFormat:@"Đang giải nén %lu gói mod…", (unsigned long)urls.count]
+        : @"Đang giải nén & kiểm tra gói…";
+    [self work:msg action:^{
+        if (!append) removeItem(self->_stage);
+        mkdirs(self->_stage);
+        for (NSURL *u in urls) {
+            NSString *sub = join(self->_stage, [NSString stringWithFormat:@"pkg_%03ld", (long)self->_nextPkgIdx++]);
+            unpack(u, sub);
+            [self->_stagedFiles addObject:u.lastPathComponent ?: @"mod.zip"];
+        }
+    } done:^{
+        [self prepare];
+    }];
+}
+
+-(void)prepare {
+    __block NSDictionary *p = nil;
+    [self work:@"Đang đối chiếu với game…" action:^{
+        [self access:NO block:^(NSURL *r) {
+            p = plan(r.path, self->_stage, self->_prefs, self->_translations);
+        }];
+    } done:^{
+        if (p[@"translationOwner"] != NSNull.null) {
+            NSString *owner = p[@"translationOwner"];
+            NSDictionary *combined = p[@"combinedLibrary"] ?: self->_library;
+            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Chọn mod nhận bản dịch" message:owner.length ? owner : @"Gói chỉ chứa i18n. Chọn đúng mod gốc cho bản dịch này." preferredStyle:UIAlertControllerStyleAlert];
+            for (NSString *key in [combined.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+                NSDictionary *m = combined[key][@"manifest"];
+                [a addAction:[UIAlertAction actionWithTitle:field(m, @"Name").length ? field(m, @"Name") : key style:UIAlertActionStyleDefault handler:^(UIAlertAction *ac) {
+                    self->_translations[owner] = key;
+                    [self prepare];
+                }]];
+            }
+            [a addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentSafely:a];
+        } else if ([p[@"choices"] count]) {
+            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Chọn thư mục XNB" message:@"Có nhiều tệp trùng tên. Với ảnh hội thoại, chọn Portraits. Với nhân vật đi lại, chọn Characters." preferredStyle:UIAlertControllerStyleAlert];
+            for (NSString *c in p[@"choices"]) {
+                [a addAction:[UIAlertAction actionWithTitle:c style:UIAlertActionStyleDefault handler:^(UIAlertAction *ac) {
+                    self->_prefs = [@[c] arrayByAddingObjectsFromArray:self->_prefs];
+                    [self prepare];
+                }]];
+            }
+            [a addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentSafely:a];
+        } else {
+            self->_plan = p;
+            [self renderAll:YES];
+        }
+    }];
+}
+
+-(void)paths {
+    UIViewController *vc = [UIViewController new];
+    vc.title = @"Tệp sẽ cài";
+    UITextView *text = [UITextView new];
+    text.editable = NO;
+    text.backgroundColor = kBgCanvas;
+    text.textColor = kInkPrimary;
+    text.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
+    text.textContainerInset = UIEdgeInsetsMake(12, 14, 12, 14);
+    text.text = [[[_plan[@"map"] allKeys] sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@"\n"];
+    vc.view = text;
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+    nav.modalPresentationStyle = UIModalPresentationFormSheet;
+    vc.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"Đóng" style:UIBarButtonItemStyleDone target:self action:@selector(closeSheet)];
+    [self presentSafely:nav];
+}
+
+-(void)closeSheet { [self dismissViewControllerAnimated:YES completion:nil]; }
+
+#ifdef GARDEN_IN_GAME
+-(void)closeManager {
+    if (_veil) return;
+    [_uiCfg saveToDocuments:_root.path];
+    if (self.onRequestClose) { self.onRequestClose(); return; }
+    UIViewController *presenter = self.presentingViewController ?: self.navigationController.presentingViewController;
+    if (presenter) [presenter dismissViewControllerAnimated:YES completion:nil];
+    else [self dismissViewControllerAnimated:YES completion:nil];
+}
+#endif
+
+-(void)cancelPlan {
+    _plan = nil;
+    [_stagedFiles removeAllObjects];
+    _nextPkgIdx = 0;
+    [fm() removeItemAtPath:_stage error:nil];
+    [self renderAll:NO];
+}
+
+-(void)apply {
+    NSString *batchLabel = (_stagedFiles.count == 1)
+        ? _stagedFiles.firstObject
+        : [NSString stringWithFormat:@"%lu gói (%@…)", (unsigned long)_stagedFiles.count, _stagedFiles.firstObject ?: @"Mods"];
+    __block NSUInteger written = 0;
+    [self work:@"Đang sao lưu và cài các gói mod…" action:^{
+        [self access:YES block:^(NSURL *r) {
+            NSDictionary *p = plan(r.path, self->_stage, self->_prefs, self->_translations);
+            written = installBatch(r, self->_stage, p[@"map"], p[@"obsoleteDisabled"], batchLabel);
+            self->_plan = nil;
+            [self->_stagedFiles removeAllObjects];
+            self->_nextPkgIdx = 0;
+            [fm() removeItemAtPath:self->_stage error:nil];
+            [self scan:r];
+        }];
+    } done:^{
+        self->_message = (written > 0)
+            ? [NSString stringWithFormat:@"Đã cài xong %@ (%lu tệp)! Mở lại %@ để nạp mod.", batchLabel, (unsigned long)written, sdvAppDisplayName()]
+            : [NSString stringWithFormat:@"%@ đã giống hệt bản hiện có trong game.", batchLabel];
+        self->_messageIsError = NO;
+        [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];
+        [self renderAll:YES];
+    }];
+}
+
+-(void)askUndo {
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Hoàn tác lần cài gần nhất?" message:_last preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"Giữ nguyên" style:UIAlertActionStyleCancel handler:nil]];
+    [a addAction:[UIAlertAction actionWithTitle:@"Hoàn tác" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *ac) { [self runUndo]; }]];
+    [self presentSafely:a];
+}
+
+-(void)runUndo {
+    __block NSString *doneName = nil;
+    [self work:@"Đang khôi phục bản sao lưu…" action:^{
+        [self access:YES block:^(NSURL *r) {
+            NSString *h = latest(r);
+            if (h) {
+                doneName = journal(h)[@"name"];
+                restore(r, h);
+            }
+            [self scan:r];
+        }];
+    } done:^{
+        self->_message = [NSString stringWithFormat:@"Đã hoàn tác %@.", doneName ?: @"gói mod"];
+        self->_messageIsError = NO;
+        [self renderAll:NO];
+    }];
+}
+@end
+
+#ifndef GARDEN_IN_GAME
+@interface App : UIResponder <UIApplicationDelegate>
+@property(strong) UIWindow *window;
+@end
+@implementation App
+-(BOOL)application:(UIApplication *)a didFinishLaunchingWithOptions:(NSDictionary *)o {
+    UIWindowScene *ws = nil;
+    for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+        if ([s isKindOfClass:UIWindowScene.class]) { ws = (UIWindowScene *)s; break; }
+    }
+    self.window = ws ? [[UIWindow alloc] initWithWindowScene:ws] : [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, 812, 375)];
+    self.window.rootViewController = [Home new];
+    [self.window makeKeyAndVisible];
+    return YES;
+}
+@end
+int main(int argc, char *argv[]) { @autoreleasepool { return UIApplicationMain(argc, argv, nil, NSStringFromClass(App.class)); } }
+#endif

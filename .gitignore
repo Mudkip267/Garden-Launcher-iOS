@@ -1,0 +1,39 @@
+# Compiled & packaged outputs
+*.ipa
+*.building
+*.dylib
+*.o
+*.a
+*.framework/
+build/
+dist/
+out/
+
+# Copyrighted game files & third-party mod archives (NEVER commit!)
+*.xnb
+*.xwb
+*.xgs
+*.xsb
+*.dll
+*.pdb
+*.exe
+*.zip
+*.rar
+*.7z
+Content/
+BundledGame/
+BundledCompatibility/
+Stardew Valley*/
+SVE-iOS/
+Mods/
+
+# OS & Editor clutter
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+.vscode/
+.idea/
+__pycache__/
+*.pyc

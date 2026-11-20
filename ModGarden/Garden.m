@@ -367,11 +367,6 @@ static BOOL isHiddenRelPath(NSString *rel) {
     }
     return NO;
 }
-static NSString *formatBytes(unsigned long long bytes) {
-    if (bytes < 1024ULL) return [NSString stringWithFormat:@"%llu B", bytes];
-    if (bytes < 1024ULL * 1024ULL) return [NSString stringWithFormat:@"%.1f KB", bytes / 1024.0];
-    return [NSString stringWithFormat:@"%.1f MB", bytes / (1024.0 * 1024.0)];
-}
 
 // Active mods indexed by lowercase UniqueID (never crashes if a duplicate ID exists on disk)
 static NSDictionary *installed(NSString *root) {

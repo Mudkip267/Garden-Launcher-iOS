@@ -54,15 +54,13 @@ GardenLauncher-iOS/
 │   ├── main.m                    # Màn hình chính Split-View (Mod, Co-op, UI, Hiệu năng/RAM)
 │   ├── RamMonitor.m              # Pill đo RAM / FPS / Thermal (task_vm_info)
 │   ├── UiConfig.m                # Lưu trữ cấu hình nút cảm ứng & HUD
-│   ├── Info.plist                # Manifest cho bản ứng dụng độc lập
-│   ├── orchard.png               # Biểu tượng nhỏ trong giao diện
-│   ├── GardenLauncherIcons/      # Bộ AppIcon đầy đủ cho iPhone & iPad
+│   ├── GardenLauncherIcons/      # Bộ AppIcon iOS cho iPhone & iPad
 │   └── vendor/                   # miniz (MIT License)
 ├── scripts/
 │   ├── patch_menubar.ps1         # Mono.Cecil IL patch cho thanh MenuBar & nút cảm ứng
 │   ├── patch_lidgren.ps1         # Mono.Cecil IL patch cho UDP socket & Co-op LAN iOS
 │   ├── patch_perf_v6.ps1         # Mono.Cecil IL patch: khóa 2.0x, chống lag menu & giảm RAM
-│   └── package_embedded.py       # Tiêm dylib vào Mach-O, cấu hình Info.plist & đóng gói --launcher IPA sạch
+│   └── package_embedded.py       # Tiêm dylib vào Mach-O, cấu hình Info.plist & đóng gói IPA sạch
 └── assets/
     ├── Garden-Launcher-Icon.png
     └── Huong-Dan-Cai-Mod-Stardew-Mobile.jpg
@@ -88,9 +86,9 @@ Ví dụ biên dịch chéo trên Windows bằng `zig cc`:
 $zig = "path\to\zig.exe"
 $sdk = "path\to\iPhoneOS16.5.sdk"
 
-& $zig cc -target aarch64-ios -miphoneos-version-min=14.0 `
+& $zig cc -target aarch64-ios.14.0-none `
   -isysroot $sdk -isystem "$sdk\usr\include" `
-  -F"$sdk\System\Library\Frameworks" `
+  -F"$sdk\System\Library\Frameworks" -L"$sdk\usr\lib" `
   -fobjc-arc -Os -dynamiclib `
   -install_name "@executable_path/Frameworks/SDVModGarden.framework/SDVModGarden" `
   "-Wl,-headerpad_max_install_names" `
@@ -112,10 +110,10 @@ Trích xuất `SDViOS.dll` (`clean-host.dll`), `SDViOSTouchControls.dll` (`clean
 
 ### Bước 3: Đóng gói Launcher IPA sạch (0% tệp game bản quyền)
 
-Cờ `--launcher` tự động loại bỏ toàn bộ `BundledGame/` & `BundledCompatibility/`, chỉ giữ lại runtime và SMAPI nguồn mở (LGPL-3.0), tiêm `SDVModGarden.framework`, ghi cấu hình `MONO_GC_PARAMS` & quyền Local Network, rồi kiểm tra toàn vẹn SHA-256:
+`scripts/package_embedded.py` luôn tự động loại bỏ toàn bộ `BundledGame/` & `BundledCompatibility/`, chỉ giữ lại runtime và SMAPI nguồn mở (LGPL-3.0), tiêm `SDVModGarden.framework`, ghi cấu hình `MONO_GC_PARAMS` & quyền Local Network, rồi kiểm tra toàn vẹn SHA-256:
 
 ```powershell
-python scripts\package_embedded.py --launcher `
+python scripts\package_embedded.py `
   path\to\base-sdvios.ipa `
   build\SDVModGarden `
   path\to\zsign.exe `

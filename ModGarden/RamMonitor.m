@@ -51,11 +51,9 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
 -(void)saveHudOffset:(CGPoint)offset;
 -(void)resetHudOffset;
 
-// v5 Performance Config (Documents/sdv_perf.cfg -> "renderMode,trimLogs")
-// renderMode: 0 = Smooth 1.5x, 1 = Balanced 2.0x (Default), 2 = Native 3.0x
--(NSInteger)renderScaleModeForDocs:(NSString *)docsPath;
+// v6 Performance Config (Documents/sdv_perf.cfg -> "1,<trimLogs>")
 -(BOOL)trimLogsEnabledForDocs:(NSString *)docsPath;
--(void)savePerfConfig:(NSInteger)renderMode trimLogs:(BOOL)trimLogs toDocs:(NSString *)docsPath;
+-(void)saveTrimLogs:(BOOL)trimLogs toDocs:(NSString *)docsPath;
 -(void)triggerManualGCInDocs:(NSString *)docsPath;
 @end
 
@@ -137,10 +135,6 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
     [NSNotificationCenter.defaultCenter postNotificationName:kSDVRamHudResetPosNotification object:nil];
 }
 
--(NSInteger)renderScaleModeForDocs:(NSString *)docsPath {
-    return 1; // v6: Always locked to crisp integer 2.0x
-}
-
 -(BOOL)trimLogsEnabledForDocs:(NSString *)docsPath {
     if (!docsPath.length) return YES;
     NSString *p = [docsPath stringByAppendingPathComponent:@"sdv_perf.cfg"];
@@ -149,9 +143,8 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
     return ![raw containsString:@",0"];
 }
 
--(void)savePerfConfig:(NSInteger)renderMode trimLogs:(BOOL)trimLogs toDocs:(NSString *)docsPath {
+-(void)saveTrimLogs:(BOOL)trimLogs toDocs:(NSString *)docsPath {
     if (!docsPath.length) return;
-    (void)renderMode;
     [NSFileManager.defaultManager createDirectoryAtPath:docsPath withIntermediateDirectories:YES attributes:nil error:nil];
     NSString *p = [docsPath stringByAppendingPathComponent:@"sdv_perf.cfg"];
     NSString *s = [NSString stringWithFormat:@"1,%d", trimLogs ? 1 : 0]; // v6 locked 2.0x
@@ -190,7 +183,7 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
 
     if (docsPath.length) {
         BOOL trimLogs = [self trimLogsEnabledForDocs:docsPath];
-        [self savePerfConfig:1 trimLogs:trimLogs toDocs:docsPath]; // v6: always enforce 2.0x locked
+        [self saveTrimLogs:trimLogs toDocs:docsPath]; // v6: always enforce 2.0x locked
         NSString *errDir = [docsPath stringByAppendingPathComponent:@"ErrorLogs"];
         NSString *cur = [errDir stringByAppendingPathComponent:@"ram-monitor.log"];
         NSString *prev = [errDir stringByAppendingPathComponent:@"ram-monitor-previous.log"];

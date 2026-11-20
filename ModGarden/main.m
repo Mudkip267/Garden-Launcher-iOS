@@ -241,18 +241,12 @@ static NSString *sdvProbeLocalNetwork(void) {
 }
 @end
 
-#ifdef GARDEN_IN_GAME
-#define Home SDVGardenManagerController
-#endif
-
-@interface Home : UIViewController <UIDocumentPickerDelegate>
-#ifdef GARDEN_IN_GAME
+@interface SDVGardenManagerController : UIViewController <UIDocumentPickerDelegate>
 @property(nonatomic, copy) void (^onRequestLiveMenuBarMode)(void);
 @property(nonatomic, copy) void (^onRequestClose)(void);
-#endif
 @end
 
-@implementation Home {
+@implementation SDVGardenManagerController {
     UIVisualEffectView *_sidebar;
     UIStackView *_sidebarTabs;
     UILabel *_statusLabel;
@@ -280,7 +274,6 @@ static NSString *sdvProbeLocalNetwork(void) {
     NSArray<NSDictionary *> *_catalog;
     NSArray *_prefs;
     NSMutableDictionary *_translations;
-    BOOL _choosingFolder;
     BOOL _importingGameData;
 
     // Live UI Studio refs
@@ -313,11 +306,9 @@ static NSString *sdvProbeLocalNetwork(void) {
 
 -(BOOL)prefersStatusBarHidden { return YES; }
 
-#ifdef GARDEN_IN_GAME
 -(UIInterfaceOrientationMask)supportedInterfaceOrientations {
     return UIInterfaceOrientationMaskLandscape;
 }
-#endif
 
 -(void)presentSafely:(UIViewController *)vc {
     if (vc.popoverPresentationController) {
@@ -339,26 +330,14 @@ static NSString *sdvProbeLocalNetwork(void) {
     _sliderLabels = [NSMutableDictionary dictionary];
     [fm() removeItemAtPath:_stage error:nil];
 
-#ifdef GARDEN_IN_GAME
     _root = [fm() URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
-#else
-    NSData *bm = [NSUserDefaults.standardUserDefaults dataForKey:@"gameFolder"];
-    if (bm) {
-        BOOL stale = NO;
-        _root = [NSURL URLByResolvingBookmarkData:bm options:0 relativeToURL:nil bookmarkDataIsStale:&stale error:nil];
-    }
-#endif
     _uiCfg = [SDVUiConfig loadFromDocuments:_root.path];
     _tab = 0;
     _uiSubTab = 0;
 
     [self buildShell];
     [self renderAll:NO];
-#ifdef GARDEN_IN_GAME
     if (_root && [gameDataStatus(_root.path)[@"ready"] boolValue]) [self refresh];
-#else
-    if (_root) [self refresh];
-#endif
 }
 
 -(void)buildShell {
@@ -451,7 +430,7 @@ static NSString *sdvProbeLocalNetwork(void) {
 
     // Native Apple App Brand Header
     UIStackView *brandRow = mkHStack(9);
-    UIImage *appIconImg = [UIImage imageNamed:@"AppIcon60x60"] ?: [UIImage imageNamed:@"orchard.png"];
+    UIImage *appIconImg = [UIImage imageNamed:@"AppIcon60x60"];
     UIImageView *iconView = [[UIImageView alloc] initWithImage:appIconImg];
     iconView.contentMode = UIViewContentModeScaleAspectFill;
     iconView.layer.cornerRadius = 8.5;
@@ -504,12 +483,10 @@ static NSString *sdvProbeLocalNetwork(void) {
     hint.textAlignment = NSTextAlignmentCenter;
     [sideStack addArrangedSubview:hint];
 
-#ifdef GARDEN_IN_GAME
     SDVAppleButton *closeBtn = mkIOSButton(@"Về game", @"play.fill", kTintBlue, UIColor.whiteColor, 14, UIEdgeInsetsMake(8, 12, 8, 12));
     [closeBtn.heightAnchor constraintEqualToConstant:38].active = YES;
     [closeBtn addTarget:self action:@selector(closeManager) forControlEvents:UIControlEventTouchUpInside];
     [sideStack addArrangedSubview:closeBtn];
-#endif
 }
 
 -(void)updateSidebarChrome {
@@ -628,7 +605,6 @@ static NSString *sdvProbeLocalNetwork(void) {
 }
 
 -(void)renderInstallTab {
-#ifdef GARDEN_IN_GAME
     NSDictionary *gstat = gameDataStatus(_root.path);
     if (![gstat[@"ready"] boolValue]) {
         NSString *appNm = sdvAppDisplayName();
@@ -675,17 +651,6 @@ static NSString *sdvProbeLocalNetwork(void) {
         [_pane addArrangedSubview:mkGroupedCard(box, UIEdgeInsetsMake(14, 14, 14, 14))];
         return;
     }
-#else
-    if (!_library) {
-        UIStackView *box = mkVStack(10);
-        [box addArrangedSubview:mkLabel(@"Kết nối Stardew Mobile", 16, UIFontWeightSemibold, kInkPrimary)];
-        SDVAppleButton *btn = mkIOSButton(@"Chọn thư mục game", @"folder.fill", kTintBlue, UIColor.whiteColor, 14, UIEdgeInsetsMake(10, 14, 10, 14));
-        [btn addTarget:self action:@selector(folder) forControlEvents:UIControlEventTouchUpInside];
-        [box addArrangedSubview:btn];
-        [_pane addArrangedSubview:mkGroupedCard(box, UIEdgeInsetsMake(14, 14, 14, 14))];
-        return;
-    }
-#endif
 
     // Active Batch Preview
     if (_plan) {
@@ -930,7 +895,6 @@ static NSString *sdvProbeLocalNetwork(void) {
 -(void)renderUiStudioTab {
     if (!_uiCfg) _uiCfg = [SDVUiConfig loadFromDocuments:_root.path];
 
-#ifdef GARDEN_IN_GAME
     // Quick Live In-Game Glass HUD Row
     UIStackView *liveRow = mkHStack(10);
     [liveRow addArrangedSubview:mkSettingsIconBadge(@"sparkles", kTintBlue, 32)];
@@ -943,7 +907,6 @@ static NSString *sdvProbeLocalNetwork(void) {
     [liveRow addArrangedSubview:liveTxt];
     [liveRow addArrangedSubview:liveBtn];
     [_pane addArrangedSubview:mkGroupedCard(liveRow, UIEdgeInsetsMake(11, 14, 11, 14))];
-#endif
 
     // Section: Hiệu năng & Bộ nhớ (v6 — Locked 2.0×)
     [_pane addArrangedSubview:mkSectionTitle(@"Hiệu năng & Bộ nhớ (v6)")];
@@ -1225,7 +1188,7 @@ static NSString *sdvProbeLocalNetwork(void) {
         return;
     }
     if (sw.tag == 21) {
-        [SDVRamMonitor.shared savePerfConfig:1 trimLogs:sw.isOn toDocs:_root.path];
+        [SDVRamMonitor.shared saveTrimLogs:sw.isOn toDocs:_root.path];
         [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
         _message = sw.isOn
             ? @"Đã bật giảm ghi log TRACE thừa xuống ổ đĩa."
@@ -1501,7 +1464,6 @@ static NSString *sdvProbeLocalNetwork(void) {
     [self renderAll:NO];
 }
 
-#ifdef GARDEN_IN_GAME
 -(void)enterLiveMenuBarMode {
     if (_veil) return;
     [_uiCfg saveToDocuments:_root.path];
@@ -1514,7 +1476,6 @@ static NSString *sdvProbeLocalNetwork(void) {
     }
     if (cb) cb();
 }
-#endif
 
 // ---- Mod Library Actions ----
 -(void)toggleModSwitch:(UISwitch *)sw {
@@ -1609,38 +1570,12 @@ static NSString *sdvProbeLocalNetwork(void) {
 }
 
 -(void)access:(BOOL)write block:(void(^)(NSURL *))fn {
-#ifdef GARDEN_IN_GAME
+    (void)write;
     NSURL *local = [fm() URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     if (!dir(join(local.path, @"Content")) || !dir(join(local.path, @"Mods"))) {
         fail(@"Game đang giải nén dữ liệu. Đợi đến màn hình chính rồi thử lại.");
     }
     fn(local);
-    return;
-#endif
-    NSURL *u = _root;
-    if (!u) fail(@"Chọn lại thư mục game.");
-    BOOL scoped = [u startAccessingSecurityScopedResource];
-    @try {
-        NSFileCoordinator *c = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
-        NSError *e = nil;
-        __block NSException *problem = nil;
-        void (^accessor)(NSURL *) = ^(NSURL *r) {
-            @try {
-                if (!childScope(r.path) && (!dir(inside(r.path, @"Content")) || !dir(inside(r.path, @"Mods")) || ![fm() fileExistsAtPath:inside(r.path, @"Stardew Valley.dll")])) {
-                    fail(@"Hãy chọn thư mục chứa Mods, Content và Stardew Valley.dll.");
-                }
-                NSError *readError = nil;
-                if (![fm() contentsOfDirectoryAtPath:r.path error:&readError]) fail(readError.localizedDescription ?: @"iOS chưa cấp quyền đọc thư mục.");
-                fn(r);
-            } @catch (NSException *ex) { problem = ex; }
-        };
-        if (write) [c coordinateWritingItemAtURL:u options:NSFileCoordinatorWritingForMerging error:&e byAccessor:accessor];
-        else [c coordinateReadingItemAtURL:u options:0 error:&e byAccessor:accessor];
-        if (problem) @throw problem;
-        if (e) fail(e.localizedDescription);
-    } @finally {
-        if (scoped) [u stopAccessingSecurityScopedResource];
-    }
 }
 
 -(void)scan:(NSURL *)r {
@@ -1654,18 +1589,13 @@ static NSString *sdvProbeLocalNetwork(void) {
     [self work:@"Đang đọc dữ liệu game…" action:^{
         [self access:NO block:^(NSURL *r) {
             [self scan:r];
-#ifndef GARDEN_IN_GAME
-            NSData *b = [self->_root bookmarkDataWithOptions:NSURLBookmarkCreationMinimalBookmark includingResourceValuesForKeys:nil relativeToURL:nil error:nil];
-            if (b) [NSUserDefaults.standardUserDefaults setObject:b forKey:@"gameFolder"];
-#endif
         }];
     } done:nil];
 }
 
--(void)folder { _choosingFolder = YES; _importingGameData = NO; _appendPick = NO; [self picker:@[UTTypeFolder] copy:NO multi:NO]; }
--(void)package { _choosingFolder = NO; _importingGameData = NO; _appendPick = NO; [self picker:@[UTTypeZIP, UTTypeData] copy:YES multi:YES]; }
--(void)addMorePackages { _choosingFolder = NO; _importingGameData = NO; _appendPick = YES; [self picker:@[UTTypeZIP, UTTypeData] copy:YES multi:YES]; }
--(void)importGameDataTapped { _choosingFolder = NO; _importingGameData = YES; _appendPick = NO; [self picker:@[UTTypeZIP] copy:YES multi:NO]; }
+-(void)package { _importingGameData = NO; _appendPick = NO; [self picker:@[UTTypeZIP, UTTypeData] copy:YES multi:YES]; }
+-(void)addMorePackages { _importingGameData = NO; _appendPick = YES; [self picker:@[UTTypeZIP, UTTypeData] copy:YES multi:YES]; }
+-(void)importGameDataTapped { _importingGameData = YES; _appendPick = NO; [self picker:@[UTTypeZIP] copy:YES multi:NO]; }
 
 -(void)recheckGameData {
     syncBundledLidgren(_root.path);
@@ -1709,9 +1639,6 @@ static NSString *sdvProbeLocalNetwork(void) {
 
 -(void)handlePickedURLs:(NSArray<NSURL *> *)urls {
     _message = nil;
-    if (_choosingFolder) {
-        _root = urls.firstObject; _library = nil; _last = nil; [self refresh]; return;
-    }
     if (_importingGameData) {
         _importingGameData = NO;
         NSURL *zipUrl = urls.firstObject;
@@ -1819,7 +1746,6 @@ static NSString *sdvProbeLocalNetwork(void) {
 
 -(void)closeSheet { [self dismissViewControllerAnimated:YES completion:nil]; }
 
-#ifdef GARDEN_IN_GAME
 -(void)closeManager {
     if (_veil) return;
     [_uiCfg saveToDocuments:_root.path];
@@ -1828,7 +1754,6 @@ static NSString *sdvProbeLocalNetwork(void) {
     if (presenter) [presenter dismissViewControllerAnimated:YES completion:nil];
     else [self dismissViewControllerAnimated:YES completion:nil];
 }
-#endif
 
 -(void)cancelPlan {
     _plan = nil;
@@ -1888,22 +1813,3 @@ static NSString *sdvProbeLocalNetwork(void) {
     }];
 }
 @end
-
-#ifndef GARDEN_IN_GAME
-@interface App : UIResponder <UIApplicationDelegate>
-@property(strong) UIWindow *window;
-@end
-@implementation App
--(BOOL)application:(UIApplication *)a didFinishLaunchingWithOptions:(NSDictionary *)o {
-    UIWindowScene *ws = nil;
-    for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
-        if ([s isKindOfClass:UIWindowScene.class]) { ws = (UIWindowScene *)s; break; }
-    }
-    self.window = ws ? [[UIWindow alloc] initWithWindowScene:ws] : [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, 812, 375)];
-    self.window.rootViewController = [Home new];
-    [self.window makeKeyAndVisible];
-    return YES;
-}
-@end
-int main(int argc, char *argv[]) { @autoreleasepool { return UIApplicationMain(argc, argv, nil, NSStringFromClass(App.class)); } }
-#endif

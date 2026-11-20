@@ -1,4 +1,3 @@
-#define GARDEN_IN_GAME 1
 #import "main.m"
 
 // ---- Pass-through Overlay Window (never steals touches outside interactiveView) ----
@@ -691,7 +690,7 @@
     gw.overrideUserInterfaceStyle = UIUserInterfaceStyleUnspecified;
     gw.windowLevel = UIWindowLevelNormal + 5;
 
-    Home *mgr = [Home new];
+    SDVGardenManagerController *mgr = [SDVGardenManagerController new];
     __weak typeof(self) weakSelf = self;
     mgr.onRequestClose = ^{
         [weakSelf closeGarden];

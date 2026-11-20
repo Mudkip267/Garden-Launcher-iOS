@@ -16,18 +16,11 @@
 ## 📲 Hướng dẫn cài đặt
 
 1. **Cài IPA:** Tải [Garden-Launcher-v6.ipa](https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/latest) và cài lên iPhone/iPad bằng **KSign / ESign / TrollStore / AltStore / SideStore / Sideloadly** (tin cậy chứng chỉ trong *Cài đặt → Quản lý VPN & Thiết bị* nếu được yêu cầu).
-2. **Nạp dữ liệu PC `1.6.15` (chỉ làm 1 lần):**
-   - **Cách nhanh:** Nén thư mục game **Stardew Valley PC 1.6.15** thành 1 file `.ZIP` → mở **Garden Launcher** → bấm **Nhập gói dữ liệu game (.ZIP)** → chờ 20–40 giây.
-   - **Hoặc chép thủ công:** Chép `Content/` và các file `.dll` gốc vào **Tệp → Trên iPhone của tôi → Garden Launcher** → bấm **Kiểm tra lại**.
-   - Khi đủ 4 mục màu xanh, **vuốt tắt hẳn app rồi mở lại** để vào game.
+2. **Nạp dữ liệu PC `1.6.15` (chỉ làm 1 lần):** Nén thư mục game **Stardew Valley PC 1.6.15** thành 1 file `.ZIP` → mở **Garden Launcher** → bấm **Nhập gói dữ liệu game (.ZIP)** → chờ 20–40 giây → khi đủ 4 mục màu xanh, **vuốt tắt hẳn app rồi mở lại** để vào game.
 3. **Cài Mod & Việt Hóa:** Vào game bấm nút **MODS** (hoặc **chạm 3 ngón tay 2 lần**) → tab **Cài Mod** → chọn 1 hoặc nhiều file `.ZIP` → **Cài đặt** → mở lại app.
 4. **Chỉnh nút, RAM & Co-op:**
    - Tab **Hiệu năng & Nút**: bấm **Mở thanh nổi** để chỉnh trực tiếp cỡ/độ mờ nút trong game, bật **HUD RAM/FPS**, hoặc bấm **Dọn RAM ngay** khi chơi mod nặng.
    - Tab **Co-op LAN**: cấp quyền **Mạng cục bộ**, lấy IP máy Host để bạn bè kết nối qua *Co-op → Join LAN Game*.
-
-<p align="center">
-  <img src="assets/Huong-Dan-Cai-Mod-Stardew-Mobile.jpg" alt="Hướng dẫn cài Mod" width="720" />
-</p>
 
 ---
 

@@ -101,6 +101,7 @@ def validate_macho(data, label, is_dylib=False, require_chained=True):
 
 def build(base, library, signer, output, host_dll=None, touch_dll=None, lidgren_dll=None, launcher_only=False, use_scene=True, min_ios="14.0"):
     script = Path(__file__).resolve().parent
+    mod_root = script if (script / "SDVMobileControls").is_dir() else (script.parent / "ModGarden")
     with tempfile.TemporaryDirectory() as temp, zipfile.ZipFile(base) as original:
         root = Path(temp)
         if launcher_only:
@@ -142,7 +143,7 @@ def build(base, library, signer, output, host_dll=None, touch_dll=None, lidgren_
         if stale_xcent.exists():
             stale_xcent.unlink()
         # Bundle open-source SDVMobileControls SMAPI mod inside SDVModGarden.framework/BundledMods/
-        mc_src = script / "SDVMobileControls"
+        mc_src = mod_root / "SDVMobileControls"
         mc_dll = mc_src / "bin" / "Release" / "net6.0" / "SDVMobileControls.dll"
         mc_man = mc_src / "manifest.json"
         if mc_dll.is_file() and mc_man.is_file():
@@ -150,7 +151,7 @@ def build(base, library, signer, output, host_dll=None, touch_dll=None, lidgren_
             mc_dst.mkdir(parents=True, exist_ok=True)
             (mc_dst / "manifest.json").write_bytes(mc_man.read_bytes())
             (mc_dst / "SDVMobileControls.dll").write_bytes(mc_dll.read_bytes())
-        (app/"orchard.png").write_bytes((script/"orchard.png").read_bytes())
+        (app/"orchard.png").write_bytes((mod_root/"orchard.png").read_bytes())
         if host_dll:
             (app/"SDViOS.dll").write_bytes(Path(host_dll).read_bytes())
             for mg_name in ("v7-monogame.dll", "v6-monogame.dll", "v5-monogame.dll"):
@@ -217,7 +218,7 @@ def build(base, library, signer, output, host_dll=None, touch_dll=None, lidgren_
                     }
                 },
             )
-            icon_src = script / "GardenLauncherIcons"
+            icon_src = mod_root / "GardenLauncherIcons"
             if icon_src.is_dir():
                 icons_sub = app / "AppIcons"
                 icons_sub.mkdir(exist_ok=True)

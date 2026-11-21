@@ -378,9 +378,31 @@ namespace SDViOSTouchControls
             if (warp != null)
             {
                 _targetWarp = warp;
-                _targetTile = new Point(warp.X, warp.Y);
+                Point warpTile = new Point(warp.X, warp.Y);
+                _targetTile = warpTile;
                 _pendingAction = TapActionKind.Interact;
-                StartPathToTarget(player, loc, _targetTile, stopAdjacent: false);
+
+                // Determine immediate walkable destination (warp tile itself if passable, otherwise the doormat/adjacent tile)
+                Point warpDest = warpTile;
+                try
+                {
+                    var warpRect = new Rectangle(warpTile.X * 64 + 8, warpTile.Y * 64 + 8, 48, 48);
+                    if (loc.isCollidingPosition(warpRect, Game1.viewport, true, 0, false, player))
+                    {
+                        warpDest = FindBestAdjacentWalkableTile(loc, player.TilePoint, warpTile);
+                        // Show animated arrow right on the visible doormat tile if warp tile is inside the wall
+                        _targetTile = warpDest;
+                    }
+                }
+                catch { }
+
+                if (player.TilePoint == warpDest || IsAdjacentOrSame(player.TilePoint, warpTile))
+                {
+                    TriggerWarp(player, warp);
+                    return;
+                }
+
+                StartPathToTarget(player, loc, warpDest, stopAdjacent: false, overrideDest: warpDest);
                 return;
             }
 
@@ -706,6 +728,7 @@ namespace SDViOSTouchControls
 
                 if (controller.pathToEndPoint != null && controller.pathToEndPoint.Count > 0)
                 {
+                    player.setRunning(true);
                     player.controller = controller;
                 }
                 else
@@ -724,6 +747,7 @@ namespace SDViOSTouchControls
                         );
                         if (fbCtrl.pathToEndPoint != null && fbCtrl.pathToEndPoint.Count > 0)
                         {
+                            player.setRunning(true);
                             player.controller = fbCtrl;
                             return;
                         }
@@ -780,6 +804,24 @@ namespace SDViOSTouchControls
             var player = Game1.player;
             var loc = Game1.currentLocation;
             if (player == null || loc == null) return;
+
+            // Keep Tap-to-Move farmer running at full speed (never sluggish walk speed)
+            if (_hasTarget && player.controller != null)
+            {
+                try { player.setRunning(true); } catch { }
+
+                // Instant warp trigger as soon as farmer reaches the doorway/mat (eliminates sluggish Farmhouse exit!)
+                if (_targetWarp != null)
+                {
+                    Vector2 warpCenter = new Vector2(_targetWarp.X * 64 + 32, _targetWarp.Y * 64 + 32);
+                    if (Vector2.DistanceSquared(player.getStandingPosition(), warpCenter) <= 84f * 84f ||
+                        player.TilePoint == _pendingDestinationTile)
+                    {
+                        TriggerWarp(player, _targetWarp);
+                        return;
+                    }
+                }
+            }
 
             // 1. Auto-Attack nearby monsters (official Stardew Mobile feature!)
             if (settings.AutoAttackEnabled &&
@@ -859,15 +901,11 @@ namespace SDViOSTouchControls
                 {
                     bool handled = false;
 
-                    // Warp door step trigger
+                    // Instant Warp door trigger (Farmhouse exit, caves, buildings)
                     if (_targetWarp != null)
                     {
-                        try
-                        {
-                            player.Position = new Vector2(_targetWarp.X * 64 + 16, _targetWarp.Y * 64 + 16);
-                            handled = true;
-                        }
-                        catch { }
+                        TriggerWarp(player, _targetWarp);
+                        return;
                     }
 
                     // Try Furniture checkForAction directly (TV channel menu, BedFurniture sleep prompt, Lamp, Chair)
@@ -961,8 +999,41 @@ namespace SDViOSTouchControls
         }
 
         /// <summary>
-        /// Draws the authentic Stardew Valley Mobile green pulsing tile indicator on the tapped destination tile
-        /// using Game1.mouseCursors's built-in 16x16 placement square (stays visible while walking, fades on arrival).
+        /// Immediately executes a clean location warp when the player reaches a tapped doorway / Farmhouse exit mat.
+        /// </summary>
+        private void TriggerWarp(Farmer player, Warp warp)
+        {
+            try
+            {
+                player.controller = null;
+                player.Halt();
+                _hasTarget = false;
+                _pendingAction = TapActionKind.None;
+                _targetFurniture = null;
+                _targetWarp = null;
+                _targetVisualTicks = 0;
+                _actionCooldownTicks = 16;
+
+                if (!string.IsNullOrEmpty(warp.TargetName))
+                {
+                    try { Game1.playSound("doorClose"); } catch { }
+                    Game1.warpFarmer(warp.TargetName, warp.TargetX, warp.TargetY, warp.flipFarmer.Value);
+                }
+                else
+                {
+                    player.Position = new Vector2(warp.X * 64 + 16, warp.Y * 64 + 16);
+                }
+            }
+            catch
+            {
+                _hasTarget = false;
+                _targetWarp = null;
+            }
+        }
+
+        /// <summary>
+        /// Draws the authentic Stardew Valley Mobile 10-frame animated rounded tile + bouncing down-arrow
+        /// from LooseSprites/MobileAtlas_manually_made (auto-themed via MobileThemeEngine!).
         /// </summary>
         public void DrawWorldIndicator(SpriteBatch sb, Texture2D? pixelTex)
         {
@@ -983,23 +1054,32 @@ namespace SDViOSTouchControls
                 int sw = Math.Max(16, (int)Math.Round(64 * scaleX));
                 int sh = Math.Max(16, (int)Math.Round(64 * scaleY));
 
-                float pulse = _hasTarget
-                    ? (0.68f + 0.20f * (float)Math.Sin(Game1.ticks * 0.18))
-                    : Math.Clamp(_targetVisualTicks / 20f, 0f, 1f) * 0.65f;
+                float alpha = _hasTarget
+                    ? 0.92f
+                    : Math.Clamp(_targetVisualTicks / 18f, 0f, 1f) * 0.85f;
 
                 bool isRed = _targetUnreachable || _pendingAction == TapActionKind.AttackMonster;
 
-                if (Game1.mouseCursors != null && !Game1.mouseCursors.IsDisposed)
+                Texture2D? atlas = MobileThemeEngine.GetAtlas(sb.GraphicsDevice);
+                if (atlas != null && !atlas.IsDisposed)
                 {
-                    // Official Stardew tile highlight sprites in LooseSprites/Cursors:
-                    // (194, 388, 16, 16) = bright green placement square, (210, 388, 16, 16) = red square
+                    // Authentic 10-frame bouncing arrow + rounded ground square (16x20: bottom 16x16 sits on ground tile, top 4px is arrow bounce peak)
+                    int frame = (Game1.ticks / 4) % MobileThemeEngine.TapTargetFrameCount;
+                    Rectangle src = MobileThemeEngine.GetTapTargetFrameRect(frame);
+                    int arrowHeadroom = Math.Max(4, (int)Math.Round(sh * 0.25f));
+                    Rectangle dest = new Rectangle(sx, sy - arrowHeadroom, sw, sh + arrowHeadroom);
+                    Color tint = isRed ? new Color(255, 110, 110) * alpha : Color.White * alpha;
+                    sb.Draw(atlas, dest, src, tint);
+                }
+                else if (Game1.mouseCursors != null && !Game1.mouseCursors.IsDisposed)
+                {
                     Rectangle src = isRed ? new Rectangle(210, 388, 16, 16) : new Rectangle(194, 388, 16, 16);
-                    Color tint = isRed ? Color.White * pulse : new Color(210, 255, 210) * pulse;
+                    Color tint = isRed ? Color.White * alpha : new Color(210, 255, 210) * alpha;
                     sb.Draw(Game1.mouseCursors, new Rectangle(sx, sy, sw, sh), src, tint);
                 }
                 else if (pixelTex != null)
                 {
-                    Color boxColor = (isRed ? Color.OrangeRed : Color.LimeGreen) * pulse;
+                    Color boxColor = (isRed ? Color.OrangeRed : Color.LimeGreen) * alpha;
                     int t = Math.Max(2, (int)(3 * scaleX));
                     sb.Draw(pixelTex, new Rectangle(sx, sy, sw, t), boxColor);
                     sb.Draw(pixelTex, new Rectangle(sx, sy + sh - t, sw, t), boxColor);
@@ -1072,16 +1152,33 @@ namespace SDViOSTouchControls
             try
             {
                 if (loc.warps == null) return null;
+                Warp? best = null;
+                float bestDistSq = float.MaxValue;
                 foreach (var w in loc.warps)
                 {
                     if (w == null) continue;
-                    if (Math.Abs(w.X - tile.X) <= 1 && Math.Abs(w.Y - tile.Y) <= 1)
+                    // Exact warp tile always matches immediately
+                    if (w.X == tile.X && w.Y == tile.Y)
+                        return w;
+
+                    int dx = Math.Abs(w.X - tile.X);
+                    int dy = w.Y - tile.Y; // > 0 when tapped tile is above warp (e.g. Farmhouse red doormat)
+
+                    // Match the doormat tile directly in front of a doorway warp (especially inside buildings/FarmHouse)
+                    bool isIndoorDoorMat = !loc.IsOutdoors && dx <= 1 && dy >= 0 && dy <= 1;
+                    bool isDirectAbove = dx == 0 && dy == 1;
+                    if (isIndoorDoorMat || isDirectAbove)
                     {
                         float dSq = Vector2.DistanceSquared(worldPos, new Vector2(w.X * 64 + 32, w.Y * 64 + 32));
-                        if (dSq <= 82f * 82f || (w.X == tile.X && w.Y == tile.Y))
-                            return w;
+                        float maxDist = !loc.IsOutdoors ? 116f : 72f;
+                        if (dSq <= maxDist * maxDist && dSq < bestDistSq)
+                        {
+                            bestDistSq = dSq;
+                            best = w;
+                        }
                     }
                 }
+                return best;
             }
             catch { }
             return null;

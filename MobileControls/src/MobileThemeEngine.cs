@@ -32,6 +32,18 @@ namespace SDViOSTouchControls
         public static readonly Rectangle SrcSlotHighlightWhite = new Rectangle(0, 96, 20, 20);
         public static readonly Rectangle SrcSlotHighlightRed = new Rectangle(20, 95, 20, 21);
 
+        // 10-frame animated Tap-to-Move rounded tile + bouncing down-arrow (frames 0..9, each 16x20 at y=201)
+        public const int TapTargetFrameCount = 10;
+        public const int TapTargetStripY = 201;
+        public const int TapTargetFrameW = 16;
+        public const int TapTargetFrameH = 20;
+
+        public static Rectangle GetTapTargetFrameRect(int frameIndex)
+        {
+            int f = Math.Clamp(frameIndex, 0, TapTargetFrameCount - 1);
+            return new Rectangle(f * TapTargetFrameW, TapTargetStripY, TapTargetFrameW, TapTargetFrameH);
+        }
+
         // Cached region size covering all mobile HUD/control sprites in MobileAtlas_manually_made
         private const int AtlasRegionW = 175;
         private const int AtlasRegionH = 230;
@@ -256,6 +268,14 @@ namespace SDViOSTouchControls
                             continue;
                         }
 
+                        // Special handling for the 10-frame animated Tap-to-Move tile + bouncing arrow (0..159, 201..220)
+                        if (x >= 0 && x < TapTargetFrameCount * TapTargetFrameW &&
+                            y >= TapTargetStripY && y < TapTargetStripY + TapTargetFrameH)
+                        {
+                            remapped[idx] = RemapTapTargetPixel(c, modRamp);
+                            continue;
+                        }
+
                         // Map warm wood / gold / amber / brown UI pixels to the active mod's color ramp
                         if (IsVanillaWoodUiColor(c, out float t))
                         {
@@ -452,6 +472,22 @@ namespace SDViOSTouchControls
             Color mapped = lum < 0.28f
                 ? Color.Lerp(ramp[1], ramp[3], 0.5f)
                 : Color.Lerp(ramp[4], ramp[6], 0.65f);
+            mapped.A = c.A;
+            return mapped;
+        }
+
+        private static Color RemapTapTargetPixel(Color c, Color[] ramp)
+        {
+            // Remap vanilla neutral green-grey Tap-to-Move tile & bouncing down-arrow
+            // into the installed UI mod's accent/petal palette while preserving border & arrow contrast.
+            float lum = Luminance(c);
+            Color mapped;
+            if (lum < 0.35f)
+                mapped = Color.Lerp(ramp[0], ramp[2], 0.45f);
+            else if (lum < 0.68f)
+                mapped = Color.Lerp(ramp[2], ramp[4], 0.55f);
+            else
+                mapped = Color.Lerp(ramp[4], ramp[6], 0.50f);
             mapped.A = c.A;
             return mapped;
         }

@@ -50,10 +50,10 @@ namespace SDViOSTouchControls
         private double _togglePressStartTime = 0;
         private bool _toggleLongPressFired = false;
 
-        // Mobile circular Joystick + X + A geometry
+        // Mobile circular Joystick + X + A geometry (floating thumb-following joystick)
+        private Vector2 _joyRestCenter;
         private Vector2 _joyCenter;
         private float _joyRadius = 96f;
-        private Vector2 _joyThumbPos;
         private Vector2 _btnXCenter;
         private float _btnXRadius = 56f;
         private Vector2 _btnACenter;
@@ -116,6 +116,8 @@ namespace SDViOSTouchControls
             ButtonXPressed = false;
             ButtonAPressed = false;
             _joyTouchId = -1;
+            if (_joyRestCenter != Vector2.Zero)
+                _joyCenter = _joyRestCenter;
             _btnXTouchId = -1;
             _btnATouchId = -1;
             _toolbarTouchId = -1;
@@ -194,10 +196,14 @@ namespace SDViOSTouchControls
             _btnXRadius = Math.Clamp(s.MobileBtnXDiameter * 0.5f * scale, 32f, 140f);
             _btnARadius = Math.Clamp(s.MobileBtnADiameter * 0.5f * scale, 32f, 140f);
 
-            _joyCenter = new Vector2(
+            _joyRestCenter = new Vector2(
                 Math.Clamp(s.JoystickNormX * width, _toolbarRect.Right + _joyRadius + 8, width - _joyRadius - 8),
                 Math.Clamp(s.JoystickNormY * height, _joyRadius + 8, height - _joyRadius - 8)
             );
+            if (_joyTouchId == -1 || IsCustomizeBarOpen)
+            {
+                _joyCenter = _joyRestCenter;
+            }
             _btnXCenter = new Vector2(
                 Math.Clamp(s.MobileBtnXNormX * width, _toolbarRect.Right + _btnXRadius + 8, width - _btnXRadius - 8),
                 Math.Clamp(s.MobileBtnXNormY * height, _btnXRadius + 8, height - _btnXRadius - 8)
@@ -206,9 +212,6 @@ namespace SDViOSTouchControls
                 Math.Clamp(s.MobileBtnANormX * width, _toolbarRect.Right + _btnARadius + 8, width - _btnARadius - 8),
                 Math.Clamp(s.MobileBtnANormY * height, _btnARadius + 8, height - _btnARadius - 8)
             );
-
-            if (_joyTouchId == -1)
-                _joyThumbPos = _joyCenter;
 
             // 5. Official Mobile Customize Controls Top Bar layout (matching Image 2!)
             int barMarginX = Math.Max(20, (int)(32 * scale));
@@ -368,7 +371,6 @@ namespace SDViOSTouchControls
                     if (touch.State == TouchLocationState.Released)
                     {
                         _joyTouchId = -1;
-                        _joyThumbPos = _joyCenter;
                         JoystickVector = Vector2.Zero;
                     }
                     else
@@ -467,10 +469,19 @@ namespace SDViOSTouchControls
                     // Circular Joystick + X + A buttons (when shown)
                     if (showJoy)
                     {
-                        if (Vector2.Distance(ptVec, _joyCenter) <= _joyRadius * 1.15f && _joyTouchId == -1)
+                        bool pureJoyMode = s.ControlScheme == MobileControlScheme.JoystickAndButtons;
+                        bool hitJoyZone = Vector2.Distance(ptVec, _joyCenter) <= _joyRadius * 1.32f
+                                       || (pureJoyMode && pt.X >= _toolbarRect.Right && pt.X <= _vpW * 0.52f);
+
+                        if (hitJoyZone && _joyTouchId == -1)
                         {
                             _joyTouchId = touch.Id;
                             joyPresent = true;
+                            if (pureJoyMode && Vector2.Distance(ptVec, _joyCenter) > _joyRadius * 0.75f)
+                            {
+                                // Dynamic floating spawn right under player's thumb in pure Joystick mode!
+                                _joyCenter = ClampFloatingJoyCenter(ptVec);
+                            }
                             UpdateJoystickDrag(ptVec);
                             MobileTapAndAutoController.Instance.CancelAll();
                             continue;
@@ -499,7 +510,16 @@ namespace SDViOSTouchControls
             }
 
             // Cleanup released/lost touches
-            if (!joyPresent) { _joyTouchId = -1; _joyThumbPos = _joyCenter; JoystickVector = Vector2.Zero; }
+            if (!joyPresent)
+            {
+                _joyTouchId = -1;
+                JoystickVector = Vector2.Zero;
+                // Smoothly glide floating joystick back to its resting position when released
+                if (Vector2.DistanceSquared(_joyCenter, _joyRestCenter) > 2.25f)
+                    _joyCenter = Vector2.Lerp(_joyCenter, _joyRestCenter, 0.22f);
+                else
+                    _joyCenter = _joyRestCenter;
+            }
             if (!btnXPresent) { _btnXTouchId = -1; }
             if (!btnAPresent) { _btnATouchId = -1; }
             if (!tbPresent) { _toolbarTouchId = -1; }
@@ -515,24 +535,37 @@ namespace SDViOSTouchControls
             return true;
         }
 
+        private Vector2 ClampFloatingJoyCenter(Vector2 pos)
+        {
+            float minX = Math.Max(_joyRadius * 0.45f, _toolbarRect.Right * 0.45f);
+            float maxX = Math.Max(minX + 10f, _vpW * 0.58f);
+            float minY = _joyRadius * 0.55f;
+            float maxY = Math.Max(minY + 10f, _vpH - _joyRadius * 0.55f);
+            return new Vector2(Math.Clamp(pos.X, minX, maxX), Math.Clamp(pos.Y, minY, maxY));
+        }
+
         private void UpdateJoystickDrag(Vector2 ptVec)
         {
             Vector2 delta = ptVec - _joyCenter;
             float dist = delta.Length();
-            if (dist > _joyRadius)
+            float followThreshold = _joyRadius * 0.45f;
+            float deadzone = Math.Max(8f, _joyRadius * 0.10f);
+
+            if (dist > followThreshold)
             {
-                delta.Normalize();
-                _joyThumbPos = _joyCenter + delta * _joyRadius;
-                JoystickVector = delta;
+                Vector2 dir = delta / dist;
+                // Floating joystick: smoothly trail the player's thumb across the screen!
+                _joyCenter = ClampFloatingJoyCenter(ptVec - dir * followThreshold);
+                JoystickVector = dir;
             }
-            else if (dist > 0.01f)
+            else if (dist > deadzone)
             {
-                _joyThumbPos = ptVec;
-                JoystickVector = delta / _joyRadius;
+                Vector2 dir = delta / dist;
+                float mag = Math.Clamp((dist - deadzone) / Math.Max(1f, followThreshold - deadzone), 0.25f, 1f);
+                JoystickVector = dir * mag;
             }
             else
             {
-                _joyThumbPos = _joyCenter;
                 JoystickVector = Vector2.Zero;
             }
         }
@@ -1088,31 +1121,46 @@ namespace SDViOSTouchControls
         {
             float baseAlpha = IsCustomizeBarOpen ? 0.58f : Math.Clamp(s.Opacity * 0.72f, 0.25f, 0.75f);
 
-            // 1. Translucent pixel-art circular Joystick (exact look of Images 2 & 3!)
+            // 1. Translucent floating pixel-art circular Joystick (NO solid inner ball — exact official Mobile look!)
             Rectangle joyRect = new Rectangle(
                 (int)(_joyCenter.X - _joyRadius),
                 (int)(_joyCenter.Y - _joyRadius),
                 (int)(_joyRadius * 2),
                 (int)(_joyRadius * 2)
             );
+            float activeJoyAlpha = _joyTouchId != -1 ? Math.Min(0.85f, baseAlpha + 0.14f) : baseAlpha;
             Color joyTint = (IsCustomizeBarOpen && _customSelectedTarget == 0)
                 ? Color.Lerp(MobileThemeEngine.ThemeCircleTint, Color.LightGreen, 0.35f) * 0.72f
-                : MobileThemeEngine.ThemeCircleTint * baseAlpha;
+                : MobileThemeEngine.ThemeCircleTint * activeJoyAlpha;
 
             if (atlas != null)
             {
                 sb.Draw(atlas, joyRect, MobileThemeEngine.SrcCirclePad, joyTint);
+            }
 
-                // Subtle inner thumb dot when dragging or customizing
-                float thumbR = _joyRadius * 0.34f;
-                Rectangle thumbRect = new Rectangle(
-                    (int)(_joyThumbPos.X - thumbR),
-                    (int)(_joyThumbPos.Y - thumbR),
-                    (int)(thumbR * 2),
-                    (int)(thumbR * 2)
-                );
-                float thumbAlpha = _joyTouchId != -1 ? Math.Min(0.85f, baseAlpha + 0.25f) : baseAlpha * 0.55f;
-                sb.Draw(atlas, thumbRect, MobileThemeEngine.SrcCirclePad, Color.White * thumbAlpha);
+            // Crisp minimal pixel-art directional corner tick near inner rim ONLY while dragging (matches official Mobile joystick!)
+            if (_joyTouchId != -1 && JoystickVector.LengthSquared() > 0.04f && pixelTex != null)
+            {
+                Vector2 dir = JoystickVector;
+                dir.Normalize();
+                float tickDist = _joyRadius * 0.62f;
+                Vector2 tip = _joyCenter + dir * tickDist;
+                int armLen = Math.Max(8, (int)(_joyRadius * 0.14f));
+                int thick = Math.Max(3, (int)(_joyRadius * 0.045f));
+                Color tickCol = new Color(190, 68, 68) * 0.78f;
+
+                // Small crisp L-corner / directional chevron pointing along movement direction
+                int sx = dir.X >= 0 ? -1 : 1;
+                int sy = dir.Y >= 0 ? -1 : 1;
+                int tx = (int)Math.Round(tip.X);
+                int ty = (int)Math.Round(tip.Y);
+
+                // Horizontal arm from tip inward
+                int hx = sx < 0 ? tx - armLen : tx;
+                sb.Draw(pixelTex, new Rectangle(hx, ty - thick / 2, armLen + thick / 2, thick), tickCol);
+                // Vertical arm from tip inward
+                int vy = sy < 0 ? ty - armLen : ty;
+                sb.Draw(pixelTex, new Rectangle(tx - thick / 2, vy, thick, armLen + thick / 2), tickCol);
             }
 
             // 2. Button X (SỬ DỤNG — Use Tool / Attack)

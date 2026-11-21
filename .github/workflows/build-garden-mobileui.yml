@@ -80,58 +80,30 @@ jobs:
           cat > work/embed_tool/Program.cs << 'EOF'
           using System;
           using System.IO;
-          using System.Linq;
           using Mono.Cecil;
-          using Mono.Cecil.Cil;
 
           class Program {
               static void Main(string[] args) {
                   byte[] touchBytes = File.ReadAllBytes(args[1]);
-                  using (var asm = AssemblyDefinition.ReadAssembly(args[0])) {
-                      var resList = asm.MainModule.Resources;
-                      bool replaced = false;
-                      for (int i = 0; i < resList.Count; i++) {
-                          if (resList[i].Name.EndsWith("SDViOSTouchControls.dll", StringComparison.OrdinalIgnoreCase)) {
-                              string name = resList[i].Name;
-                              resList[i] = new EmbeddedResource(name, ManifestResourceAttributes.Public, touchBytes);
-                              Console.WriteLine($"Replaced embedded resource: {name} ({touchBytes.Length} bytes)");
-                              replaced = true;
-                          }
+                  using var asm = AssemblyDefinition.ReadAssembly(args[0]);
+                  var resList = asm.MainModule.Resources;
+                  bool replaced = false;
+                  for (int i = 0; i < resList.Count; i++) {
+                      if (resList[i].Name.EndsWith("SDViOSTouchControls.dll", StringComparison.OrdinalIgnoreCase)) {
+                          string name = resList[i].Name;
+                          resList[i] = new EmbeddedResource(name, ManifestResourceAttributes.Public, touchBytes);
+                          Console.WriteLine($"Replaced embedded resource: {name} ({touchBytes.Length} bytes)");
+                          replaced = true;
                       }
-                      if (!replaced) throw new Exception("Missing embedded SDViOSTouchControls.dll resource");
-                      asm.Write(args[2]);
                   }
-
-                  // Patch MonoGame.Framework.dll: remove AVAudioSession.SharedInstance().Init() inside OpenALSoundController.OpenSoundController()
-                  // so MonoGame never resets AVAudioSessionCategoryPlayback back to SoloAmbient on iOS!
-                  string mgPath = args[3];
-                  string mgOut = args[4];
-                  using (var mg = AssemblyDefinition.ReadAssembly(mgPath)) {
-                      var oal = mg.MainModule.Types.FirstOrDefault(t => t.Name == "OpenALSoundController");
-                      var openM = oal?.Methods.FirstOrDefault(m => m.Name == "OpenSoundController" && m.HasBody);
-                      if (openM != null) {
-                          var ins = openM.Body.Instructions;
-                          int patched = 0;
-                          for (int i = 0; i + 1 < ins.Count; i++) {
-                              string s0 = ins[i].ToString();
-                              string s1 = ins[i + 1].ToString();
-                              if (s0.Contains("AVAudioSession::SharedInstance()") && s1.Contains("NSObject::Init()")) {
-                                  ins[i].OpCode = OpCodes.Nop; ins[i].Operand = null;
-                                  ins[i + 1].OpCode = OpCodes.Nop; ins[i + 1].Operand = null;
-                                  patched++;
-                              }
-                          }
-                          Console.WriteLine($"Patched OpenALSoundController.OpenSoundController AVAudioSession.Init() count = {patched}");
-                      }
-                      mg.Write(mgOut);
-                  }
+                  if (!replaced) throw new Exception("Missing embedded SDViOSTouchControls.dll resource");
+                  asm.Write(args[2]);
               }
           }
           EOF
 
-          dotnet run --project work/embed_tool/embed_tool.csproj -- "$APP/SDViOS.dll" "$NEW_DLL" "work/SDViOS.patched.dll" "$APP/MonoGame.Framework.dll" "work/MonoGame.Framework.patched.dll"
+          dotnet run --project work/embed_tool/embed_tool.csproj -- "$APP/SDViOS.dll" "$NEW_DLL" "work/SDViOS.patched.dll"
           cp -f work/SDViOS.patched.dll "$APP/SDViOS.dll"
-          cp -f work/MonoGame.Framework.patched.dll "$APP/MonoGame.Framework.dll"
           cp -f "$NEW_DLL" "$APP/Mods/SDViOSTouchControls/SDViOSTouchControls.dll"
           cp -f "$NEW_DLL" "$APP/Mods/SDViOSTouchControls/SDViOSTouchControlsMod.dll"
           cp -f "$NEW_MF"  "$APP/Mods/SDViOSTouchControls/manifest.json"

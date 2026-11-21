@@ -1286,8 +1286,10 @@ namespace SDViOSTouchControls
                     continue;
                 }
 
-                // If overlay is hidden, treat all touches as screen clicks
-                if (!IsVisible)
+                // If legacy Xbox pad is hidden (or Mobile UI mode is active where legacy pad is not drawn),
+                // treat all background touches directly as crisp screen clicks (so Title Screen & Menus never hit invisible pad zones!)
+                bool legacyPadActive = IsVisible && (!Settings.MobileUIEnabled || Settings.ControlScheme == MobileControlScheme.LegacyXboxPad);
+                if (!legacyPadActive)
                 {
                     HandleBackgroundTouch(touch, pt, gameTime);
                     continue;
@@ -1748,8 +1750,9 @@ namespace SDViOSTouchControls
                 return;
             }
 
-            // Never process touches on the virtual pad as background mouse events!
-            if (IsVisible)
+            // Never process touches on the visible legacy virtual pad as background mouse events!
+            bool legacyPadActive = IsVisible && (!Settings.MobileUIEnabled || Settings.ControlScheme == MobileControlScheme.LegacyXboxPad);
+            if (legacyPadActive)
             {
                 if (_joystickBaseRect.Contains(pt) || Vector2.Distance(new Vector2(pt.X, pt.Y), _joystickCenter) <= _joystickRadius * 1.4f)
                     return;

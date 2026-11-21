@@ -255,9 +255,12 @@ static NSString *sdvProbeLocalNetwork(void) {
     UIStackView *_pane;
     UIView *_veil;
 
-    // 0 = Cài Mod, 1 = Thư viện, 2 = Hiệu năng & Nút, 3 = Co-op LAN, 4 = Hướng dẫn
+    // 0 = Cài Mod, 1 = Thư viện, 2 = Hiệu năng & Nút, 3 = Co-op LAN, 4 = Log, 5 = Hướng dẫn
     NSInteger _tab;
     NSInteger _uiSubTab; // 0 = Menu Bar, 1 = Nút & Joystick, 2 = Bảng SET/MODS
+    NSInteger _logSubTab; // 0 = SMAPI Log, 1 = Engine Log, 2 = Thư mục Mods
+    UITextView *_logTextView;
+    NSString *_currentLogText;
     NSArray<SDVAppleButton *> *_tabButtons;
     UIView *_creditCard;
 
@@ -456,10 +459,10 @@ static NSString *sdvProbeLocalNetwork(void) {
     pinInsets(brandRow, brandWrap, UIEdgeInsetsMake(2, 4, 4, 2));
     [sideStack addArrangedSubview:brandWrap];
 
-    // 5 Native iOS Split-View Sidebar Rows
+    // 6 Native iOS Split-View Sidebar Rows
     _sidebarTabs = mkVStack(3);
     NSMutableArray *tBtns = [NSMutableArray array];
-    for (NSInteger i = 0; i < 5; i++) {
+    for (NSInteger i = 0; i < 6; i++) {
         SDVAppleButton *b = [SDVAppleButton buttonWithType:UIButtonTypeCustom];
         b.tag = i;
         b.layer.cornerRadius = 10.0;
@@ -467,7 +470,7 @@ static NSString *sdvProbeLocalNetwork(void) {
         b.contentEdgeInsets = UIEdgeInsetsMake(0, 10, 0, 10);
         b.imageEdgeInsets = UIEdgeInsetsMake(0, 0, 0, 8);
         b.titleEdgeInsets = UIEdgeInsetsMake(0, 8, 0, -8);
-        [b.heightAnchor constraintEqualToConstant:35].active = YES;
+        [b.heightAnchor constraintEqualToConstant:33].active = YES;
         [b addTarget:self action:@selector(selectTab:) forControlEvents:UIControlEventTouchUpInside];
         [_sidebarTabs addArrangedSubview:b];
         [tBtns addObject:b];
@@ -501,11 +504,12 @@ static NSString *sdvProbeLocalNetwork(void) {
         _catalog.count > 0 ? [NSString stringWithFormat:@"Thư viện (%lu)", (unsigned long)_catalog.count] : @"Thư viện",
         @"Hiệu năng & Nút",
         @"Co-op LAN",
+        @"Log",
         @"Hướng dẫn"
     ];
-    NSArray *navTitles = @[@"Cài đặt Mod", @"Thư viện Mod", @"Hiệu năng & Điều khiển", @"Co-op LAN / IP", @"Hướng dẫn & Credit"];
-    NSArray *icons = @[@"square.and.arrow.down.fill", @"square.stack.3d.up.fill", @"slider.horizontal.3", @"wifi", @"info.circle.fill"];
-    NSArray *iconTints = @[kTintBlue, kTintIndigo, kTintGreen, kTintTeal, kTintOrange];
+    NSArray *navTitles = @[@"Cài đặt Mod", @"Thư viện Mod", @"Hiệu năng & Điều khiển", @"Co-op LAN / IP", @"Nhật ký Log & Mods", @"Hướng dẫn & Credit"];
+    NSArray *icons = @[@"square.and.arrow.down.fill", @"square.stack.3d.up.fill", @"slider.horizontal.3", @"wifi", @"scroll.fill", @"info.circle.fill"];
+    NSArray *iconTints = @[kTintBlue, kTintIndigo, kTintGreen, kTintTeal, kTintPurple, kTintOrange];
 
     if (_tab >= 0 && _tab < (NSInteger)navTitles.count) {
         _navTitleLabel.text = navTitles[_tab];
@@ -517,7 +521,11 @@ static NSString *sdvProbeLocalNetwork(void) {
         b.backgroundColor = active ? kTintBlue : UIColor.clearColor;
         UIColor *fg = active ? UIColor.whiteColor : kInkPrimary;
         b.tintColor = active ? UIColor.whiteColor : iconTints[i];
-        [b setImage:sfIcon(icons[i], 14.5, active ? UIImageSymbolWeightSemibold : UIImageSymbolWeightMedium) forState:UIControlStateNormal];
+        UIImage *icImg = sfIcon(icons[i], 14.5, active ? UIImageSymbolWeightSemibold : UIImageSymbolWeightMedium);
+        if (!icImg && [icons[i] isEqualToString:@"scroll.fill"]) {
+            icImg = sfIcon(@"doc.text.fill", 14.5, active ? UIImageSymbolWeightSemibold : UIImageSymbolWeightMedium);
+        }
+        [b setImage:icImg forState:UIControlStateNormal];
         [b setTitle:titles[i] forState:UIControlStateNormal];
         [b setTitleColor:fg forState:UIControlStateNormal];
         b.titleLabel.font = iosFont(13.5, active ? UIFontWeightSemibold : UIFontWeightRegular);
@@ -542,6 +550,7 @@ static NSString *sdvProbeLocalNetwork(void) {
     _preview = nil;
     _presetButtons = nil;
     _creditCard = nil;
+    _logTextView = nil;
     _ramHeadlineLbl = nil;
     _ramDetailLbl = nil;
     _ramBarTrack = nil;
@@ -574,6 +583,7 @@ static NSString *sdvProbeLocalNetwork(void) {
     else if (_tab == 1) [self renderLibraryTab];
     else if (_tab == 2) [self renderUiStudioTab];
     else if (_tab == 3) [self renderCoopTab];
+    else if (_tab == 4) [self renderLogTab];
     else [self renderGuideCreditTab];
 
     if (animate && !UIAccessibilityIsReduceMotionEnabled()) {
@@ -1342,7 +1352,213 @@ static NSString *sdvProbeLocalNetwork(void) {
 }
 
 // ============================================================
-// TAB 4: HƯỚNG DẪN & CREDIT / ỦNG HỘ NHÀ PHÁT HÀNH
+// TAB 4: NHẬT KÝ LOG (SMAPI / ENGINE / KIỂM TRA THƯ MỤC MODS)
+// ============================================================
+-(NSString *)readTailOfFile:(NSString *)path maxChars:(NSUInteger)maxChars {
+    if (!path.length || ![fm() fileExistsAtPath:path]) return nil;
+    NSError *err = nil;
+    NSString *txt = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&err];
+    if (!txt) {
+        NSData *d = [NSData dataWithContentsOfFile:path];
+        if (d.length) txt = [[NSString alloc] initWithData:d encoding:NSISOLatin1StringEncoding];
+    }
+    if (!txt.length) return nil;
+    if (txt.length > maxChars) {
+        txt = [@"… (đã rút gọn phần đầu, hiển thị phần mới nhất) …\n\n" stringByAppendingString:[txt substringFromIndex:txt.length - maxChars]];
+    }
+    return txt;
+}
+
+-(NSString *)buildModsDiagnosticText {
+    NSString *docs = _root.path ?: @"";
+    NSMutableString *out = [NSMutableString string];
+    [out appendFormat:@"=== KIỂM TRA THƯ MỤC MODS ===\nDocuments: %@\n\n", docs];
+
+    NSArray<NSString *> *checkDirs = @[
+        @"Mods",
+        @"mods",
+        @"StardewValley/Mods",
+        @"Stardew Valley/Mods",
+        @"DisabledMods"
+    ];
+
+    for (NSString *rel in checkDirs) {
+        NSString *p = join(docs, rel);
+        if (!dir(p)) continue;
+        NSArray<NSString *> *entries = [[fm() contentsOfDirectoryAtPath:p error:nil] sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)] ?: @[];
+        [out appendFormat:@"[%@] (%lu mục)\n", rel, (unsigned long)entries.count];
+        for (NSString *entry in entries) {
+            NSString *full = join(p, entry);
+            BOOL isDir = dir(full);
+            if (!isDir) {
+                [out appendFormat:@"  • [FILE] %@\n", entry];
+                continue;
+            }
+            NSString *mfPath = join(full, @"manifest.json");
+            if ([fm() fileExistsAtPath:mfPath]) {
+                @try {
+                    id j = jsonAt(mfPath);
+                    if ([j isKindOfClass:NSDictionary.class]) {
+                        NSString *uid = field(j, @"UniqueID");
+                        NSString *ver = field(j, @"Version");
+                        NSString *dll = field(j, @"EntryDll");
+                        id cpf = j[@"ContentPackFor"];
+                        NSString *cpfId = [cpf isKindOfClass:NSDictionary.class] ? field(cpf, @"UniqueID") : @"";
+                        NSString *kind = dll.length ? [NSString stringWithFormat:@"C# DLL (%@)", dll] : (cpfId.length ? [NSString stringWithFormat:@"ContentPack (%@)", cpfId] : @"Pack");
+                        [out appendFormat:@"  ✓ %@  [%@ v%@] — %@\n", entry, uid, ver, kind];
+                    } else {
+                        [out appendFormat:@"  ! %@ — manifest.json lỗi định dạng\n", entry];
+                    }
+                } @catch (NSException *ex) {
+                    [out appendFormat:@"  ✗ %@ — Lỗi đọc manifest.json: %@\n", entry, ex.reason];
+                }
+            } else {
+                NSArray<NSString *> *subFiles = files(full);
+                NSMutableArray<NSString *> *nestedMfs = [NSMutableArray array];
+                for (NSString *sf in subFiles) {
+                    if ([sf.lastPathComponent.lowercaseString isEqualToString:@"manifest.json"]) {
+                        [nestedMfs addObject:sf];
+                    }
+                }
+                if (nestedMfs.count > 0) {
+                    [out appendFormat:@"  ↳ %@ (nhóm gồm %lu mod con: %@)\n", entry, (unsigned long)nestedMfs.count, [[nestedMfs subarrayWithRange:NSMakeRange(0, MIN(nestedMfs.count, 5))] componentsJoinedByString:@", "]];
+                } else {
+                    [out appendFormat:@"  ? %@ (KHÔNG có manifest.json!)\n", entry];
+                }
+            }
+        }
+        [out appendString:@"\n"];
+    }
+    return out;
+}
+
+-(NSString *)loadSelectedLogContent:(NSString **)outSourcePath {
+    NSString *docs = _root.path ?: @"";
+    if (_logSubTab == 2) {
+        if (outSourcePath) *outSourcePath = join(docs, @"Mods");
+        return [self buildModsDiagnosticText];
+    }
+
+    NSMutableArray<NSString *> *cands = [NSMutableArray array];
+    if (_logSubTab == 0) {
+        [cands addObjectsFromArray:@[
+            join(join(docs, @"ErrorLogs"), @"SMAPI-latest.txt"),
+            join(join(join(docs, @"StardewValley"), @"ErrorLogs"), @"SMAPI-latest.txt"),
+            join(join(docs, @"ErrorLogs"), @"SMAPI-crash.txt"),
+            join(join(join(docs, @"StardewValley"), @"ErrorLogs"), @"SMAPI-crash.txt"),
+            join(join(join(join(docs, @".config"), @"StardewValley"), @"ErrorLogs"), @"SMAPI-latest.txt")
+        ]];
+    } else {
+        NSString *errDir = join(docs, @"ErrorLogs");
+        if (dir(errDir)) {
+            NSArray<NSString *> *items = [fm() contentsOfDirectoryAtPath:errDir error:nil] ?: @[];
+            NSMutableArray<NSDictionary *> *found = [NSMutableArray array];
+            for (NSString *fn in items) {
+                NSString *low = fn.lowercaseString;
+                if ([low hasPrefix:@"smapi-"]) continue;
+                if ([low hasSuffix:@".log"] || [low hasSuffix:@".txt"]) {
+                    NSString *fp = join(errDir, fn);
+                    NSDate *dt = [fm() attributesOfItemAtPath:fp error:nil].fileModificationDate ?: [NSDate distantPast];
+                    [found addObject:@{@"path": fp, @"date": dt}];
+                }
+            }
+            [found sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+                return [b[@"date"] compare:a[@"date"]];
+            }];
+            for (NSDictionary *f in found) [cands addObject:f[@"path"]];
+        }
+        [cands addObject:join(docs, @"engine.log")];
+        [cands addObject:join(docs, @"SDViOS.log")];
+    }
+
+    for (NSString *p in cands) {
+        NSString *txt = [self readTailOfFile:p maxChars:36000];
+        if (txt.length) {
+            if (outSourcePath) *outSourcePath = p;
+            return txt;
+        }
+    }
+
+    if (outSourcePath) *outSourcePath = join(docs, @"ErrorLogs");
+    return _logSubTab == 0
+        ? @"Chưa thấy tệp SMAPI-latest.txt trong ErrorLogs/.\nHãy vào game (tới màn hình chính hoặc nông trại) rồi mở lại mục Log này."
+        : @"Chưa thấy tệp Engine Log nào trong ErrorLogs/.";
+}
+
+-(void)renderLogTab {
+    UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"SMAPI Log", @"Engine Log", @"Thư mục Mods"]];
+    seg.selectedSegmentIndex = _logSubTab;
+    [seg addTarget:self action:@selector(logSubTabChanged:) forControlEvents:UIControlEventValueChanged];
+    [_pane addArrangedSubview:seg];
+
+    NSString *srcPath = nil;
+    _currentLogText = [self loadSelectedLogContent:&srcPath];
+
+    UIStackView *toolbar = mkHStack(8);
+    UILabel *pathLbl = mkLabel(srcPath.lastPathComponent ?: @"Log", 12, UIFontWeightMedium, kInkSecondary);
+    pathLbl.numberOfLines = 1;
+    [toolbar addArrangedSubview:pathLbl];
+    [toolbar addArrangedSubview:[UIView new]];
+
+    SDVAppleButton *refreshBtn = mkIOSButton(@"Làm mới", @"arrow.clockwise", [kTintBlue colorWithAlphaComponent:0.13], kTintBlue, 12.5, UIEdgeInsetsMake(6, 10, 6, 10));
+    [refreshBtn addTarget:self action:@selector(refreshLogTab) forControlEvents:UIControlEventTouchUpInside];
+    [toolbar addArrangedSubview:refreshBtn];
+
+    SDVAppleButton *bottomBtn = mkIOSButton(@"Cuối log", @"arrow.down.to.line", [kTintPurple colorWithAlphaComponent:0.13], kTintPurple, 12.5, UIEdgeInsetsMake(6, 10, 6, 10));
+    [bottomBtn addTarget:self action:@selector(scrollLogToBottom) forControlEvents:UIControlEventTouchUpInside];
+    [toolbar addArrangedSubview:bottomBtn];
+
+    SDVAppleButton *copyBtn = mkIOSButton(@"Sao chép", @"doc.on.doc", kTintBlue, UIColor.whiteColor, 12.5, UIEdgeInsetsMake(6, 11, 6, 11));
+    [copyBtn addTarget:self action:@selector(copyCurrentLog) forControlEvents:UIControlEventTouchUpInside];
+    [toolbar addArrangedSubview:copyBtn];
+
+    UITextView *tv = [UITextView new];
+    tv.editable = NO;
+    tv.selectable = YES;
+    tv.backgroundColor = kBgCardSubtle;
+    tv.textColor = kInkPrimary;
+    tv.font = [UIFont monospacedSystemFontOfSize:11.5 weight:UIFontWeightRegular];
+    tv.layer.cornerRadius = 10;
+    tv.layer.cornerCurve = kCACornerCurveContinuous;
+    tv.textContainerInset = UIEdgeInsetsMake(10, 10, 10, 10);
+    tv.text = _currentLogText ?: @"";
+    tv.translatesAutoresizingMaskIntoConstraints = NO;
+    [tv.heightAnchor constraintEqualToConstant:265].active = YES;
+    _logTextView = tv;
+
+    UIStackView *box = mkVStack(10);
+    [box addArrangedSubview:toolbar];
+    [box addArrangedSubview:tv];
+    [_pane addArrangedSubview:mkGroupedCard(box, UIEdgeInsetsMake(12, 12, 12, 12))];
+}
+
+-(void)logSubTabChanged:(UISegmentedControl *)seg {
+    _logSubTab = seg.selectedSegmentIndex;
+    [self renderAll:NO];
+}
+
+-(void)refreshLogTab {
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+    [self renderAll:NO];
+}
+
+-(void)scrollLogToBottom {
+    if (!_logTextView || !_logTextView.text.length) return;
+    NSRange endRange = NSMakeRange(_logTextView.text.length - 1, 1);
+    [_logTextView scrollRangeToVisible:endRange];
+}
+
+-(void)copyCurrentLog {
+    if (!_currentLogText.length) return;
+    UIPasteboard.generalPasteboard.string = _currentLogText;
+    [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];
+    _message = @"Đã sao chép toàn bộ nội dung Log vào bộ nhớ tạm!";
+    _messageIsError = NO;
+    [self renderAll:NO];
+}
+
+// ============================================================
+// TAB 5: HƯỚNG DẪN & CREDIT / ỦNG HỘ NHÀ PHÁT HÀNH
 // ============================================================
 -(UIView *)mkGuideStep:(NSString *)num title:(NSString *)title body:(NSString *)body color:(UIColor *)col {
     UIStackView *row = mkHStack(11);

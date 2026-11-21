@@ -812,7 +812,9 @@ static void sdvNormalizeModsFolders(NSString *docsPath) {
         NSArray<NSString *> *extraDirs = @[
             join(docsPath, @"mods"),
             join(join(docsPath, @"StardewValley"), @"Mods"),
-            join(join(docsPath, @"StardewValley"), @"mods")
+            join(join(docsPath, @"StardewValley"), @"mods"),
+            join(join(docsPath, @"Stardew Valley"), @"Mods"),
+            join(join(docsPath, @"Stardew Valley"), @"mods")
         ];
         for (NSString *srcRoot in extraDirs) {
             if (!dir(srcRoot)) continue;

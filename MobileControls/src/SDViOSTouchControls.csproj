@@ -7,7 +7,9 @@
     <LangVersion>latest</LangVersion>
     <NoWarn>$(NoWarn);CA1416</NoWarn>
     <GameFilesDir Condition="'$(GameFilesDir)' == '' and Exists('$(MSBuildThisFileDirectory)..\..\..\Game_Files')">$(MSBuildThisFileDirectory)..\..\..\Game_Files</GameFilesDir>
-    <GameFilesDir Condition="'$(GameFilesDir)' == ''">C:\Users\User\Desktop\SDVport Version\Game_Files</GameFilesDir>
+    <GameFilesDir Condition="'$(GameFilesDir)' == ''">D:\steam\steamapps\common\Stardew Valley</GameFilesDir>
+    <BundledSmapiDir Condition="'$(BundledSmapiDir)' == '' and Exists('D:\StardewMobileiOS\trashtest\ipa_repack\stage\Payload\SDViOS.app\Frameworks\SDVModGarden.framework\BundledSMAPI')">D:\StardewMobileiOS\trashtest\ipa_repack\stage\Payload\SDViOS.app\Frameworks\SDVModGarden.framework\BundledSMAPI</BundledSmapiDir>
+    <BundledSmapiDir Condition="'$(BundledSmapiDir)' == ''">$(GameFilesDir)</BundledSmapiDir>
   </PropertyGroup>
 
   <ItemGroup>
@@ -16,7 +18,7 @@
       <Private>false</Private>
     </Reference>
     <Reference Include="StardewModdingAPI">
-      <HintPath>$(GameFilesDir)\StardewModdingAPI.dll</HintPath>
+      <HintPath>$(BundledSmapiDir)\StardewModdingAPI.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="Stardew Valley">
@@ -24,7 +26,7 @@
       <Private>false</Private>
     </Reference>
     <Reference Include="0Harmony">
-      <HintPath>$(GameFilesDir)\smapi-internal\0Harmony.dll</HintPath>
+      <HintPath>$(BundledSmapiDir)\smapi-internal\0Harmony.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="xTile">

@@ -757,7 +757,7 @@ namespace SDViOSTouchControls
             _btnSaveClose = new Rectangle(_settingsModalRect.Left + 42 + botBtnW, botY, botBtnW, 34);
         }
 
-        public void Update(GameTime gameTime)
+        public void Update(GameTime? gameTime)
         {
             if (QuickSaveManager.Instance?.IsReloading == true)
             {
@@ -811,7 +811,7 @@ namespace SDViOSTouchControls
             IReadOnlyList<TouchLocation> activeTouches = _syntheticTouchList;
             TouchCollection touches = rawTouches;
 
-            double curTime = gameTime.TotalGameTime.TotalSeconds;
+            double curTime = gameTime != null ? gameTime.TotalGameTime.TotalSeconds : (Game1.ticks / 60.0);
 
             if (_yPulseFrames > 0) _yPulseFrames--;
             if (_bPulseFrames > 0) _bPulseFrames--;
@@ -889,10 +889,11 @@ namespace SDViOSTouchControls
             // Hold-to-Dispense accumulation using GameTime (Amendment 3)
             if (isMenuOpen && Settings.EnableHoldToDispense && _pointClickTouchId != -1 && _menuTouchHoldTimer >= 0.0)
             {
-                _menuTouchHoldTimer += gameTime.ElapsedGameTime.TotalMilliseconds;
+                double dtMs = gameTime != null ? gameTime.ElapsedGameTime.TotalMilliseconds : 16.67;
+                _menuTouchHoldTimer += dtMs;
                 if (_menuTouchHoldTimer >= 250.0)
                 {
-                    _dispenseIntervalTimer += gameTime.ElapsedGameTime.TotalMilliseconds;
+                    _dispenseIntervalTimer += dtMs;
                     if (_dispenseIntervalTimer >= 100.0)
                     {
                         _dispenseIntervalTimer -= 100.0;
@@ -1733,7 +1734,7 @@ namespace SDViOSTouchControls
             return new Point((int)(normX * _viewportWidth), (int)(normY * _viewportHeight));
         }
 
-        private void HandleBackgroundTouch(TouchLocation touch, Point pt, GameTime gameTime)
+        private void HandleBackgroundTouch(TouchLocation touch, Point pt, GameTime? gameTime)
         {
             if (Settings.MouseControlMode == MouseMode.Disabled) return;
 
@@ -1891,9 +1892,9 @@ namespace SDViOSTouchControls
             }
         }
 
-        private void HandleTrackpadTouch(TouchLocation touch, GameTime gameTime)
+        private void HandleTrackpadTouch(TouchLocation touch, GameTime? gameTime)
         {
-            float curTime = (float)gameTime.TotalGameTime.TotalSeconds;
+            float curTime = (float)(gameTime != null ? gameTime.TotalGameTime.TotalSeconds : (Game1.ticks / 60.0));
 
             if (_trackpadPrimaryTouchId == -1)
             {
@@ -2683,13 +2684,29 @@ namespace SDViOSTouchControls
             {
                 MobileHudAndControls.Instance.Draw(spriteBatch, _pixelTexture, Settings);
 
+                // When outside open-world Mobile HUD (e.g. Title Screen, Character Creation, Co-op IP, In-Game Menu, Cutscene),
+                // keep compact utility buttons (SET / KEY / MENU / MODS) visible so Virtual Keyboard & Mod Hotkeys are always accessible!
+                if (!MobileHudAndControls.Instance.IsWorldHudActive(Settings) &&
+                    !MobileHudAndControls.Instance.IsCustomizeBarOpen &&
+                    !MobileHudAndControls.Instance.IsMobileSettingsOpen)
+                {
+                    float uAlpha = Math.Max(0.55f, Settings.Opacity);
+                    DrawButton(spriteBatch, _btnSettingsRect, "SET", new Color(32, 48, 56) * uAlpha, Color.White, 2);
+                    if (Settings.ShowKeyboardBtn && !_btnKeyboardRect.IsEmpty)
+                        DrawButton(spriteBatch, _btnKeyboardRect, "KEY", new Color(38, 59, 69) * uAlpha, Color.White, 2);
+                    if (Settings.ShowMenuBtn && !_btnMenuRect.IsEmpty)
+                        DrawButton(spriteBatch, _btnMenuRect, "MENU", (IsVisualButtonMenu ? new Color(133, 80, 54) : new Color(87, 59, 43)) * uAlpha, Color.White, 2);
+                    if (Settings.ShowHotkeyDrawerBtn && !_btnHotkeyDrawerToggleRect.IsEmpty)
+                        DrawButton(spriteBatch, _btnHotkeyDrawerToggleRect, "MODS", (IsHotkeyDrawerOpen ? Color.Indigo : new Color(65, 57, 87)) * uAlpha, Color.White, 2);
+                }
+
                 if (IsHotkeyDrawerOpen)
                 {
                     DrawHotkeyDrawer(spriteBatch, Settings.Opacity);
                 }
 
                 // When an in-game menu (Inventory / Chest / Shop) is open, show themed x1 / 1/2 / XFER helpers
-                if (Game1.activeClickableMenu != null && Settings.EnableInventoryToolbar && ModEntry.IsRunningOnIos)
+                if (Game1.activeClickableMenu != null && !(Game1.activeClickableMenu is TitleMenu) && Settings.EnableInventoryToolbar && ModEntry.IsRunningOnIos)
                 {
                     float menuAlpha = Math.Max(0.75f, Settings.Opacity);
                     DrawThemedSmallMenuBtn(spriteBatch, _btnInventoryOneRect, "x1", IsSingleItemMode, menuAlpha);

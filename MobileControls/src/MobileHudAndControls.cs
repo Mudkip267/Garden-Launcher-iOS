@@ -266,7 +266,7 @@ namespace SDViOSTouchControls
         public bool UpdateTouches(
             IReadOnlyList<TouchLocation> touches,
             Func<Vector2, Point> mapTouchToViewport,
-            GameTime gameTime,
+            GameTime? gameTime,
             TouchOverlaySettings s)
         {
             if (s.ControlScheme == MobileControlScheme.LegacyXboxPad || !s.MobileUIEnabled)
@@ -275,7 +275,7 @@ namespace SDViOSTouchControls
                 return false;
             }
 
-            double curTime = gameTime.TotalGameTime.TotalSeconds;
+            double curTime = gameTime != null ? gameTime.TotalGameTime.TotalSeconds : (Game1.ticks / 60.0);
             ButtonXPressed = false;
             ButtonAPressed = false;
 

@@ -114,26 +114,42 @@ static void syncBundledSmapi(NSString *docsPath) {
         if (!dir(smapiRoot)) return;
         [fm() createDirectoryAtPath:docsPath withIntermediateDirectories:YES attributes:nil error:nil];
 
-        // 1. Deploy open-source StardewModdingAPI.dll (SMAPI 4.5.2, iOS-verified) if missing
         NSString *srcDll = join(smapiRoot, @"StardewModdingAPI.dll");
-        NSString *dstDll = join(docsPath, @"StardewModdingAPI.dll");
-        if ([fm() fileExistsAtPath:srcDll] && ![fm() fileExistsAtPath:dstDll]) {
-            NSData *d = [NSData dataWithContentsOfFile:srcDll options:NSDataReadingMappedIfSafe error:nil];
-            if (d.length) [d writeToFile:dstDll options:NSDataWritingAtomic error:nil];
-        }
-
-        // 2. Deploy smapi-internal/ files (preserving existing user config.json if present)
         NSString *srcInternal = join(smapiRoot, @"smapi-internal");
-        NSString *dstInternal = join(docsPath, @"smapi-internal");
-        if (dir(srcInternal)) {
-            NSDirectoryEnumerator *en = [fm() enumeratorAtPath:srcInternal];
-            for (NSString *rel in en) {
-                if (![en.fileAttributes.fileType isEqualToString:NSFileTypeRegular]) continue;
-                NSString *dst = join(dstInternal, rel);
-                if ([fm() fileExistsAtPath:dst]) continue;
-                [fm() createDirectoryAtPath:dst.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
-                NSData *d = [NSData dataWithContentsOfFile:join(srcInternal, rel) options:NSDataReadingMappedIfSafe error:nil];
-                if (d) [d writeToFile:dst options:NSDataWritingAtomic error:nil];
+
+        NSMutableArray<NSString *> *targets = [NSMutableArray arrayWithObject:docsPath];
+        NSString *subSdv = join(docsPath, @"StardewValley");
+        if (dir(subSdv)) [targets addObject:subSdv];
+
+        for (NSString *base in targets) {
+            NSString *dstDll = join(base, @"StardewModdingAPI.dll");
+            NSString *dstInternal = join(base, @"smapi-internal");
+            NSString *marker = join(dstInternal, @".bundled_smapi_v452_ok");
+            BOOL forceRefresh = ![fm() fileExistsAtPath:marker] || ![fm() fileExistsAtPath:dstDll];
+
+            if ([fm() fileExistsAtPath:srcDll] && forceRefresh) {
+                NSData *d = [NSData dataWithContentsOfFile:srcDll options:NSDataReadingMappedIfSafe error:nil];
+                if (d.length) [d writeToFile:dstDll options:NSDataWritingAtomic error:nil];
+            }
+
+            if (dir(srcInternal)) {
+                [fm() createDirectoryAtPath:dstInternal withIntermediateDirectories:YES attributes:nil error:nil];
+                // Clean up desktop-only System.Management.dll if an old PC SMAPI zip left it behind
+                NSString *staleMgmt = join(dstInternal, @"System.Management.dll");
+                if ([fm() fileExistsAtPath:staleMgmt]) [fm() removeItemAtPath:staleMgmt error:nil];
+
+                NSDirectoryEnumerator *en = [fm() enumeratorAtPath:srcInternal];
+                for (NSString *rel in en) {
+                    if (![en.fileAttributes.fileType isEqualToString:NSFileTypeRegular]) continue;
+                    NSString *dst = join(dstInternal, rel);
+                    if (!forceRefresh && [fm() fileExistsAtPath:dst]) continue;
+                    [fm() createDirectoryAtPath:dst.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+                    NSData *d = [NSData dataWithContentsOfFile:join(srcInternal, rel) options:NSDataReadingMappedIfSafe error:nil];
+                    if (d) [d writeToFile:dst options:NSDataWritingAtomic error:nil];
+                }
+                if (forceRefresh) {
+                    [@"4.5.2-ios" writeToFile:marker atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                }
             }
         }
     } @catch (NSException *ex) { }
@@ -313,12 +329,14 @@ static NSUInteger importGameDataZip(NSURL *url, NSString *docsPath) {
             NSString *fileLow = rel.lastPathComponent.lowercaseString;
             NSString *extLow = rel.pathExtension.lowercaseString;
 
-            // Protect existing user saves & built-in touch controls mod
+            // Protect existing user saves, iOS-bundled SMAPI 4.5.2, & built-in touch controls mod
             if ([topLow isEqualToString:@"saves"]) continue;
+            if ([topLow isEqualToString:@"smapi-internal"]) continue;
             if ([topLow isEqualToString:@"mods"] && relParts.count >= 2 && [relParts[1] caseInsensitiveCompare:@"SDViOSTouchControls"] == NSOrderedSame) continue;
 
-            // Skip desktop native binaries & desktop .NET BCL DLLs already provided by SDViOS.app for iOS
+            // Skip desktop native binaries & desktop .NET BCL / SMAPI DLLs already provided by SDViOS.app for iOS
             if (relParts.count == 1) {
+                if ([fileLow hasPrefix:@"stardewmoddingapi."]) continue;
                 if ([extLow isEqualToString:@"exe"] || [extLow isEqualToString:@"so"] || [extLow isEqualToString:@"dylib"] || [extLow isEqualToString:@"pdb"] || [fileLow containsString:@".so."]) continue;
                 if ([fileLow hasPrefix:@"api-ms-win-"] || [fileLow hasPrefix:@"mscordaccore_"] || [fileLow hasPrefix:@"microsoft.diasymreader"]) continue;
                 if ([desktopJunk containsObject:fileLow] || [bundleRuntimeFiles containsObject:fileLow]) continue;

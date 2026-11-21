@@ -89,12 +89,13 @@ namespace SDViOSTouchControls
         }
 
         /// <summary>
-        /// Safe to call from UpdateTicking (OUTSIDE SpriteBatch / RenderTarget drawing) so Texture2D.GetData()
-        /// never switches OpenGL ES framebuffers mid-frame on iOS!
+        /// Safe to call from UpdateTicking (OUTSIDE SpriteBatch / RenderTarget drawing) when world is ready.
+        /// Never runs on the Title Screen / cold boot, and always restores the iOS EAGL default framebuffer after GetData()!
         /// </summary>
         public static void UpdateIfNeeded(GraphicsDevice? gd)
         {
-            if (gd == null) return;
+            if (gd == null || gd.IsDisposed) return;
+            if (!Context.IsWorldReady || Game1.gameMode != 3 || Game1.ticks < 30) return;
 
             var curMenu = Game1.menuTexture;
             var curCursors = Game1.mouseCursors;
@@ -120,6 +121,7 @@ namespace SDViOSTouchControls
 
         /// <summary>
         /// Fast draw-time getter (NEVER invokes Texture2D.GetData during SpriteBatch rendering).
+        /// If _rawMobileAtlas has not been loaded yet, loads the texture reference lazily without GetData().
         /// </summary>
         public static Texture2D? GetAtlas(GraphicsDevice? gd)
         {
@@ -127,7 +129,29 @@ namespace SDViOSTouchControls
                 return _themedMobileAtlas;
             if (_rawMobileAtlas != null && !_rawMobileAtlas.IsDisposed)
                 return _rawMobileAtlas;
-            return null;
+
+            try
+            {
+                if (Game1.content != null)
+                {
+                    _rawMobileAtlas = Game1.content.Load<Texture2D>("LooseSprites/MobileAtlas_manually_made");
+                }
+            }
+            catch
+            {
+                try
+                {
+                    if (Game1.content != null)
+                    {
+                        _rawMobileAtlas = Game1.content.Load<Texture2D>("LooseSprites\\MobileAtlas_manually_made");
+                    }
+                }
+                catch
+                {
+                    _rawMobileAtlas = null;
+                }
+            }
+            return _rawMobileAtlas;
         }
 
         private static void RebuildIfNeeded(GraphicsDevice gd)
@@ -160,13 +184,22 @@ namespace SDViOSTouchControls
                 int rw = Math.Min(AtlasRegionW, _rawMobileAtlas.Width);
                 int rh = Math.Min(AtlasRegionH, _rawMobileAtlas.Height);
                 Color[] atlasPixels = new Color[rw * rh];
-                _rawMobileAtlas.GetData(0, new Rectangle(0, 0, rw, rh), atlasPixels, 0, atlasPixels.Length);
+                try
+                {
+                    _rawMobileAtlas.GetData(0, new Rectangle(0, 0, rw, rh), atlasPixels, 0, atlasPixels.Length);
+                }
+                finally
+                {
+                    // CRITICAL iOS FIX: MonoGame iOS Texture2D.PlatformGetData binds a temp FBO and deletes it,
+                    // resetting GL_FRAMEBUFFER_BINDING to 0! Always restore iOSGameView._framebuffer immediately!
+                    ModEntry.RestoreIosDefaultFramebuffer(gd);
+                }
 
                 // 1. Check whether MobileAtlas_manually_made itself was modified by a Mobile UI mod
                 _atlasItselfModded = DetectIfMobileAtlasModded(atlasPixels, rw, rh);
 
                 // 2. Check whether Game1.menuTexture (Maps/MenuTiles) was modified by a PC UI mod
-                Color[]? modRamp = ExtractUiModColorRamp(Game1.menuTexture, out bool menuModded);
+                Color[]? modRamp = ExtractUiModColorRamp(Game1.menuTexture, gd, out bool menuModded);
                 _pcUiModDetected = menuModded;
 
                 if (modRamp != null && modRamp.Length >= 7)
@@ -252,6 +285,10 @@ namespace SDViOSTouchControls
             {
                 ModEntry.ModMonitor?.Log($"[MobileThemeEngine] Theme rebuild note: {ex.Message}", LogLevel.Trace);
             }
+            finally
+            {
+                ModEntry.RestoreIosDefaultFramebuffer(gd);
+            }
         }
 
         private static bool DetectIfMobileAtlasModded(Color[] px, int w, int h)
@@ -269,7 +306,7 @@ namespace SDViOSTouchControls
             return !(menuMidMatches && menuBorderMatches && toolbarWarm);
         }
 
-        private static Color[]? ExtractUiModColorRamp(Texture2D? menuTex, out bool isModded)
+        private static Color[]? ExtractUiModColorRamp(Texture2D? menuTex, GraphicsDevice gd, out bool isModded)
         {
             isModded = false;
             if (menuTex == null || menuTex.IsDisposed || menuTex.Width < 60 || menuTex.Height < 316)
@@ -279,7 +316,14 @@ namespace SDViOSTouchControls
             {
                 // Standard Stardew UI 9-slice box lives at (0, 256, 60, 60) inside Maps/MenuTiles
                 Color[] box = new Color[60 * 60];
-                menuTex.GetData(0, new Rectangle(0, 256, 60, 60), box, 0, box.Length);
+                try
+                {
+                    menuTex.GetData(0, new Rectangle(0, 256, 60, 60), box, 0, box.Length);
+                }
+                finally
+                {
+                    ModEntry.RestoreIosDefaultFramebuffer(gd);
+                }
 
                 // Check if center interior pixel differs from vanilla warm tan ~(255, 210, 132) / (251, 200, 118)
                 Color center = box[30 * 60 + 30];

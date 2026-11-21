@@ -29,9 +29,57 @@ namespace SDViOSTouchControls
 
         public static IMonitor? ModMonitor { get; private set; }
         public static bool VerboseInputLogging { get; set; } = false;
-        public static bool IsRunningOnIos { get; private set; } = false;
+        public static bool IsRunningOnIos { get; private set; } = true;
         private static IClickableMenu? _lastTickMenu = null;
         public static bool IsSavingOrNewDay { get; set; } = false;
+
+        private static FieldInfo? _gdGlFramebufferField;
+        private static MethodInfo? _gdApplyDefaultRtMethod;
+        private static FieldInfo? _hostActiveGameViewField;
+        private static FieldInfo? _gvFramebufferField;
+
+        /// <summary>
+        /// Ensures the iOS EAGL display framebuffer (iOSGameView._framebuffer) is bound on GraphicsDevice
+        /// whenever no offscreen RenderTarget2D is bound. Fixes MonoGame iOS Texture2D.PlatformGetData
+        /// leaving GL_FRAMEBUFFER_BINDING at 0 (which causes a permanent black screen on iOS EAGL).
+        /// </summary>
+        public static void RestoreIosDefaultFramebuffer(GraphicsDevice? gd)
+        {
+            if (!IsRunningOnIos || gd == null || gd.IsDisposed) return;
+            try
+            {
+                if (gd.RenderTargetCount > 0) return;
+
+                _gdGlFramebufferField ??= typeof(GraphicsDevice).GetField("glFramebuffer", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                int glFb = Convert.ToInt32(_gdGlFramebufferField?.GetValue(gd) ?? 0);
+                if (glFb <= 0)
+                {
+                    if (_hostActiveGameViewField == null)
+                    {
+                        var sdvIosAsm = AppDomain.CurrentDomain.GetAssemblies().FirstOrDefault(a => a.GetName().Name == "SDViOS");
+                        var ghType = sdvIosAsm?.GetType("SDViOS.Loader.GameHost");
+                        _hostActiveGameViewField = ghType?.GetField("_activeGameView", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                    }
+                    var gv = _hostActiveGameViewField?.GetValue(null);
+                    if (gv != null)
+                    {
+                        _gvFramebufferField ??= gv.GetType().GetField("_framebuffer", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                        glFb = Convert.ToInt32(_gvFramebufferField?.GetValue(gv) ?? 0);
+                        if (glFb > 0)
+                        {
+                            _gdGlFramebufferField?.SetValue(gd, glFb);
+                        }
+                    }
+                }
+
+                if (glFb > 0)
+                {
+                    _gdApplyDefaultRtMethod ??= typeof(GraphicsDevice).GetMethod("PlatformApplyDefaultRenderTarget", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                    _gdApplyDefaultRtMethod?.Invoke(gd, null);
+                }
+            }
+            catch { }
+        }
 
         public static string GetCompactStackTrace(int skipFrames = 2, int maxFrames = 6)
         {
@@ -60,8 +108,15 @@ namespace SDViOSTouchControls
         public override void Entry(IModHelper helper)
         {
             ModMonitor = Monitor;
-            IsRunningOnIos = OperatingSystem.IsIOS() ||
-                AppDomain.CurrentDomain.GetAssemblies().Any(a => string.Equals(a.GetName().Name, "SDViOS", StringComparison.OrdinalIgnoreCase));
+            try
+            {
+                bool hasIosHost = AppDomain.CurrentDomain.GetAssemblies().Any(a => string.Equals(a.GetName().Name, "SDViOS", StringComparison.OrdinalIgnoreCase));
+                IsRunningOnIos = hasIosHost || !OperatingSystem.IsWindows();
+            }
+            catch
+            {
+                IsRunningOnIos = true;
+            }
             TouchOverlaySettings.LogAction = msg => Monitor.Log(msg, LogLevel.Info);
             TouchVirtualPad.LogAction = msg => Monitor.Log(msg, LogLevel.Info);
 
@@ -205,9 +260,35 @@ namespace SDViOSTouchControls
             return false;
         }
 
+        private static void PatchClientBounds(Harmony harmony)
+        {
+            try
+            {
+                if (!IsRunningOnIos) return;
+                var iosWinType = typeof(GameWindow).Assembly.GetType("Microsoft.Xna.Framework.iOSGameWindow");
+                var cbGet = iosWinType?.GetProperty("ClientBounds", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetGetMethod();
+                if (cbGet != null)
+                {
+                    var prefix = typeof(ModEntry).GetMethod(nameof(PrefixClientBounds), BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                    if (prefix != null)
+                    {
+                        harmony.Patch(cbGet, prefix: new HarmonyMethod(prefix));
+                    }
+                }
+            }
+            catch { }
+        }
+
         private static bool PrefixHideVanillaPcHud()
         {
-            return !MobileHudAndControls.Instance.IsWorldHudActive(TouchOverlaySettings.Instance);
+            try
+            {
+                return !MobileHudAndControls.Instance.IsWorldHudActive(TouchOverlaySettings.Instance);
+            }
+            catch
+            {
+                return true;
+            }
         }
 
         private void RemoveLegacyComponentsFrom(GameComponentCollection? components, string ownerName)
@@ -319,6 +400,7 @@ namespace SDViOSTouchControls
         private void ApplyHarmonyPatches()
         {
             var harmony = new Harmony("com.deadakj.sdviostouchcontrols");
+            PatchClientBounds(harmony);
 
             // 0. Official Stardew Valley Mobile HUD Replacements (hide PC bottom Toolbar & PC Clock when Mobile UI is active)
             try
@@ -335,17 +417,6 @@ namespace SDViOSTouchControls
                 {
                     harmony.Patch(mDayTimeDraw, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixHideVanillaPcHud), BindingFlags.Static | BindingFlags.NonPublic)));
                     Monitor.Log("[SDViOSTouchControls] Harmony patched DayTimeMoneyBox.draw -> Mobile Compact HUD.", LogLevel.Info);
-                }
-
-                if (IsRunningOnIos)
-                {
-                    var iosWinType = typeof(GameWindow).Assembly.GetType("Microsoft.Xna.Framework.iOSGameWindow");
-                    var cbGet = iosWinType?.GetProperty("ClientBounds", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetGetMethod();
-                    if (cbGet != null)
-                    {
-                        harmony.Patch(cbGet, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixClientBounds), BindingFlags.Static | BindingFlags.NonPublic)));
-                        Monitor.Log("[SDViOSTouchControls] Harmony patched iOSGameWindow.ClientBounds -> v6 crisp 2.0x lock.", LogLevel.Info);
-                    }
                 }
             }
             catch (Exception ex)
@@ -1537,12 +1608,7 @@ namespace SDViOSTouchControls
                 EnsureNativeResolution(true);
                 EnsurePadInitialized();
                 EnsureModHooksWrapped();
-
-                // Rebuild auto-themed MobileAtlas safely OUTSIDE of SpriteBatch/RenderTarget passes!
-                if (TouchOverlaySettings.Instance.MobileUIEnabled && Game1.graphics?.GraphicsDevice != null)
-                {
-                    MobileThemeEngine.UpdateIfNeeded(Game1.graphics.GraphicsDevice);
-                }
+                RestoreIosDefaultFramebuffer(Game1.graphics?.GraphicsDevice);
                 Monitor.Log("[SDViOSTouchControls] GameLaunched: Full native resolution locked & Mobile UI touch overlay ready.", LogLevel.Info);
             }
             catch (Exception ex)
@@ -2162,8 +2228,9 @@ namespace SDViOSTouchControls
                 EnsurePadInitialized();
                 EnsureModHooksWrapped();
 
-                // Rebuild auto-themed MobileAtlas safely OUTSIDE of SpriteBatch/RenderTarget passes!
-                if (TouchOverlaySettings.Instance.MobileUIEnabled && Game1.graphics?.GraphicsDevice != null)
+                // Rebuild auto-themed MobileAtlas ONLY when in active gameplay world (never during cold boot / Title Screen)
+                if (Context.IsWorldReady && Game1.gameMode == 3 && Game1.ticks > 30 &&
+                    TouchOverlaySettings.Instance.MobileUIEnabled && Game1.graphics?.GraphicsDevice != null)
                 {
                     MobileThemeEngine.UpdateIfNeeded(Game1.graphics.GraphicsDevice);
                 }
@@ -2183,6 +2250,9 @@ namespace SDViOSTouchControls
 
                 // Ensure stuck fishing reel sounds ("fastReel", "slowReel", "SinWave") are stopped when not actively reeling/casting
                 StopStuckFishingSounds(forceSweepPool: false);
+
+                // Guarantee iOS EAGL display framebuffer (iOSGameView._framebuffer) is bound before Game1.Draw runs!
+                RestoreIosDefaultFramebuffer(Game1.graphics?.GraphicsDevice);
             }
             catch (Exception ex)
             {

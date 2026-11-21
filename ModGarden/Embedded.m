@@ -1073,18 +1073,6 @@ static SDVGardenGestureHost *gSdvGardenHost = nil;
     UIWindow *game = [self gameWindow];
     if (!game || [self isGardenOpen]) return;
 
-    UINotificationFeedbackGenerator *haptic = [[UINotificationFeedbackGenerator alloc] init];
-    [haptic notificationOccurred:critical ? UINotificationFeedbackTypeError : UINotificationFeedbackTypeWarning];
-    if (critical) {
-        // Strong 3-pulse haptic alert when RAM hits 90%+
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.32 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeError];
-        });
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.68 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeError];
-        });
-    }
-
     if (self.toastWindow) {
         self.toastWindow.hidden = YES;
         self.toastWindow = nil;

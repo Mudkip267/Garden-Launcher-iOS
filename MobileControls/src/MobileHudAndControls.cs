@@ -1053,18 +1053,18 @@ namespace SDViOSTouchControls
                         (int)(_dayTimeBoxRect.Height * 0.40f)
                     );
                     Rectangle moneyArea = new Rectangle(
-                        _dayTimeBoxRect.X + (int)(_dayTimeBoxRect.Width * 0.43f),
-                        _dayTimeBoxRect.Y + (int)(_dayTimeBoxRect.Height * 0.54f),
-                        (int)(_dayTimeBoxRect.Width * 0.52f),
-                        (int)(_dayTimeBoxRect.Height * 0.40f)
+                        _dayTimeBoxRect.X + (int)(_dayTimeBoxRect.Width * 0.44f),
+                        _dayTimeBoxRect.Y + (int)(_dayTimeBoxRect.Height * 0.56f),
+                        (int)(_dayTimeBoxRect.Width * 0.50f),
+                        (int)(_dayTimeBoxRect.Height * 0.36f)
                     );
 
                     Color textCol = MobileThemeEngine.ThemeTextColor;
                     DrawFittedText(sb, font, dayText, dayArea, textCol, rightAlign: false);
                     DrawFittedText(sb, font, timeText, timeArea, textCol, rightAlign: false);
 
-                    // Classic crisp dark-red money digits (matching Images 1, 3, 4!)
-                    Color moneyCol = new Color(150, 18, 12);
+                    // Classic crisp dark brown-crimson money digits inside the slots
+                    Color moneyCol = new Color(102, 22, 12);
                     DrawFittedText(sb, font, moneyText, moneyArea, moneyCol, rightAlign: true);
                 }
                 catch { }

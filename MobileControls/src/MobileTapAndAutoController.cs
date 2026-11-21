@@ -47,12 +47,16 @@ namespace SDViOSTouchControls
         // Active Tap-to-Move / Auto-Action state
         private bool _hasTarget = false;
         private Point _targetTile = Point.Zero;
+        private Point _pendingDestinationTile = Point.Zero;
         private TapActionKind _pendingAction = TapActionKind.None;
         private int _pendingToolSlot = -1;
         private bool _repeatToolUntilCleared = false;
         private int _actionCooldownTicks = 0;
         private int _targetVisualTicks = 0;
+        private bool _targetUnreachable = false;
         private Monster? _targetMonster = null;
+        private Furniture? _targetFurniture = null;
+        private Warp? _targetWarp = null;
 
         // Hold-to-walk state
         private int _worldTouchId = -1;
@@ -84,6 +88,9 @@ namespace SDViOSTouchControls
             _pendingToolSlot = -1;
             _repeatToolUntilCleared = false;
             _targetMonster = null;
+            _targetFurniture = null;
+            _targetWarp = null;
+            _targetUnreachable = false;
             _worldTouchId = -1;
             _isHoldWalking = false;
             HoldWalkVector = Vector2.Zero;
@@ -271,6 +278,8 @@ namespace SDViOSTouchControls
             _pendingAction = TapActionKind.None;
             _repeatToolUntilCleared = false;
             _targetMonster = null;
+            _targetFurniture = null;
+            _targetWarp = null;
             try
             {
                 if (Game1.player != null && Game1.player.controller != null)
@@ -334,15 +343,18 @@ namespace SDViOSTouchControls
             Point tile = new Point((int)Math.Floor(worldPos.X / 64f), (int)Math.Floor(worldPos.Y / 64f));
 
             _targetTile = tile;
-            _targetVisualTicks = 45;
+            _targetVisualTicks = 28;
             _hasTarget = true;
+            _targetUnreachable = false;
             _pendingAction = TapActionKind.WalkOnly;
             _pendingToolSlot = -1;
             _repeatToolUntilCleared = false;
             _targetMonster = null;
+            _targetFurniture = null;
+            _targetWarp = null;
 
             // 1. Check for Monster near tapped world point
-            Monster? tappedMonster = FindMonsterNear(loc, worldPos, 72f);
+            Monster? tappedMonster = FindMonsterNear(loc, worldPos, 76f);
             if (tappedMonster != null)
             {
                 _targetMonster = tappedMonster;
@@ -361,7 +373,47 @@ namespace SDViOSTouchControls
                 return;
             }
 
-            // 3. Check for Building / Door / Warp / Shipping Bin
+            // 3. Check for Warp doors (e.g. Farmhouse exit door / cave entrance / stairs)
+            Warp? warp = FindWarpNear(loc, worldPos, tile);
+            if (warp != null)
+            {
+                _targetWarp = warp;
+                _targetTile = new Point(warp.X, warp.Y);
+                _pendingAction = TapActionKind.Interact;
+                StartPathToTarget(player, loc, _targetTile, stopAdjacent: false);
+                return;
+            }
+
+            // 4. Check for Buildings & Shipping Bin / Action Doors (Shed/Coop/Barn/Greenhouse/ShippingBin)
+            Building? tappedBuilding = FindBuildingActionAt(loc, worldPos, tile, out Point buildingActionTile);
+            if (tappedBuilding != null)
+            {
+                _targetTile = buildingActionTile;
+                _pendingAction = TapActionKind.Interact;
+                StartPathToTarget(player, loc, buildingActionTile, stopAdjacent: true);
+                return;
+            }
+
+            // 5. Check for Furniture (TV, BedFurniture, Chairs, Tables, Lamps, Fireplaces, Fish Tanks)
+            Furniture? tappedFurniture = FindFurnitureAt(loc, worldPos, tile);
+            if (tappedFurniture != null)
+            {
+                _targetFurniture = tappedFurniture;
+                Point furnTile = new Point((int)tappedFurniture.TileLocation.X, (int)tappedFurniture.TileLocation.Y);
+                _targetTile = furnTile;
+                _pendingAction = TapActionKind.Interact;
+                if (tappedFurniture is BedFurniture)
+                {
+                    StartPathToTarget(player, loc, furnTile, stopAdjacent: false);
+                }
+                else
+                {
+                    StartPathToTargetForFurniture(player, loc, tappedFurniture, tile);
+                }
+                return;
+            }
+
+            // 6. Check for Building/Action/TouchAction map tiles (counters, mailboxes, signs, ladders, doors)
             if (IsDoorOrActionTile(loc, tile))
             {
                 _pendingAction = TapActionKind.Interact;
@@ -369,10 +421,18 @@ namespace SDViOSTouchControls
                 return;
             }
 
-            // 4. Inspect Objects, ResourceClumps, TerrainFeatures on the tapped tile
+            // 7. LargeTerrainFeature (Berry Bushes / Tea Bushes)
+            if (FindLargeTerrainFeatureAt(loc, worldPos, tile) != null)
+            {
+                _pendingAction = TapActionKind.Interact;
+                StartPathToTarget(player, loc, tile, stopAdjacent: true);
+                return;
+            }
+
+            // 8. Inspect Objects, ResourceClumps, TerrainFeatures on the tapped tile (and tile below if tall sprite)
             Vector2 tileVec = new Vector2(tile.X, tile.Y);
 
-            // 4a. ResourceClump (large stump, hollow log, boulder, meteorite, giant crop)
+            // 8a. ResourceClump (large stump, hollow log, boulder, meteorite, giant crop)
             ResourceClump? clump = FindResourceClumpAt(loc, tile);
             if (clump != null)
             {
@@ -389,16 +449,16 @@ namespace SDViOSTouchControls
                 return;
             }
 
-            // 4b. Objects on tile (rocks, twigs, weeds, artifact spots, chests, machines, forageables)
-            if (loc.objects.TryGetValue(tileVec, out var obj) && obj != null)
+            // 8b. Objects on tile (also check tile.Y + 1 if tapped upper half of a tall Chest / BigCraftable!)
+            if (TryGetTappedObject(loc, tile, out var obj, out Point objTile))
             {
+                _targetTile = objTile;
                 if (obj.QualifiedItemId == "(O)590" || obj.QualifiedItemId == "(O)SeedSpot")
                 {
-                    // Artifact spot or seed spot -> Hoe
                     _pendingAction = TapActionKind.UseTool;
                     if (settings.AutoToolEnabled)
                         _pendingToolSlot = FindToolSlot<Hoe>(player);
-                    StartPathToTarget(player, loc, tile, stopAdjacent: true);
+                    StartPathToTarget(player, loc, objTile, stopAdjacent: true);
                     return;
                 }
                 if (obj.IsBreakableStone())
@@ -407,7 +467,7 @@ namespace SDViOSTouchControls
                     _repeatToolUntilCleared = true;
                     if (settings.AutoToolEnabled)
                         _pendingToolSlot = FindToolSlot<Pickaxe>(player);
-                    StartPathToTarget(player, loc, tile, stopAdjacent: true);
+                    StartPathToTarget(player, loc, objTile, stopAdjacent: true);
                     return;
                 }
                 if (obj.IsTwig())
@@ -416,7 +476,7 @@ namespace SDViOSTouchControls
                     _repeatToolUntilCleared = true;
                     if (settings.AutoToolEnabled)
                         _pendingToolSlot = FindToolSlot<Axe>(player);
-                    StartPathToTarget(player, loc, tile, stopAdjacent: true);
+                    StartPathToTarget(player, loc, objTile, stopAdjacent: true);
                     return;
                 }
                 if (obj.IsWeeds())
@@ -424,13 +484,13 @@ namespace SDViOSTouchControls
                     _pendingAction = TapActionKind.UseTool;
                     if (settings.AutoToolEnabled)
                         _pendingToolSlot = FindScytheSlot(player);
-                    StartPathToTarget(player, loc, tile, stopAdjacent: true);
+                    StartPathToTarget(player, loc, objTile, stopAdjacent: true);
                     return;
                 }
                 if (obj is Chest || obj.bigCraftable.Value || obj.IsSpawnedObject || obj.isForage() || obj.readyForHarvest.Value)
                 {
                     _pendingAction = TapActionKind.Interact;
-                    StartPathToTarget(player, loc, tile, stopAdjacent: true);
+                    StartPathToTarget(player, loc, objTile, stopAdjacent: true);
                     return;
                 }
             }
@@ -539,26 +599,96 @@ namespace SDViOSTouchControls
             StartPathToTarget(player, loc, tile, stopAdjacent: false);
         }
 
-        private void StartPathToTarget(Farmer player, GameLocation loc, Point targetTile, bool stopAdjacent)
+        private void StartPathToTargetForFurniture(Farmer player, GameLocation loc, Furniture furn, Point tappedTile)
         {
             Point playerTile = player.TilePoint;
+            // Pick closest walkable tile adjacent to ANY tile of the furniture's boundingBox (so multi-tile TV/Table/Couch always works!)
+            Rectangle bb = furn.boundingBox.Value;
+            int minTx = bb.Left / 64;
+            int maxTx = Math.Max(minTx, (bb.Right - 1) / 64);
+            int minTy = bb.Top / 64;
+            int maxTy = Math.Max(minTy, (bb.Bottom - 1) / 64);
+
+            // Check if player is already adjacent to any tile occupied by this furniture
+            for (int ty = minTy; ty <= maxTy; ty++)
+            {
+                for (int tx = minTx; tx <= maxTx; tx++)
+                {
+                    if (IsAdjacentOrSame(playerTile, new Point(tx, ty)))
+                    {
+                        _targetTile = new Point(tx, ty);
+                        player.controller = null;
+                        ExecutePendingAction(player, loc);
+                        return;
+                    }
+                }
+            }
+
+            Point bestDest = tappedTile;
+            float bestDistSq = float.MaxValue;
+            Point[] cardinals = new[] { new Point(0, 1), new Point(0, -1), new Point(-1, 0), new Point(1, 0) };
+            for (int ty = minTy; ty <= maxTy; ty++)
+            {
+                for (int tx = minTx; tx <= maxTx; tx++)
+                {
+                    foreach (var off in cardinals)
+                    {
+                        Point cand = new Point(tx + off.X, ty + off.Y);
+                        try
+                        {
+                            var rect = new Rectangle(cand.X * 64 + 8, cand.Y * 64 + 8, 48, 48);
+                            if (!loc.isCollidingPosition(rect, Game1.viewport, true, 0, false, player))
+                            {
+                                float dSq = Vector2.DistanceSquared(new Vector2(playerTile.X, playerTile.Y), new Vector2(cand.X, cand.Y));
+                                if (dSq < bestDistSq)
+                                {
+                                    bestDistSq = dSq;
+                                    bestDest = cand;
+                                    _targetTile = new Point(tx, ty);
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+
+            if (bestDistSq < float.MaxValue)
+            {
+                StartPathToTarget(player, loc, bestDest, stopAdjacent: false, overrideDest: bestDest);
+            }
+            else
+            {
+                StartPathToTarget(player, loc, tappedTile, stopAdjacent: true);
+            }
+        }
+
+        private void StartPathToTarget(Farmer player, GameLocation loc, Point targetTile, bool stopAdjacent, Point? overrideDest = null)
+        {
+            Point playerTile = player.TilePoint;
+            _targetUnreachable = false;
 
             // Already in range for action? Execute immediately!
             if (stopAdjacent && IsAdjacentOrSame(playerTile, targetTile))
             {
                 player.controller = null;
+                _pendingDestinationTile = playerTile;
                 ExecutePendingAction(player, loc);
                 return;
             }
-            if (!stopAdjacent && playerTile == targetTile)
+            if (!stopAdjacent && !overrideDest.HasValue && playerTile == targetTile)
             {
-                _hasTarget = false;
+                if (_pendingAction == TapActionKind.Interact)
+                    ExecutePendingAction(player, loc);
+                else
+                    _hasTarget = false;
                 return;
             }
 
             try
             {
-                Point dest = stopAdjacent ? FindBestAdjacentWalkableTile(loc, playerTile, targetTile) : targetTile;
+                Point dest = overrideDest ?? (stopAdjacent ? FindBestAdjacentWalkableTile(loc, playerTile, targetTile) : targetTile);
+                _pendingDestinationTile = dest;
                 if (dest == playerTile && stopAdjacent)
                 {
                     player.controller = null;
@@ -584,6 +714,7 @@ namespace SDViOSTouchControls
                     Point fallback = FindBestAdjacentWalkableTile(loc, playerTile, targetTile);
                     if (fallback != playerTile && fallback != dest)
                     {
+                        _pendingDestinationTile = fallback;
                         var fbCtrl = new PathFindController(
                             player,
                             loc,
@@ -597,7 +728,9 @@ namespace SDViOSTouchControls
                             return;
                         }
                     }
+                    _targetUnreachable = true;
                     _hasTarget = false;
+                    _targetVisualTicks = 24;
                 }
             }
             catch
@@ -611,13 +744,14 @@ namespace SDViOSTouchControls
             player.controller = null;
             if (!_hasTarget) return;
 
-            if (_pendingAction == TapActionKind.WalkOnly)
+            if (_pendingAction == TapActionKind.WalkOnly && _targetFurniture == null && _targetWarp == null)
             {
                 _hasTarget = false;
+                _targetVisualTicks = 16;
                 return;
             }
 
-            if (IsAdjacentOrSame(player.TilePoint, _targetTile))
+            if (IsAdjacentOrSame(player.TilePoint, _targetTile) || IsAdjacentOrSame(player.TilePoint, _pendingDestinationTile) || _targetFurniture != null || _targetWarp != null)
             {
                 ExecutePendingAction(player, loc);
             }
@@ -632,7 +766,11 @@ namespace SDViOSTouchControls
         /// </summary>
         public void UpdateTick(TouchOverlaySettings settings)
         {
-            if (_targetVisualTicks > 0) _targetVisualTicks--;
+            if (!_hasTarget && _targetVisualTicks > 0)
+            {
+                _targetVisualTicks--;
+                if (_targetVisualTicks == 0) _targetUnreachable = false;
+            }
             if (_actionCooldownTicks > 0) _actionCooldownTicks--;
             if (_autoAttackCooldown > 0) _autoAttackCooldown--;
 
@@ -649,6 +787,21 @@ namespace SDViOSTouchControls
                  settings.ControlScheme == MobileControlScheme.TapToMoveAndJoystickAndButtons))
             {
                 TryAutoAttackNearbyMonster(player, loc);
+            }
+
+            // 1.5 Fallback arrival check in case PathFindController ended slightly early without firing OnPathCompleted
+            if (_hasTarget && player.controller == null && !player.UsingTool && _actionCooldownTicks <= 0)
+            {
+                if (_pendingAction == TapActionKind.Interact && (IsAdjacentOrSame(player.TilePoint, _targetTile) || IsAdjacentOrSame(player.TilePoint, _pendingDestinationTile)))
+                {
+                    ExecutePendingAction(player, loc);
+                    return;
+                }
+                else if (_pendingAction == TapActionKind.WalkOnly && player.TilePoint == _pendingDestinationTile)
+                {
+                    _hasTarget = false;
+                    _targetVisualTicks = 16;
+                }
             }
 
             // 2. Continue repeating tool swing on rocks/trees/clumps until broken (just like Mobile!)
@@ -698,41 +851,67 @@ namespace SDViOSTouchControls
                     targetWorldCenter = _targetMonster.getStandingPosition();
                 }
 
+                // Ensure Farmer uses FacingDirection rather than stray mouse cursor coordinates
+                Game1.lastCursorMotionWasMouse = false;
                 player.faceGeneralDirection(targetWorldCenter, 0, false);
 
                 if (_pendingAction == TapActionKind.Interact)
                 {
-                    Vector2 tileVec = new Vector2(_targetTile.X, _targetTile.Y);
-                    bool handled = Game1.tryToCheckAt(tileVec, player);
-                    if (!handled && loc.objects.TryGetValue(tileVec, out var obj) && obj is Chest chest)
+                    bool handled = false;
+
+                    // Warp door step trigger
+                    if (_targetWarp != null)
                     {
-                        chest.checkForAction(player);
+                        try
+                        {
+                            player.Position = new Vector2(_targetWarp.X * 64 + 16, _targetWarp.Y * 64 + 16);
+                            handled = true;
+                        }
+                        catch { }
                     }
+
+                    // Try Furniture checkForAction directly (TV channel menu, BedFurniture sleep prompt, Lamp, Chair)
+                    if (!handled && _targetFurniture != null)
+                    {
+                        try { handled = _targetFurniture.checkForAction(player); } catch { }
+                    }
+
+                    Vector2 tileVec = new Vector2(_targetTile.X, _targetTile.Y);
+                    if (!handled)
+                    {
+                        handled = Game1.tryToCheckAt(tileVec, player);
+                    }
+                    if (!handled)
+                    {
+                        // Also try loc.checkAction directly in case Game1.tryToCheckAt skipped on radius/facing
+                        try { handled = loc.checkAction(new xTile.Dimensions.Location(_targetTile.X, _targetTile.Y), Game1.viewport, player); } catch { }
+                    }
+                    if (!handled && loc.objects.TryGetValue(tileVec, out var obj) && obj != null)
+                    {
+                        try { handled = obj.checkForAction(player); } catch { }
+                    }
+
                     _hasTarget = false;
                     _pendingAction = TapActionKind.None;
+                    _targetFurniture = null;
+                    _targetWarp = null;
+                    _targetVisualTicks = 14;
                     _actionCooldownTicks = 12;
                 }
                 else if (_pendingAction == TapActionKind.UseTool || _pendingAction == TapActionKind.AttackMonster)
                 {
-                    // Point simulated cursor to the target tile for tools that check cursor tile
                     if (!player.UsingTool && player.CanMove)
                     {
-                        if (player.CurrentTool is MeleeWeapon weapon && !weapon.isScythe())
-                        {
-                            player.BeginUsingTool();
-                            _actionCooldownTicks = 14;
-                        }
-                        else
-                        {
-                            player.BeginUsingTool();
-                            _actionCooldownTicks = 18;
-                        }
+                        player.FacingDirection = GetFacingDirection(player.TilePoint, _targetTile);
+                        player.BeginUsingTool();
+                        _actionCooldownTicks = (player.CurrentTool is MeleeWeapon weapon && !weapon.isScythe()) ? 14 : 18;
                     }
 
                     if (!_repeatToolUntilCleared && _pendingAction != TapActionKind.AttackMonster)
                     {
                         _hasTarget = false;
                         _pendingAction = TapActionKind.None;
+                        _targetVisualTicks = 14;
                     }
                 }
             }
@@ -740,6 +919,8 @@ namespace SDViOSTouchControls
             {
                 _hasTarget = false;
                 _repeatToolUntilCleared = false;
+                _targetFurniture = null;
+                _targetWarp = null;
             }
         }
 
@@ -780,11 +961,12 @@ namespace SDViOSTouchControls
         }
 
         /// <summary>
-        /// Draws the subtle Stardew Mobile target-tile green/white box indicator when Tap-to-Move is active.
+        /// Draws the authentic Stardew Valley Mobile green pulsing tile indicator on the tapped destination tile
+        /// using Game1.mouseCursors's built-in 16x16 placement square (stays visible while walking, fades on arrival).
         /// </summary>
         public void DrawWorldIndicator(SpriteBatch sb, Texture2D? pixelTex)
         {
-            if (pixelTex == null || !_hasTarget && _targetVisualTicks <= 0) return;
+            if (!_hasTarget && _targetVisualTicks <= 0) return;
             if (!CanRunWorldControls()) return;
 
             try
@@ -796,21 +978,34 @@ namespace SDViOSTouchControls
                 float scaleX = (float)uiVp.Width / worldVp.Width;
                 float scaleY = (float)uiVp.Height / worldVp.Height;
 
-                int sx = (int)((_targetTile.X * 64 - worldVp.X) * scaleX);
-                int sy = (int)((_targetTile.Y * 64 - worldVp.Y) * scaleY);
-                int sw = Math.Max(16, (int)(64 * scaleX));
-                int sh = Math.Max(16, (int)(64 * scaleY));
+                int sx = (int)Math.Round((_targetTile.X * 64 - worldVp.X) * scaleX);
+                int sy = (int)Math.Round((_targetTile.Y * 64 - worldVp.Y) * scaleY);
+                int sw = Math.Max(16, (int)Math.Round(64 * scaleX));
+                int sh = Math.Max(16, (int)Math.Round(64 * scaleY));
 
-                float alpha = _hasTarget ? 0.62f : Math.Clamp(_targetVisualTicks / 45f, 0f, 1f) * 0.55f;
-                Color boxColor = _pendingAction == TapActionKind.AttackMonster
-                    ? Color.OrangeRed * alpha
-                    : Color.LimeGreen * alpha;
+                float pulse = _hasTarget
+                    ? (0.68f + 0.20f * (float)Math.Sin(Game1.ticks * 0.18))
+                    : Math.Clamp(_targetVisualTicks / 20f, 0f, 1f) * 0.65f;
 
-                int t = Math.Max(2, (int)(3 * scaleX));
-                sb.Draw(pixelTex, new Rectangle(sx, sy, sw, t), boxColor);
-                sb.Draw(pixelTex, new Rectangle(sx, sy + sh - t, sw, t), boxColor);
-                sb.Draw(pixelTex, new Rectangle(sx, sy, t, sh), boxColor);
-                sb.Draw(pixelTex, new Rectangle(sx + sw - t, sy, t, sh), boxColor);
+                bool isRed = _targetUnreachable || _pendingAction == TapActionKind.AttackMonster;
+
+                if (Game1.mouseCursors != null && !Game1.mouseCursors.IsDisposed)
+                {
+                    // Official Stardew tile highlight sprites in LooseSprites/Cursors:
+                    // (194, 388, 16, 16) = bright green placement square, (210, 388, 16, 16) = red square
+                    Rectangle src = isRed ? new Rectangle(210, 388, 16, 16) : new Rectangle(194, 388, 16, 16);
+                    Color tint = isRed ? Color.White * pulse : new Color(210, 255, 210) * pulse;
+                    sb.Draw(Game1.mouseCursors, new Rectangle(sx, sy, sw, sh), src, tint);
+                }
+                else if (pixelTex != null)
+                {
+                    Color boxColor = (isRed ? Color.OrangeRed : Color.LimeGreen) * pulse;
+                    int t = Math.Max(2, (int)(3 * scaleX));
+                    sb.Draw(pixelTex, new Rectangle(sx, sy, sw, t), boxColor);
+                    sb.Draw(pixelTex, new Rectangle(sx, sy + sh - t, sw, t), boxColor);
+                    sb.Draw(pixelTex, new Rectangle(sx, sy, t, sh), boxColor);
+                    sb.Draw(pixelTex, new Rectangle(sx + sw - t, sy, t, sh), boxColor);
+                }
             }
             catch { }
         }
@@ -869,6 +1064,125 @@ namespace SDViOSTouchControls
                         return true;
                 }
             }
+            return false;
+        }
+
+        private static Warp? FindWarpNear(GameLocation loc, Vector2 worldPos, Point tile)
+        {
+            try
+            {
+                if (loc.warps == null) return null;
+                foreach (var w in loc.warps)
+                {
+                    if (w == null) continue;
+                    if (Math.Abs(w.X - tile.X) <= 1 && Math.Abs(w.Y - tile.Y) <= 1)
+                    {
+                        float dSq = Vector2.DistanceSquared(worldPos, new Vector2(w.X * 64 + 32, w.Y * 64 + 32));
+                        if (dSq <= 82f * 82f || (w.X == tile.X && w.Y == tile.Y))
+                            return w;
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static Building? FindBuildingActionAt(GameLocation loc, Vector2 worldPos, Point tile, out Point actionTile)
+        {
+            actionTile = tile;
+            try
+            {
+                if (loc.buildings == null) return null;
+                foreach (var b in loc.buildings)
+                {
+                    if (b == null) continue;
+                    // Shipping Bin or special building
+                    if (b is ShippingBin)
+                    {
+                        Rectangle sbRect = new Rectangle(b.tileX.Value * 64, b.tileY.Value * 64, b.tilesWide.Value * 64, b.tilesHigh.Value * 64);
+                        if (sbRect.Contains((int)worldPos.X, (int)worldPos.Y))
+                        {
+                            actionTile = new Point(tile.X, tile.Y);
+                            return b;
+                        }
+                    }
+                    // Human door on Coop / Barn / Shed / Cabin / Slime Hutch / Mill / Well
+                    Point hd = b.humanDoor.Value;
+                    if (hd.X >= 0 && hd.Y >= 0)
+                    {
+                        Point doorWorldTile = new Point(b.tileX.Value + hd.X, b.tileY.Value + hd.Y);
+                        if (Math.Abs(doorWorldTile.X - tile.X) <= 1 && (tile.Y == doorWorldTile.Y || tile.Y == doorWorldTile.Y - 1))
+                        {
+                            actionTile = doorWorldTile;
+                            return b;
+                        }
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static Furniture? FindFurnitureAt(GameLocation loc, Vector2 worldPos, Point tile)
+        {
+            try
+            {
+                if (loc.furniture == null) return null;
+                int wx = (int)worldPos.X;
+                int wy = (int)worldPos.Y;
+                foreach (var f in loc.furniture)
+                {
+                    if (f == null) continue;
+                    Rectangle bb = f.boundingBox.Value;
+                    // Also allow tapping top visual half of TV / taller furniture (up to 64px above boundingBox top)
+                    Rectangle hitRect = new Rectangle(bb.X, bb.Y - 64, Math.Max(64, bb.Width), Math.Max(64, bb.Height + 64));
+                    if (bb.Contains(wx, wy) || hitRect.Contains(wx, wy))
+                    {
+                        return f;
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static LargeTerrainFeature? FindLargeTerrainFeatureAt(GameLocation loc, Vector2 worldPos, Point tile)
+        {
+            try
+            {
+                if (loc.largeTerrainFeatures == null) return null;
+                foreach (var ltf in loc.largeTerrainFeatures)
+                {
+                    if (ltf == null) continue;
+                    Rectangle bb = ltf.getBoundingBox();
+                    if (bb.Contains((int)worldPos.X, (int)worldPos.Y))
+                        return ltf;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static bool TryGetTappedObject(GameLocation loc, Point tile, out StardewValley.Object obj, out Point objTile)
+        {
+            Vector2 v0 = new Vector2(tile.X, tile.Y);
+            if (loc.objects.TryGetValue(v0, out var direct) && direct != null)
+            {
+                obj = direct;
+                objTile = tile;
+                return true;
+            }
+            // Check 1 tile below in case user tapped the upper visual half of a tall Chest / Machine / Gift Box!
+            Vector2 vBelow = new Vector2(tile.X, tile.Y + 1);
+            if (loc.objects.TryGetValue(vBelow, out var belowObj) && belowObj != null &&
+                (belowObj is Chest || belowObj.bigCraftable.Value || belowObj.readyForHarvest.Value))
+            {
+                obj = belowObj;
+                objTile = new Point(tile.X, tile.Y + 1);
+                return true;
+            }
+            obj = null!;
+            objTile = tile;
             return false;
         }
 
@@ -959,40 +1273,49 @@ namespace SDViOSTouchControls
 
         private static Point FindBestAdjacentWalkableTile(GameLocation loc, Point playerTile, Point targetTile)
         {
-            Point[] offsets = new[]
+            // Prefer CARDINAL adjacent tiles (N, S, W, E) so interactions & tools line up directly!
+            Point[] cardinals = new[]
             {
                 new Point(0, 1),
                 new Point(0, -1),
                 new Point(-1, 0),
-                new Point(1, 0),
+                new Point(1, 0)
+            };
+            Point[] diagonals = new[]
+            {
                 new Point(-1, 1),
                 new Point(1, 1),
                 new Point(-1, -1),
                 new Point(1, -1)
             };
 
-            Point best = targetTile;
-            float bestDistSq = float.MaxValue;
-            for (int i = 0; i < offsets.Length; i++)
+            Point? FindBestFrom(Point[] list)
             {
-                Point cand = new Point(targetTile.X + offsets[i].X, targetTile.Y + offsets[i].Y);
-                if (cand == playerTile) return playerTile;
-                try
+                Point? best = null;
+                float bestDistSq = float.MaxValue;
+                for (int i = 0; i < list.Length; i++)
                 {
-                    var rect = new Rectangle(cand.X * 64 + 8, cand.Y * 64 + 8, 48, 48);
-                    if (!loc.isCollidingPosition(rect, Game1.viewport, true, 0, false, Game1.player))
+                    Point cand = new Point(targetTile.X + list[i].X, targetTile.Y + list[i].Y);
+                    if (cand == playerTile) return playerTile;
+                    try
                     {
-                        float dSq = Vector2.DistanceSquared(new Vector2(playerTile.X, playerTile.Y), new Vector2(cand.X, cand.Y));
-                        if (dSq < bestDistSq)
+                        var rect = new Rectangle(cand.X * 64 + 8, cand.Y * 64 + 8, 48, 48);
+                        if (!loc.isCollidingPosition(rect, Game1.viewport, true, 0, false, Game1.player))
                         {
-                            bestDistSq = dSq;
-                            best = cand;
+                            float dSq = Vector2.DistanceSquared(new Vector2(playerTile.X, playerTile.Y), new Vector2(cand.X, cand.Y));
+                            if (dSq < bestDistSq)
+                            {
+                                bestDistSq = dSq;
+                                best = cand;
+                            }
                         }
                     }
+                    catch { }
                 }
-                catch { }
+                return best;
             }
-            return best;
+
+            return FindBestFrom(cardinals) ?? FindBestFrom(diagonals) ?? targetTile;
         }
     }
 }

@@ -317,15 +317,32 @@ static NSUInteger importGameDataZip(NSURL *url, NSString *docsPath) {
 
             NSString *rel = raw;
             if (bestPrefix.length) {
-                if (![rel hasPrefix:bestPrefix]) continue;
-                rel = [rel substringFromIndex:bestPrefix.length];
+                if ([rel hasPrefix:bestPrefix]) {
+                    rel = [rel substringFromIndex:bestPrefix.length];
+                } else {
+                    // Also rescue Mods/ even if placed outside the game binary wrapper folder (e.g. sibling Mods/ folder in ZIP)
+                    NSArray<NSString *> *rawParts = raw.pathComponents;
+                    NSUInteger modsIdx = NSNotFound;
+                    for (NSUInteger k = 0; k + 1 < rawParts.count; k++) {
+                        if ([rawParts[k].lowercaseString isEqualToString:@"mods"]) { modsIdx = k; break; }
+                    }
+                    if (modsIdx == NSNotFound) continue;
+                    rel = [NSString pathWithComponents:[rawParts subarrayWithRange:NSMakeRange(modsIdx, rawParts.count - modsIdx)]];
+                }
             }
             while ([rel hasPrefix:@"/"]) rel = [rel substringFromIndex:1];
             if (!rel.length) continue;
             rel = clean(rel);
 
+            // Normalize top-level "mods/" casing to "Mods/" on case-sensitive iOS APFS
             NSArray<NSString *> *relParts = rel.pathComponents;
             NSString *topLow = relParts.firstObject.lowercaseString;
+            if ([topLow isEqualToString:@"mods"] && ![relParts.firstObject isEqualToString:@"Mods"] && relParts.count >= 2) {
+                NSMutableArray<NSString *> *fixedParts = [relParts mutableCopy];
+                fixedParts[0] = @"Mods";
+                rel = [NSString pathWithComponents:fixedParts];
+                relParts = rel.pathComponents;
+            }
             NSString *fileLow = rel.lastPathComponent.lowercaseString;
             NSString *extLow = rel.pathExtension.lowercaseString;
 

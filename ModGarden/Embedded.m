@@ -4,10 +4,12 @@
 static void sdvEnsurePlaybackAudioSession(void) {
     @try {
         AVAudioSession *sess = [AVAudioSession sharedInstance];
-        if (![sess.category isEqualToString:AVAudioSessionCategoryPlayback] ||
-            !(sess.categoryOptions & AVAudioSessionCategoryOptionMixWithOthers)) {
+        if (![sess.mode isEqualToString:AVAudioSessionModeDefault]) {
+            [sess setMode:AVAudioSessionModeDefault error:nil];
+        }
+        if (![sess.category isEqualToString:AVAudioSessionCategoryPlayback] || sess.categoryOptions != 0) {
             [sess setCategory:AVAudioSessionCategoryPlayback
-                  withOptions:AVAudioSessionCategoryOptionMixWithOthers
+                  withOptions:0
                         error:nil];
         }
         [sess setActive:YES error:nil];
@@ -802,9 +804,35 @@ static void sdvEnsurePlaybackAudioSession(void) {
 }
 @end
 
+static void sdvNormalizeModsFolders(NSString *docsPath) {
+    if (!docsPath.length) return;
+    @try {
+        NSString *targetMods = join(docsPath, @"Mods");
+        mkdirs(targetMods);
+        NSArray<NSString *> *extraDirs = @[
+            join(docsPath, @"mods"),
+            join(join(docsPath, @"StardewValley"), @"Mods"),
+            join(join(docsPath, @"StardewValley"), @"mods")
+        ];
+        for (NSString *srcRoot in extraDirs) {
+            if (!dir(srcRoot)) continue;
+            NSArray<NSString *> *items = [fm() contentsOfDirectoryAtPath:srcRoot error:nil] ?: @[];
+            for (NSString *item in items) {
+                if ([item caseInsensitiveCompare:@"SDViOSTouchControls"] == NSOrderedSame) continue;
+                NSString *src = join(srcRoot, item);
+                NSString *dst = join(targetMods, item);
+                if (![fm() fileExistsAtPath:dst]) {
+                    [fm() moveItemAtPath:src toPath:dst error:nil];
+                }
+            }
+        }
+    } @catch (NSException *ex) { }
+}
+
 __attribute__((constructor)) static void startGardenControls(void) {
     @autoreleasepool {
         NSString *docs = [fm() URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject.path;
+        sdvNormalizeModsFolders(docs);
         syncBundledLidgren(docs);
         syncBundledSmapi(docs);
         [SDVRamMonitor.shared startWithDocsPath:docs];

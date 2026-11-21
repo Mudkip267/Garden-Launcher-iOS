@@ -2289,6 +2289,9 @@ namespace SDViOSTouchControls
                 // Ensure stuck fishing reel sounds ("fastReel", "slowReel", "SinWave") are stopped when not actively reeling/casting
                 StopStuckFishingSounds(forceSweepPool: false);
 
+                // Hide PC Toolbar & PC DayTimeMoneyBox directly via Game1.onScreenMenus (Harmony-free for iOS Mono Interpreter!)
+                SyncPcHudVisibility();
+
                 if (e.IsMultipleOf(90))
                 {
                     EnsureIosAudioActive(force: false);
@@ -2323,6 +2326,9 @@ namespace SDViOSTouchControls
             }
 
             _lastTickMenu = Game1.activeClickableMenu;
+
+            // Keep PC Toolbar & DayTimeMoneyBox hidden cleanly right before Game1.Draw runs!
+            SyncPcHudVisibility();
 
             StopStuckFishingSounds(forceSweepPool: false);
 
@@ -3032,19 +3038,67 @@ namespace SDViOSTouchControls
             }
         }
 
+        private static readonly List<IClickableMenu> _stashedPcHudMenus = new List<IClickableMenu>(4);
+
+        private static void SyncPcHudVisibility()
+        {
+            try
+            {
+                var menus = Game1.onScreenMenus;
+                if (menus == null) return;
+
+                bool hidePcHud = MobileHudAndControls.Instance.IsWorldHudActive(TouchOverlaySettings.Instance);
+                if (hidePcHud)
+                {
+                    for (int i = menus.Count - 1; i >= 0; i--)
+                    {
+                        var m = menus[i];
+                        if (m is Toolbar || m is DayTimeMoneyBox)
+                        {
+                            if (!_stashedPcHudMenus.Contains(m))
+                                _stashedPcHudMenus.Add(m);
+                            menus.RemoveAt(i);
+                        }
+                    }
+                }
+                else if (_stashedPcHudMenus.Count > 0)
+                {
+                    for (int i = 0; i < _stashedPcHudMenus.Count; i++)
+                    {
+                        var m = _stashedPcHudMenus[i];
+                        if (m != null && !menus.Contains(m))
+                            menus.Add(m);
+                    }
+                    _stashedPcHudMenus.Clear();
+                }
+            }
+            catch { }
+        }
+
         private static bool _iosAudioReflected = false;
         private static bool _retriedInitSounds = false;
+        private static bool _loggedAudioDiag = false;
         private static MethodInfo? _appDelegateConfigureAudioMethod;
         private static Type? _oalControllerType;
         private static FieldInfo? _oalInstanceField;
         private static MethodInfo? _oalEnsureInitMethod;
         private static FieldInfo? _oalContextField;
+        private static FieldInfo? _oalDeviceField;
         private static MethodInfo? _alcGetCurrentContextMethod;
         private static MethodInfo? _alcMakeContextCurrentMethod;
         private static MethodInfo? _alcProcessContextMethod;
+        private static MethodInfo? _alcSuspendContextMethod;
         private static Delegate? _alcGetCurrentContextDel;
         private static Delegate? _alcMakeContextCurrentDel;
         private static Delegate? _alcProcessContextDel;
+        private static Delegate? _alcSuspendContextDel;
+
+        private static object? InvokeAlc(MethodInfo? m, Delegate? del, params object[] args)
+        {
+            if (m != null) return m.Invoke(null, args);
+            if (del != null) return del.DynamicInvoke(args);
+            return null;
+        }
 
         private void EnsureIosAudioActive(bool force)
         {
@@ -3075,6 +3129,7 @@ namespace SDViOSTouchControls
                         _oalInstanceField = _oalControllerType.GetField("_instance", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
                         _oalEnsureInitMethod = _oalControllerType.GetMethod("EnsureInitialized", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
                         _oalContextField = _oalControllerType.GetField("_context", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                        _oalDeviceField = _oalControllerType.GetField("_device", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
                     }
 
                     var alcType = mgAsm.GetType("MonoGame.OpenAL.Alc", throwOnError: false);
@@ -3083,14 +3138,23 @@ namespace SDViOSTouchControls
                         _alcGetCurrentContextMethod = alcType.GetMethod("GetCurrentContext", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
                         _alcMakeContextCurrentMethod = alcType.GetMethod("MakeContextCurrent", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic, null, new[] { typeof(IntPtr) }, null);
                         _alcProcessContextMethod = alcType.GetMethod("ProcessContext", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic, null, new[] { typeof(IntPtr) }, null);
+                        _alcSuspendContextMethod = alcType.GetMethod("SuspendContext", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic, null, new[] { typeof(IntPtr) }, null);
 
                         _alcGetCurrentContextDel = alcType.GetField("GetCurrentContext", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(null) as Delegate;
                         _alcMakeContextCurrentDel = alcType.GetField("MakeContextCurrent", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(null) as Delegate;
                         _alcProcessContextDel = alcType.GetField("ProcessContext", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(null) as Delegate;
+                        _alcSuspendContextDel = alcType.GetField("SuspendContext", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(null) as Delegate;
                     }
                 }
 
-                // 1. Ensure OpenALSoundController singleton is initialized
+                // 0. Configure AVAudioSession before touching OpenAL
+                if (force && _appDelegateConfigureAudioMethod != null)
+                {
+                    try { _appDelegateConfigureAudioMethod.Invoke(null, null); } catch { }
+                }
+
+                // 1. Ensure SoundEffect + OpenALSoundController singleton is initialized
+                try { typeof(SoundEffect).GetMethod("Initialize", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)?.Invoke(null, null); } catch { }
                 object? oalInst = _oalInstanceField?.GetValue(null);
                 if (oalInst == null && _oalEnsureInitMethod != null)
                 {
@@ -3099,81 +3163,79 @@ namespace SDViOSTouchControls
                     force = true;
                 }
 
-                // 2. Re-apply AVAudioSessionCategory.Playback + SetActive(true) AFTER OpenALSoundController.OpenSoundController()
-                // (MonoGame's OpenSoundController calls AVAudioSession.SharedInstance().Init(), which resets the category to SoloAmbient!)
-                if (force && _appDelegateConfigureAudioMethod != null)
+                // 2. Perform Apple iOS OpenAL audio session + context wake-up cycle:
+                // SuspendContext -> AVAudioSession(Playback) + SetActive(true) -> MakeContextCurrent(ctx) -> ProcessContext(ctx)
+                IntPtr ctx = IntPtr.Zero;
+                IntPtr dev = IntPtr.Zero;
+                IntPtr curCtx = IntPtr.Zero;
+                if (oalInst != null)
                 {
-                    try { _appDelegateConfigureAudioMethod.Invoke(null, null); } catch { }
-                }
-
-                // 3. Ensure OpenAL context is current and actively processing
-                if (oalInst != null && _oalContextField != null)
-                {
-                    if (_oalContextField.GetValue(oalInst) is IntPtr ctx && ctx != IntPtr.Zero)
+                    if (_oalContextField?.GetValue(oalInst) is IntPtr c) ctx = c;
+                    if (_oalDeviceField?.GetValue(oalInst) is IntPtr d) dev = d;
+                    if (ctx != IntPtr.Zero)
                     {
-                        IntPtr curCtx = IntPtr.Zero;
-                        try
-                        {
-                            if (_alcGetCurrentContextMethod != null)
-                                curCtx = (IntPtr)(_alcGetCurrentContextMethod.Invoke(null, null) ?? IntPtr.Zero);
-                            else if (_alcGetCurrentContextDel != null)
-                                curCtx = (IntPtr)(_alcGetCurrentContextDel.DynamicInvoke() ?? IntPtr.Zero);
-                        }
-                        catch { }
+                        try { curCtx = (IntPtr)(InvokeAlc(_alcGetCurrentContextMethod, _alcGetCurrentContextDel) ?? IntPtr.Zero); } catch { }
 
                         if (force || curCtx == IntPtr.Zero || curCtx != ctx)
                         {
-                            try
+                            if (force)
                             {
-                                if (_alcMakeContextCurrentMethod != null)
-                                    _alcMakeContextCurrentMethod.Invoke(null, new object[] { ctx });
-                                else if (_alcMakeContextCurrentDel != null)
-                                    _alcMakeContextCurrentDel.DynamicInvoke(ctx);
+                                try { InvokeAlc(_alcMakeContextCurrentMethod, _alcMakeContextCurrentDel, IntPtr.Zero); } catch { }
+                                try { InvokeAlc(_alcSuspendContextMethod, _alcSuspendContextDel, ctx); } catch { }
+                                if (_appDelegateConfigureAudioMethod != null)
+                                {
+                                    try { _appDelegateConfigureAudioMethod.Invoke(null, null); } catch { }
+                                }
                             }
-                            catch { }
-
-                            try
-                            {
-                                if (_alcProcessContextMethod != null)
-                                    _alcProcessContextMethod.Invoke(null, new object[] { ctx });
-                                else if (_alcProcessContextDel != null)
-                                    _alcProcessContextDel.DynamicInvoke(ctx);
-                            }
-                            catch { }
+                            try { InvokeAlc(_alcMakeContextCurrentMethod, _alcMakeContextCurrentDel, ctx); } catch { }
+                            try { InvokeAlc(_alcProcessContextMethod, _alcProcessContextDel, ctx); } catch { }
+                            try { curCtx = (IntPtr)(InvokeAlc(_alcGetCurrentContextMethod, _alcGetCurrentContextDel) ?? IntPtr.Zero); } catch { }
                         }
                     }
                 }
 
-                // 4. Ensure SoundEffect.MasterVolume is not muted
+                // 3. Ensure SoundEffect.MasterVolume is not muted
                 if (SoundEffect.MasterVolume <= 0.01f)
                 {
                     SoundEffect.MasterVolume = 1.0f;
                 }
 
-                // 5. If Game1.InitializeSounds() failed on the background thread and fell back to DummyAudioEngine, retry once on main thread
+                // 4. If Game1.InitializeSounds() failed on the background thread (e.g. fell back to DummyAudioEngine),
+                // retry cleanly with 0 parameters on main thread!
                 var curAudioEngine = Game1.audioEngine;
                 if (!_retriedInitSounds && Game1.ticks > 10 && Game1.game1 != null && curAudioEngine != null)
                 {
                     string engineTypeName = curAudioEngine.GetType().Name;
-                    if (engineTypeName.Contains("Dummy", StringComparison.OrdinalIgnoreCase))
+                    if (engineTypeName.Contains("Dummy", StringComparison.OrdinalIgnoreCase) ||
+                        (Game1.soundBank != null && Game1.soundBank.GetType().Name.Contains("Dummy", StringComparison.OrdinalIgnoreCase)))
                     {
                         _retriedInitSounds = true;
-                        Monitor.Log("[SDViOSTouchControls] Detected DummyAudioEngine after first sound init — retrying Game1.InitializeSounds on main thread...", LogLevel.Warn);
+                        Monitor.Log($"[SDViOSTouchControls] Detected {engineTypeName} after first sound init — retrying Game1.InitializeSounds() cleanly on main thread...", LogLevel.Warn);
                         if (_appDelegateConfigureAudioMethod != null)
                         {
                             try { _appDelegateConfigureAudioMethod.Invoke(null, null); } catch { }
                         }
-                        var initSoundsMethod = typeof(Game1).GetMethod("InitializeSounds", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-                        initSoundsMethod?.Invoke(Game1.game1, new object[] { false });
-                        Monitor.Log($"[SDViOSTouchControls] Post-retry audioEngine type: {Game1.audioEngine?.GetType().Name ?? "null"}", LogLevel.Info);
+                        var initSoundsMethod = typeof(Game1).GetMethod("InitializeSounds", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public, null, Type.EmptyTypes, null);
+                        initSoundsMethod?.Invoke(Game1.game1, null);
+                        Monitor.Log($"[SDViOSTouchControls] Post-retry audioEngine={Game1.audioEngine?.GetType().Name ?? "null"}, soundBank={Game1.soundBank?.GetType().Name ?? "null"}", LogLevel.Info);
                     }
+                }
+
+                if (!_loggedAudioDiag && Game1.ticks > 15 && Game1.audioEngine != null)
+                {
+                    _loggedAudioDiag = true;
+                    string aeName = Game1.audioEngine?.GetType().Name ?? "null";
+                    string sbName = Game1.soundBank?.GetType().Name ?? "null";
+                    float mVol = Game1.options?.musicVolumeLevel ?? -1f;
+                    float sVol = Game1.options?.soundVolumeLevel ?? -1f;
+                    Monitor.Log($"[AUDIO_DIAG] AudioEngine={aeName}, SoundBank={sbName}, MasterVol={SoundEffect.MasterVolume:0.00}, MusicOpt={mVol:0.00}, SoundOpt={sVol:0.00}, OAL_Dev=0x{dev.ToInt64():X}, OAL_Ctx=0x{ctx.ToInt64():X}, OAL_CurCtx=0x{curCtx.ToInt64():X}", LogLevel.Info);
                 }
             }
             catch (Exception ex)
             {
                 if (force)
                 {
-                    Monitor.Log($"[SDViOSTouchControls] Note in EnsureIosAudioActive: {ex.Message}", LogLevel.Trace);
+                    Monitor.Log($"[SDViOSTouchControls] Note in EnsureIosAudioActive: {ex.Message}", LogLevel.Warn);
                 }
             }
         }

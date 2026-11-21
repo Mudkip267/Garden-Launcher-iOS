@@ -42,7 +42,12 @@
 
 - **Sửa triệt để âm thanh (OpenAL & `AVAudioSession`)**: Khắc phục lỗi `WaveBank.LoadSoundEffect` trên Mono Interpreter và tự động khôi phục phiên âm thanh iOS trên mọi phiên bản.
 - **Giải nén đa định dạng trực tiếp (`/usr/lib/libarchive.2.dylib` + `miniz`)**: Đọc thẳng `.RAR` (RAR4/RAR5), `.7Z`, `.ZIP` (Deflate, Deflate64, LZMA, BZip2, Zstd), `.TAR.GZ`, `.TAR.XZ`, `.XNB` hoặc chọn trực tiếp thư mục đã giải nén; tự động bung gói nén lồng nhau và giải mã tên tệp tiếng Việt Windows (UTF-8 / CP1258 / CP1252).
-- **Tương thích Mod Shader PC 1.6 (`MGFX v8 / v9 / v10` & OpenGL ES GLSL)**: Bộ đọc kép tự động nhận diện bytecode `MGFX v9` (1-byte counts của *Dynamic Reflections*, *DynamicShader*...) lẫn `MGFX v10` (4-byte counts) và tự chuẩn hóa header `precision highp float;` cho GPU iOS OpenGL ES.
+- **Tương thích Mod Shader PC 1.6 & Phản chiếu bóng nhân vật (`DynamicReflections` / `DynamicShader`)**:
+  - Bộ đọc kép tự động nhận diện bytecode `MGFX v9` (1-byte counts của *Dynamic Reflections*, *DynamicShader*...) lẫn `MGFX v10` (4-byte counts) và tự chuẩn hóa header `precision highp float;` cho GPU iOS OpenGL ES.
+  - Sửa `LazyIosDisplayDevice.DrawTile` ủy quyền về `base.DrawTile` (`XnaDisplayDevice.DrawTile`) giúp Harmony patch của *Dynamic Reflections* lọc đúng ô nước, vũng nước và bầu trời sao để **hiển thị đầy đủ bóng phản chiếu của nhân vật và NPC dưới mặt nước**.
+- **Thanh kéo Giới hạn RAM & Tự dọn GC kiểu PojavLauncher + Cảnh báo nhắc SAVE khi RAM cao**:
+  - Cho phép tự kéo chỉnh ngưỡng giới hạn RAM (`65%` – `92%` ngân sách Jetsam iOS, hiển thị trực tiếp số MB tương ứng trên máy) trong tab *Hiệu năng & Nút*.
+  - Khi RAM chạm mốc đã chọn: tự động kích hoạt thu hồi texture map cũ + nén bộ nhớ Mono (`Auto-GC`), đồng thời phát cảnh báo rung Haptic + Banner góc trên + thông báo trong game và **nhấp nháy đỏ/vàng nút `SAVE!`** nhắc người chơi lưu game ngay trước khi tràn RAM.
 - **Sửa cảm ứng bảng Nhiệm vụ (`QuestLog`) & Menu**: Giữ nút **`ESC`** góc trên-trái riêng cho bảng Nhiệm vụ để thoát nhanh, đồng thời chạm xem chi tiết nhiệm vụ, nhận thưởng, kéo thanh trượt Options và mua/bán nhiều đồ trong Shop bằng cách giữ lì.
 - **Khóa thanh Home iPhone (`UIRectEdgeAll`)**: Tắt hẳn hiện tượng chạm gần cạnh dưới làm sáng thanh Home; cần vuốt chủ động từ đáy màn hình lên mới kích hoạt.
 - **Không còn hiện lại tay cầm SDViOS cũ**: Giữ cố định chế độ điều khiển Mobile khi mở mọi bảng phụ.

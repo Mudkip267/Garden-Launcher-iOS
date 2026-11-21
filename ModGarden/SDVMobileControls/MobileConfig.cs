@@ -76,15 +76,18 @@ namespace SDVMobileControls
 
         private readonly string _path;
         private readonly string _editFlagPath;
+        private readonly string _ramAlertPath;
         private DateTime _lastWriteUtc = DateTime.MinValue;
         private int _pollCounter;
         private int _flagCounter;
+        private int _ramAlertCounter;
 
         public MobileConfig()
         {
             string docs = Environment.GetFolderPath(Environment.SpecialFolder.Personal);
             _path = Path.Combine(docs, "sdv_mobile_ctrl.cfg");
             _editFlagPath = Path.Combine(docs, "sdv_mobile_edit.flag");
+            _ramAlertPath = Path.Combine(docs, "sdv_ram_alert.txt");
             ResetLayoutDefaults();
             Reload(force: true);
         }
@@ -165,6 +168,26 @@ namespace SDVMobileControls
                 File.Delete(_editFlagPath);
                 Reload(force: true);
                 return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public bool TryConsumeRamAlertFlag(out string alertMsg)
+        {
+            alertMsg = null;
+            if (++_ramAlertCounter < 60)
+                return false;
+            _ramAlertCounter = 0;
+            try
+            {
+                if (!File.Exists(_ramAlertPath))
+                    return false;
+                alertMsg = File.ReadAllText(_ramAlertPath)?.Trim();
+                File.Delete(_ramAlertPath);
+                return !string.IsNullOrEmpty(alertMsg);
             }
             catch
             {

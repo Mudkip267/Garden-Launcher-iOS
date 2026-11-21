@@ -701,9 +701,10 @@ static void sdvApplyAutoHideHomeIndicator(UIViewController *vc) {
 
 -(void)refreshLabel {
     SDVRamSnapshot s = [SDVRamMonitor.shared sample];
-    UIColor *ledCol = (s.usagePct >= 82.0) ? kTintRed : ((s.usagePct >= 65.0) ? kTintOrange : kTintGreen);
+    double thresh = (double)[SDVRamMonitor.shared ramThresholdPct];
+    UIColor *ledCol = (s.usagePct >= thresh) ? kTintRed : ((s.usagePct >= 65.0) ? kTintOrange : kTintGreen);
     _led.backgroundColor = ledCol;
-    _lbl.textColor = (s.usagePct >= 82.0) ? rgb(0xFF9F9A) : UIColor.whiteColor;
+    _lbl.textColor = (s.usagePct >= thresh) ? rgb(0xFF9F9A) : UIColor.whiteColor;
     _lbl.text = [NSString stringWithFormat:@"RAM %@ · Dư %@ · %ldFPS",
         sdvFmtMemCompact(s.usedBytes), sdvFmtMemCompact(s.availBytes), (long)_fps];
 }
@@ -827,6 +828,7 @@ static SDVGardenGestureHost *gSdvGardenHost = nil;
     if (self) {
         _attachedWindows = [NSHashTable weakObjectsHashTable];
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(syncRamHudVisibility) name:kSDVRamHudToggleNotification object:nil];
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onHighRamWarning:) name:kSDVRamHighWarningNotification object:nil];
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onSceneOrAppNotification) name:UISceneDidActivateNotification object:nil];
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onSceneOrAppNotification) name:UIApplicationDidBecomeActiveNotification object:nil];
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onAudioInterruption:) name:AVAudioSessionInterruptionNotification object:nil];
@@ -1055,6 +1057,84 @@ static SDVGardenGestureHost *gSdvGardenHost = nil;
         } completion:^(BOOL done) {
             self.toastWindow.hidden = YES;
             self.toastWindow = nil;
+        }];
+    }];
+}
+
+-(void)onHighRamWarning:(NSNotification *)n {
+    NSString *msg = n.userInfo[@"msg"];
+    BOOL critical = [n.userInfo[@"critical"] boolValue];
+    if (!msg.length) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self showHighRamWarningBanner:msg critical:critical];
+    });
+}
+
+-(void)showHighRamWarningBanner:(NSString *)msg critical:(BOOL)critical {
+    UIWindow *game = [self gameWindow];
+    if (!game || [self isGardenOpen]) return;
+
+    [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:
+        critical ? UINotificationFeedbackTypeError : UINotificationFeedbackTypeWarning];
+
+    if (self.toastWindow) {
+        self.toastWindow.hidden = YES;
+        self.toastWindow = nil;
+    }
+
+    SDVPassThroughWindow *tw = game.windowScene
+        ? [[SDVPassThroughWindow alloc] initWithWindowScene:game.windowScene]
+        : [[SDVPassThroughWindow alloc] initWithFrame:game.frame];
+    tw.backgroundColor = UIColor.clearColor;
+    tw.windowLevel = UIWindowLevelNormal + 4;
+    tw.userInteractionEnabled = NO;
+    tw.interactiveView = nil;
+
+    UIViewController *vc = [UIViewController new];
+    vc.view.backgroundColor = UIColor.clearColor;
+    vc.view.userInteractionEnabled = NO;
+    tw.rootViewController = vc;
+
+    UIVisualEffectView *pill = mkGlassCard(UIBlurEffectStyleSystemChromeMaterialDark, 16.0);
+    pill.layer.borderWidth = 1.4;
+    pill.layer.borderColor = (critical ? kTintRed : kTintOrange).CGColor;
+    pill.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UIStackView *row = mkHStack(10);
+    UIImageView *ic = [[UIImageView alloc] initWithImage:sfIcon(@"exclamationmark.triangle.fill", 18, UIImageSymbolWeightBold)];
+    ic.tintColor = critical ? kTintRed : kTintOrange;
+    [ic setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    UILabel *lbl = mkLabel(msg, 12.5, UIFontWeightSemibold, UIColor.whiteColor);
+    lbl.numberOfLines = 2;
+    [row addArrangedSubview:ic];
+    [row addArrangedSubview:lbl];
+    [pill.contentView addSubview:row];
+    pinInsets(row, pill.contentView, UIEdgeInsetsMake(8, 14, 8, 14));
+
+    pill.alpha = 0.0;
+    pill.transform = CGAffineTransformMakeTranslation(0, -14);
+    [vc.view addSubview:pill];
+    [NSLayoutConstraint activateConstraints:@[
+        [pill.centerXAnchor constraintEqualToAnchor:vc.view.safeAreaLayoutGuide.centerXAnchor],
+        [pill.topAnchor constraintEqualToAnchor:vc.view.safeAreaLayoutGuide.topAnchor constant:28],
+        [pill.widthAnchor constraintLessThanOrEqualToConstant:520]
+    ]];
+
+    tw.hidden = NO;
+    self.toastWindow = tw;
+
+    [UIView animateWithDuration:0.25 delay:0 options:UIViewAnimationOptionCurveEaseOut animations:^{
+        pill.alpha = 1.0;
+        pill.transform = CGAffineTransformIdentity;
+    } completion:^(BOOL finished) {
+        [UIView animateWithDuration:0.35 delay:6.0 options:UIViewAnimationOptionCurveEaseIn animations:^{
+            pill.alpha = 0.0;
+            pill.transform = CGAffineTransformMakeTranslation(0, -10);
+        } completion:^(BOOL done) {
+            if (self.toastWindow == tw) {
+                self.toastWindow.hidden = YES;
+                self.toastWindow = nil;
+            }
         }];
     }];
 }

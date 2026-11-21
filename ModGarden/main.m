@@ -295,6 +295,7 @@ static NSString *sdvProbeLocalNetwork(void) {
     // Live RAM Monitor refs
     UILabel *_ramHeadlineLbl;
     UILabel *_ramDetailLbl;
+    UILabel *_ramThreshBadgeLbl;
     UIView *_ramBarTrack;
     UIView *_ramBarFill;
     NSLayoutConstraint *_ramBarFillW;
@@ -571,6 +572,7 @@ static NSString *sdvProbeLocalNetwork(void) {
     _creditCard = nil;
     _ramHeadlineLbl = nil;
     _ramDetailLbl = nil;
+    _ramThreshBadgeLbl = nil;
     _ramBarTrack = nil;
     _ramBarFill = nil;
     _ramBarFillW = nil;
@@ -1086,7 +1088,32 @@ static NSString *sdvProbeLocalNetwork(void) {
     _ramDetailLbl.font = iosMonoDigits(12, UIFontWeightRegular);
     [ramRow addArrangedSubview:_ramDetailLbl];
 
-    // Row 2: Dynamic Native Resolution (ZERO hardcoded resolution/scale!)
+    // Row 2: PojavLauncher-Style RAM Ceiling & Auto-GC Slider (65% - 92% of iOS Jetsam Budget)
+    SDVRamSnapshot sInit = [SDVRamMonitor.shared sample];
+    NSInteger curThreshPct = [SDVRamMonitor.shared ramThresholdPct];
+    uint64_t curThreshBytes = [SDVRamMonitor.shared thresholdBytesForBudget:sInit.budgetBytes];
+    UIStackView *ramCeilCol = mkVStack(6);
+    UIStackView *ramCeilHdr = mkHStack(8);
+    [ramCeilHdr addArrangedSubview:mkSettingsIconBadge(@"slider.horizontal.below.rectangle", kTintOrange, 28)];
+    UIStackView *ramCeilTxt = mkVStack(1);
+    [ramCeilTxt addArrangedSubview:mkLabel(@"Giới hạn RAM & Ngưỡng tự dọn (kiểu Pojav)", 13.5, UIFontWeightSemibold, kInkPrimary)];
+    [ramCeilTxt addArrangedSubview:mkLabel(@"Chạm mốc này sẽ tự ép thu hồi RAM ngầm & báo lưu game trước trần Jetsam iOS", 11.5, UIFontWeightRegular, kInkSecondary)];
+    [ramCeilHdr addArrangedSubview:ramCeilTxt];
+    [ramCeilHdr addArrangedSubview:[UIView new]];
+    _ramThreshBadgeLbl = mkBadgePill([NSString stringWithFormat:@"%@ (%ld%%)", sdvFmtMemMB(curThreshBytes), (long)curThreshPct], [kTintOrange colorWithAlphaComponent:0.15], kTintOrange, 11.5);
+    _ramThreshBadgeLbl.font = iosMonoDigits(11.5, UIFontWeightSemibold);
+    [ramCeilHdr addArrangedSubview:_ramThreshBadgeLbl];
+    [ramCeilCol addArrangedSubview:ramCeilHdr];
+
+    UISlider *ramSl = [UISlider new];
+    ramSl.minimumValue = 65.0f;
+    ramSl.maximumValue = 92.0f;
+    ramSl.value = (float)curThreshPct;
+    ramSl.minimumTrackTintColor = kTintOrange;
+    [ramSl addTarget:self action:@selector(ramThresholdSliderChanged:) forControlEvents:UIControlEventValueChanged];
+    [ramCeilCol addArrangedSubview:ramSl];
+
+    // Row 3: Dynamic Native Resolution (ZERO hardcoded resolution/scale!)
     UIStackView *resRow = mkHStack(10);
     [resRow addArrangedSubview:mkSettingsIconBadge(@"display", kTintIndigo, 28)];
     UIStackView *resTxt = mkVStack(1);
@@ -1096,11 +1123,12 @@ static NSString *sdvProbeLocalNetwork(void) {
     [resRow addArrangedSubview:[UIView new]];
     [resRow addArrangedSubview:mkBadgePill(@"Tự động (Native)", [kTintGreen colorWithAlphaComponent:0.14], kTintGreen, 11.5)];
 
-    // Row 3 & 4: Native Apple Switches
+    // Row 4, 5 & 6: Native Apple Switches
+    UIView *alertSwRow = [self mkSettingsSwitchRow:@"Cảnh báo nhắc SAVE khi RAM cao" icon:@"exclamationmark.shield.fill" color:kTintRed on:SDVRamMonitor.shared.ramAlertEnabled tag:22];
     UIView *hudSwRow = [self mkSettingsSwitchRow:@"Thanh đo RAM & FPS nổi" icon:@"gauge.medium" color:kTintGreen on:SDVRamMonitor.shared.hudEnabled tag:20];
     UIView *logSwRow = [self mkSettingsSwitchRow:@"Giảm ghi log TRACE thừa" icon:@"doc.text.magnifyingglass" color:kTintOrange on:[SDVRamMonitor.shared trimLogsEnabledForDocs:_root.path] tag:21];
 
-    // Row 5: Quick Memory Action Buttons
+    // Row 7: Quick Memory Action Buttons
     UIStackView *ramBtns = mkHStack(8);
     SDVAppleButton *gcBtn = mkIOSButton(@"Dọn RAM ngay", @"sparkles", [kTintBlue colorWithAlphaComponent:0.14], kTintBlue, 13, UIEdgeInsetsMake(8, 12, 8, 12));
     [gcBtn addTarget:self action:@selector(forceGcNowTapped) forControlEvents:UIControlEventTouchUpInside];
@@ -1113,7 +1141,7 @@ static NSString *sdvProbeLocalNetwork(void) {
     [ramBtns addArrangedSubview:rstPos];
     [ramBtns addArrangedSubview:[UIView new]];
 
-    [_pane addArrangedSubview:mkGroupedRows(@[ramRow, resRow, hudSwRow, logSwRow, ramBtns], 52)];
+    [_pane addArrangedSubview:mkGroupedRows(@[ramRow, ramCeilCol, resRow, alertSwRow, hudSwRow, logSwRow, ramBtns], 52)];
     [self refreshRamCardNow];
     __weak typeof(self) weakSelf = self;
     _ramUiTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
@@ -1427,6 +1455,11 @@ static NSString *sdvProbeLocalNetwork(void) {
         [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
         return;
     }
+    if (sw.tag == 22) {
+        [SDVRamMonitor.shared setRamAlertEnabled:sw.isOn];
+        [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+        return;
+    }
     if (sw.tag == 21) {
         [SDVRamMonitor.shared savePerfConfig:1 trimLogs:sw.isOn toDocs:_root.path];
         [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
@@ -1473,14 +1506,27 @@ static NSString *sdvProbeLocalNetwork(void) {
     });
 }
 
+-(void)ramThresholdSliderChanged:(UISlider *)sl {
+    NSInteger pct = (NSInteger)llroundf(sl.value);
+    if (pct != [SDVRamMonitor.shared ramThresholdPct]) {
+        [SDVRamMonitor.shared setRamThresholdPct:pct];
+        [self refreshRamCardNow];
+    }
+}
+
 -(void)refreshRamCardNow {
     if (!_ramHeadlineLbl || !_ramDetailLbl) return;
     SDVRamSnapshot s = [SDVRamMonitor.shared sample];
-    UIColor *col = (s.usagePct >= 82.0) ? kTintRed : ((s.usagePct >= 65.0) ? kTintOrange : kTintGreen);
+    NSInteger threshPct = [SDVRamMonitor.shared ramThresholdPct];
+    UIColor *col = (s.usagePct >= (double)threshPct) ? kTintRed : ((s.usagePct >= 65.0) ? kTintOrange : kTintGreen);
     _ramHeadlineLbl.text = [NSString stringWithFormat:@"%@ / %@ (%.0f%%)", sdvFmtMemMB(s.usedBytes), sdvFmtMemMB(s.budgetBytes), s.usagePct];
     _ramHeadlineLbl.textColor = col;
     _ramDetailLbl.text = [NSString stringWithFormat:@"Dư trước Jetsam: %@ · Peak: %@ · Máy: %.1f GB · Nhiệt: %@",
         sdvFmtMemMB(s.availBytes), sdvFmtMemMB(s.peakBytes), (double)s.deviceBytes / (1024.0 * 1024.0 * 1024.0), sdvThermalLabel(s.thermal)];
+    if (_ramThreshBadgeLbl) {
+        uint64_t tBytes = [SDVRamMonitor.shared thresholdBytesForBudget:s.budgetBytes];
+        _ramThreshBadgeLbl.text = [NSString stringWithFormat:@"  %@ (%ld%%)  ", sdvFmtMemMB(tBytes), (long)threshPct];
+    }
     _ramBarFill.backgroundColor = col;
     CGFloat trackW = _ramBarTrack.bounds.size.width;
     if (trackW > 8) {

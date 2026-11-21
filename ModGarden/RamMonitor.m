@@ -5,9 +5,12 @@
 
 static NSString *const kSDVRamHudToggleNotification = @"SDVRamHudToggleNotification";
 static NSString *const kSDVRamHudResetPosNotification = @"SDVRamHudResetPosNotification";
+static NSString *const kSDVRamHighWarningNotification = @"SDVRamHighWarningNotification";
 static NSString *const kSDVRamHudEnabledKey = @"sdv_ram_hud_enabled_v1";
 static NSString *const kSDVRamHudDxKey = @"sdv_ram_hud_dx_v1";
 static NSString *const kSDVRamHudDyKey = @"sdv_ram_hud_dy_v1";
+static NSString *const kSDVRamAlertEnabledKey = @"sdv_ram_alert_enabled_v1";
+static NSString *const kSDVRamThresholdPctKey = @"sdv_ram_threshold_pct_v1";
 
 typedef struct {
     uint64_t usedBytes;
@@ -51,6 +54,13 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
 -(void)saveHudOffset:(CGPoint)offset;
 -(void)resetHudOffset;
 
+// PojavLauncher-style RAM Ceiling & High-RAM Save Game Alert Settings
+-(BOOL)ramAlertEnabled;
+-(void)setRamAlertEnabled:(BOOL)on;
+-(NSInteger)ramThresholdPct;
+-(void)setRamThresholdPct:(NSInteger)pct;
+-(uint64_t)thresholdBytesForBudget:(uint64_t)budget;
+
 // v5 Performance Config (Documents/sdv_perf.cfg -> "renderMode,trimLogs")
 // renderMode: 0 = Smooth 1.5x, 1 = Balanced 2.0x (Default), 2 = Native 3.0x
 -(NSInteger)renderScaleModeForDocs:(NSString *)docsPath;
@@ -60,12 +70,15 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
 @end
 
 @implementation SDVRamMonitor {
+    NSString *_docsPath;
     NSString *_logPath;
     uint64_t _peakBytes;
     uint64_t _lastLoggedPeak;
     NSInteger _tickCount;
     BOOL _started;
     NSTimer *_timer;
+    NSTimeInterval _lastAutoGcTime;
+    NSTimeInterval _lastAlertTime;
 }
 
 +(instancetype)shared {
@@ -140,6 +153,35 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
     [NSNotificationCenter.defaultCenter postNotificationName:kSDVRamHudResetPosNotification object:nil];
 }
 
+-(BOOL)ramAlertEnabled {
+    NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
+    if ([ud objectForKey:kSDVRamAlertEnabledKey] == nil) return YES; // Default ON
+    return [ud boolForKey:kSDVRamAlertEnabledKey];
+}
+
+-(void)setRamAlertEnabled:(BOOL)on {
+    [NSUserDefaults.standardUserDefaults setBool:on forKey:kSDVRamAlertEnabledKey];
+}
+
+-(NSInteger)ramThresholdPct {
+    NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
+    if ([ud objectForKey:kSDVRamThresholdPctKey] == nil) return 80; // Default 80% (~1640 MB on 4GB iPhone)
+    NSInteger v = [ud integerForKey:kSDVRamThresholdPctKey];
+    if (v < 65) return 65;
+    if (v > 92) return 92;
+    return v;
+}
+
+-(void)setRamThresholdPct:(NSInteger)pct {
+    NSInteger clamped = MAX(65, MIN(92, pct));
+    [NSUserDefaults.standardUserDefaults setInteger:clamped forKey:kSDVRamThresholdPctKey];
+}
+
+-(uint64_t)thresholdBytesForBudget:(uint64_t)budget {
+    if (budget == 0) budget = 2050ULL * 1024 * 1024;
+    return (budget * (uint64_t)[self ramThresholdPct]) / 100ULL;
+}
+
 -(NSInteger)renderScaleModeForDocs:(NSString *)docsPath {
     return 1; // v6: Always locked to crisp integer 2.0x
 }
@@ -190,6 +232,7 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
 -(void)startWithDocsPath:(NSString *)docsPath {
     if (_started) return;
     _started = YES;
+    _docsPath = [docsPath copy];
 
     if (docsPath.length) {
         BOOL trimLogs = [self trimLogsEnabledForDocs:docsPath];
@@ -205,8 +248,8 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
         }
         _logPath = cur;
         SDVRamSnapshot s0 = [self sample];
-        [self appendLogLine:[NSString stringWithFormat:@"=== Garden Launcher v7 RAM Monitor Started | Device RAM: %.2f GB | Initial Budget: %@ | RenderScale: Dynamic Native ===",
-            (double)s0.deviceBytes / (1024.0 * 1024.0 * 1024.0), sdvFmtMemMB(s0.budgetBytes)]];
+        [self appendLogLine:[NSString stringWithFormat:@"=== Garden Launcher v7 RAM Monitor Started | Device RAM: %.2f GB | Initial Budget: %@ | Threshold: %ld%% ===",
+            (double)s0.deviceBytes / (1024.0 * 1024.0 * 1024.0), sdvFmtMemMB(s0.budgetBytes), (long)[self ramThresholdPct]]];
     }
 
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -219,8 +262,9 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
 -(void)tick {
     SDVRamSnapshot s = [self sample];
     _tickCount++;
+    NSInteger threshPct = [self ramThresholdPct];
     BOOL bigPeakJump = (s.peakBytes >= _lastLoggedPeak + 24ULL * 1024 * 1024);
-    BOOL highWarn = (s.usagePct >= 82.0 && (_tickCount % 2 == 0));
+    BOOL highWarn = (s.usagePct >= (double)threshPct && (_tickCount % 2 == 0));
     if (_tickCount % 5 == 0 || bigPeakJump || highWarn) {
         if (bigPeakJump) _lastLoggedPeak = s.peakBytes;
         static NSDateFormatter *fmt;
@@ -230,9 +274,41 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
             fmt.dateFormat = @"HH:mm:ss";
         });
         NSString *ts = [fmt stringFromDate:NSDate.date];
-        [self appendLogLine:[NSString stringWithFormat:@"[%@] Used=%@ | Avail=%@ | Budget=%@ | Peak=%@ | %.1f%% | Thermal=%@",
+        [self appendLogLine:[NSString stringWithFormat:@"[%@] Used=%@ | Avail=%@ | Budget=%@ | Peak=%@ | %.1f%% (Target:%ld%%) | Thermal=%@",
             ts, sdvFmtMemMB(s.usedBytes), sdvFmtMemMB(s.availBytes), sdvFmtMemMB(s.budgetBytes),
-            sdvFmtMemMB(s.peakBytes), s.usagePct, sdvThermalLabel(s.thermal)]];
+            sdvFmtMemMB(s.peakBytes), s.usagePct, (long)threshPct, sdvThermalLabel(s.thermal)]];
+    }
+
+    // PojavLauncher-style Soft Memory Ceiling + High-RAM Save Game Alert
+    if (_tickCount >= 20 && s.budgetBytes > 0) {
+        BOOL overThresh = (s.usagePct >= (double)threshPct) || (s.availBytes > 0 && s.availBytes <= 270ULL * 1024 * 1024);
+        BOOL isCritical = (s.usagePct >= 88.0) || (s.availBytes > 0 && s.availBytes <= 190ULL * 1024 * 1024);
+        if (overThresh) {
+            NSTimeInterval now = NSDate.date.timeIntervalSinceReferenceDate;
+            // 1. Auto-trigger tilesheet pruning & Mono Gen2 compacting GC (every 15s when above ceiling)
+            if (_docsPath.length && (now - _lastAutoGcTime >= 15.0)) {
+                _lastAutoGcTime = now;
+                [self triggerManualGCInDocs:_docsPath];
+                [self appendLogLine:[NSString stringWithFormat:@"[AUTO-GC] Triggered at %.1f%% (Avail=%@, Target=%ld%%)",
+                    s.usagePct, sdvFmtMemMB(s.availBytes), (long)threshPct]];
+            }
+            // 2. Notify player in-game + native iOS banner to SAVE GAME immediately
+            NSTimeInterval cooldown = isCritical ? 22.0 : 42.0;
+            if ([self ramAlertEnabled] && (now - _lastAlertTime >= cooldown)) {
+                _lastAlertTime = now;
+                if (_docsPath.length) {
+                    NSString *inGameMsg = [NSString stringWithFormat:@"CANH BAO RAM CAO (%.0f%% - Du %@)! Hay bam SAVE luu game ngay!",
+                        s.usagePct, sdvFmtMemCompact(s.availBytes)];
+                    NSString *alertFile = [_docsPath stringByAppendingPathComponent:@"sdv_ram_alert.txt"];
+                    [inGameMsg writeToFile:alertFile atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                }
+                NSString *bannerMsg = [NSString stringWithFormat:@"⚠️ RAM CAO: %@ / %@ (%.0f%% · Dư %@)\nĐã tự dọn RAM — Hãy bấm SAVE lưu game ngay tránh văng!",
+                    sdvFmtMemCompact(s.usedBytes), sdvFmtMemCompact(s.budgetBytes), s.usagePct, sdvFmtMemCompact(s.availBytes)];
+                [NSNotificationCenter.defaultCenter postNotificationName:kSDVRamHighWarningNotification
+                                                                  object:nil
+                                                                userInfo:@{@"msg": bannerMsg, @"critical": @(isCritical)}];
+            }
+        }
     }
 }
 @end

@@ -60,6 +60,7 @@ namespace SDVMobileControls
         private Rectangle _saveDnBtnRect;
         private string _saveToastText;
         private double _saveToastUntil;
+        private double _ramWarningUntil;
 
         // Context Menu Helper Bar (only in Inventory/Chest/Shop/TextInput, plus ESC-only on QuestLog!)
         private Rectangle _ctxX1Rect;
@@ -280,6 +281,17 @@ namespace SDVMobileControls
         {
             if (pad == null)
                 return false;
+
+            if (Context.IsWorldReady && _cfg.TryConsumeRamAlertFlag(out string ramAlert))
+            {
+                double nowSec = Environment.TickCount64 / 1000.0;
+                _ramWarningUntil = nowSec + 8.5;
+                _saveToastText = ramAlert;
+                _saveToastUntil = nowSec + 7.5;
+                _topBarCollapsed = false;
+                try { Game1.addHUDMessage(new HUDMessage(ramAlert, HUDMessage.error_type)); } catch { }
+                try { Game1.playSound("warn"); } catch { try { Game1.playSound("crafting"); } catch { } }
+            }
 
             if (Context.IsWorldReady && Game1.activeClickableMenu == null && _cfg.ConsumeEditLayoutFlag())
             {
@@ -2015,6 +2027,8 @@ namespace SDVMobileControls
             }
 
             // 2. Collapsible Top Utility Bar (BAG | MAP | QST | SAVE | KEY | EDIT | <)
+            double nowSec = Environment.TickCount64 / 1000.0;
+            bool isRamWarn = nowSec < _ramWarningUntil;
             if (_cfg.ShowTopUtility)
             {
                 DrawMinimalPill(sb, _btnBagRect, "BAG", false);
@@ -2022,7 +2036,20 @@ namespace SDVMobileControls
                 {
                     DrawMinimalPill(sb, _btnMapRect, "MAP", false);
                     DrawMinimalPill(sb, _btnQuestRect, "QST", false);
-                    DrawMinimalPill(sb, _btnSaveRect, "SAVE", _saveMenuOpen);
+                    if (isRamWarn && !_saveMenuOpen)
+                    {
+                        bool pulseRed = ((int)(nowSec * 3.5) % 2) == 0;
+                        Color warnBg = (pulseRed ? new Color(220, 44, 34) : new Color(230, 152, 18)) * 0.92f;
+                        Color warnBorder = pulseRed ? new Color(255, 224, 112) : Color.White;
+                        sb.Draw(_pixel, _btnSaveRect, warnBg);
+                        DrawRectOutline(sb, _btnSaveRect, Math.Max(2, _vpH / 320), warnBorder);
+                        int fs = Math.Max(1, _vpH / 320);
+                        _bridge?.DrawCenteredString(sb, _pixel, "SAVE!", _btnSaveRect, Color.White, fs);
+                    }
+                    else
+                    {
+                        DrawMinimalPill(sb, _btnSaveRect, "SAVE", _saveMenuOpen);
+                    }
                     DrawMinimalPill(sb, _btnKeyRect, "KEY", false);
                     DrawMinimalPill(sb, _btnEditRect, "EDIT", false);
                 }
@@ -2071,15 +2098,19 @@ namespace SDVMobileControls
             if (_saveMenuOpen)
                 DrawSaveMenuModal(sb);
 
-            // 6. Save Feedback Toast Banner
-            double nowSec = Environment.TickCount64 / 1000.0;
+            // 6. Save Feedback & High-RAM Warning Toast Banner
             if (!string.IsNullOrEmpty(_saveToastText) && nowSec < _saveToastUntil)
             {
                 int px = Math.Max(2, (int)Math.Round(_vpH / 320f));
-                int tw = Math.Clamp((int)(_vpW * 0.42f), 260, _vpW - 40);
+                int tw = isRamWarn
+                    ? Math.Clamp((int)(_vpW * 0.68f), 340, _vpW - 32)
+                    : Math.Clamp((int)(_vpW * 0.42f), 260, _vpW - 40);
                 int th = Math.Max(36, (int)(_vpH * 0.068f));
                 var toastR = new Rectangle((_vpW - tw) / 2, _vpH - th - Math.Max(18, _vpH / 26), tw, th);
-                DrawStardewPixelBox(sb, toastR, new Color(46, 30, 16) * 0.94f, new Color(246, 198, 86), new Color(138, 86, 42), px);
+                Color boxFill = isRamWarn ? new Color(92, 18, 16) * 0.95f : new Color(46, 30, 16) * 0.94f;
+                Color boxOut = isRamWarn ? new Color(255, 96, 76) : new Color(246, 198, 86);
+                Color boxIn = isRamWarn ? new Color(255, 208, 92) : new Color(138, 86, 42);
+                DrawStardewPixelBox(sb, toastR, boxFill, boxOut, boxIn, px);
                 int fs = Math.Max(1, _vpH / 300);
                 _bridge?.DrawCenteredString(sb, _pixel, _saveToastText, toastR, new Color(255, 240, 190), fs);
             }

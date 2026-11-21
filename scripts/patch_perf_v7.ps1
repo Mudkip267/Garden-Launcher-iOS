@@ -253,6 +253,64 @@ for ($i = 1; $i -lt $tosCtor.Body.Instructions.Count; $i++) {
 }
 Write-Host "  RAM Saver (TouchControls): PruneTileSheets on ManualGC + Watchdog 600MB ($bumped) + WarpTilesheetPrewarm=false ($prewarmOff)"
 
+# 1.2c Fix DynamicReflections water/puddle/sky player reflection: make LazyIosDisplayDevice.DrawTile
+# delegate to base.DrawTile (XnaDisplayDevice.DrawTile) after TryGetOrLoadTexture so Harmony patches on
+# XnaDisplayDevice.DrawTile (like DynamicReflections's DisplayDevicePatch.DrawTilePrefix) fire!
+$mLddDraw = $lddType.Methods | Where-Object { $_.Name -eq "DrawTile" }
+$mTryTex  = $lddType.Methods | Where-Object { $_.Name -eq "TryGetOrLoadTexture" }
+if ($mLddDraw -and $mTryTex) {
+    $mTileGetTs = $null
+    $mTexIsDisp = $null
+    foreach ($m in $lddType.Methods) {
+        if (-not $m.HasBody) { continue }
+        foreach ($ins in $m.Body.Instructions) {
+            if ($ins.Operand -is [Mono.Cecil.MethodReference]) {
+                if ($ins.Operand.FullName -like "*Tile::get_TileSheet*") { $mTileGetTs = $ins.Operand }
+                elseif ($ins.Operand.FullName -like "*GraphicsResource::get_IsDisposed*") { $mTexIsDisp = $ins.Operand }
+            }
+        }
+    }
+    $mBaseDraw = New-Object Mono.Cecil.MethodReference("DrawTile", $tMod.TypeSystem.Void, $lddType.BaseType)
+    $mBaseDraw.HasThis = $true
+    foreach ($p in $mLddDraw.Parameters) {
+        $mBaseDraw.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition($p.Name, $p.Attributes, $p.ParameterType)))
+    }
+    $mLddDraw.Body.ExceptionHandlers.Clear()
+    $mLddDraw.Body.Instructions.Clear()
+    $mLddDraw.Body.Variables.Clear()
+    $vTs  = New-Object Mono.Cecil.Cil.VariableDefinition($mTryTex.Parameters[0].ParameterType)
+    $vTex = New-Object Mono.Cecil.Cil.VariableDefinition($mTryTex.ReturnType)
+    $mLddDraw.Body.Variables.Add($vTs)
+    $mLddDraw.Body.Variables.Add($vTex)
+    $mLddDraw.Body.InitLocals = $true
+
+    $dtIL = $mLddDraw.Body.GetILProcessor()
+    $lRetDt = $dtIL.Create([Mono.Cecil.Cil.OpCodes]::Ret)
+    $dtIL.Append($dtIL.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
+    $dtIL.Append($dtIL.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $lRetDt))
+    $dtIL.Append($dtIL.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
+    $dtIL.Append($dtIL.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mTileGetTs))
+    $dtIL.Append($dtIL.Create([Mono.Cecil.Cil.OpCodes]::Stloc, $vTs))
+    $dtIL.Append($dtIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vTs))
+    $dtIL.Append($dtIL.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $lRetDt))
+    $dtIL.Append($dtIL.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+    $dtIL.Append($dtIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vTs))
+    $dtIL.Append($dtIL.Create([Mono.Cecil.Cil.OpCodes]::Call, $mTryTex))
+    $dtIL.Append($dtIL.Create([Mono.Cecil.Cil.OpCodes]::Stloc, $vTex))
+    $dtIL.Append($dtIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vTex))
+    $dtIL.Append($dtIL.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $lRetDt))
+    $dtIL.Append($dtIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vTex))
+    $dtIL.Append($dtIL.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mTexIsDisp))
+    $dtIL.Append($dtIL.Create([Mono.Cecil.Cil.OpCodes]::Brtrue, $lRetDt))
+    $dtIL.Append($dtIL.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+    $dtIL.Append($dtIL.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
+    $dtIL.Append($dtIL.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_2))
+    $dtIL.Append($dtIL.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_3))
+    $dtIL.Append($dtIL.Create([Mono.Cecil.Cil.OpCodes]::Call, $mBaseDraw))
+    $dtIL.Append($lRetDt)
+    Write-Host "  DynamicReflections Fix (TouchControls): LazyIosDisplayDevice.DrawTile now delegates to base XnaDisplayDevice.DrawTile!"
+}
+
 # 1.3 ModEntry.ApplyPerfResolutionScale(ModEntry self) — LOCKED TO 2.0x ON 3x DEVICES!
 # If h <= 1400 && (w % 3 == 0) && (h % 3 == 0): w = (w / 3) * 2; h = (h / 3) * 2;
 $dnrM   = $meType.Methods | Where-Object { $_.Name -eq "DetermineNativeResolution" }
@@ -739,7 +797,7 @@ foreach ($t in $hMod.Types) {
     foreach ($m in $t.Methods) {
         if (-not $m.HasBody) { continue }
         foreach ($ins in $m.Body.Instructions) {
-            if ($ins.OpCode.Name -eq "newobj" -and "$($ins.Operand)" -like '*Action`1<Foundation.NSTimer>::.ctor*') {
+            if ($ins.OpCode.Name -eq "newobj" -and "$($ins.Operand)" -like "*Action*<Foundation.NSTimer>::.ctor*") {
                 $mActTimerCtor = $ins.Operand; break
             }
         }

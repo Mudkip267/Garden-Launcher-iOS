@@ -32,7 +32,7 @@
 - **Điều khiển kiểu Mobile & Phím PC** — 4 chế độ (*Vô hình*, *2 Nút*, *Chạm đi A\**, *Kết hợp*), kéo thả chỉnh cỡ nút (`EDIT`) và thêm tới 16 phím PC (`P`, `I`, `F1–F12`, `ESC`, `TAB`, `SHIFT`...).
 - **Save Menu 20 mốc thời gian** — Lưu và tải lại tối đa 20 bản lưu nhanh cho từng nhân vật với thông tin ngày, giờ, vị trí và vàng.
 - **Hỗ trợ Shader & Âm thanh chuẩn iOS** — Tương thích mod Shader (`DynamicReflections`, `DynamicShader`...) kèm phản chiếu nhân vật trên mặt nước và âm thanh OpenAL ổn định.
-- **Cảnh báo RAM tự động (`85%` / `90%`)** — Tự động dọn RAM (`Auto-GC`) và hiện cảnh báo nhắc lưu game kịp thời tránh văng app.
+- **Cảnh báo RAM tự động (`85%` / `90%`) & Tối ưu Cache Map/Recolor** — Tự động xả cache ảnh bản đồ cũ & bản sao trùng của Content Patcher khi chuyển khu vực (không nén ảnh, không ảnh hưởng âm thanh), kèm cảnh báo nhắc lưu game kịp thời tránh văng app.
 - **Co-op LAN / IP** — Hỗ trợ chơi cùng Wi-Fi LAN hoặc qua ZeroTier / Tailscale.
 
 ---
@@ -43,17 +43,6 @@
 2. **Nạp game PC `1.6.15`** *(chỉ 1 lần)*: Nén thư mục game PC (`.ZIP`/`.RAR`/`.7Z`) → mở app → bấm **Nhập gói dữ liệu game** → chờ đủ 4 mục xanh → vuốt tắt và mở lại app.
 3. **Cài Mod**: Chạm **3 ngón tay × 2** → tab **Cài Mod** → chọn tệp hoặc thư mục mod → mở lại game để SMAPI nạp mod mới.
 4. **Thanh tiện ích trong game**: `BAG` (Túi) · `MAP` (Bản đồ) · `QST` (Nhiệm vụ) · `SAVE` (20 mốc lưu) · `KEY` (Bàn phím) · `EDIT` (Chỉnh nút & `+PHIM`).
-
----
-
-## 💬 Cộng đồng Stardew Valley Việt Nam
-
-| Loại | Cộng đồng | Liên kết |
-| :--- | :--- | :---: |
-| **Group** | Stardew Valley Việt Nam | [Tham gia](https://www.facebook.com/groups/261129932243154/) |
-| **Group** | Cộng đồng Stardew Valley Việt Nam | [Tham gia](https://www.facebook.com/groups/stardewvalleyvietnam/) |
-| **Fanpage** | Stardew Valley Vietnam Official | [Mở Page](https://www.facebook.com/StardewValleyVietnam.Official) |
-| **Fanpage** | Stardew Valley Vietnam Mod | [Mở Page](https://www.facebook.com/StardewValleyVietnam.Mod) |
 
 ---
 

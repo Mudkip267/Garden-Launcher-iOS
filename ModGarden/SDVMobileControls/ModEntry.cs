@@ -16,6 +16,7 @@ namespace SDVMobileControls
     public sealed class ModEntry : Mod
     {
         internal static MobileControlsEngine Engine;
+        internal static MapRamOptimizer RamOptimizer;
         private static IMonitor _monitor;
         private static readonly HashSet<Type> BoundPadTypes = new HashSet<Type>();
         private static int _errCount;
@@ -29,6 +30,7 @@ namespace SDVMobileControls
             _monitor = Monitor;
             var cfg = new MobileConfig();
             Engine = new MobileControlsEngine(cfg, Monitor, helper.DirectoryPath);
+            RamOptimizer = new MapRamOptimizer(helper, Monitor);
 
             BindAllLoadedTouchVirtualPads("Entry");
 
@@ -36,11 +38,14 @@ namespace SDVMobileControls
             helper.Events.GameLoop.UpdateTicked += OnUpdateTicked;
             helper.Events.GameLoop.Saved += OnSaved;
             helper.Events.GameLoop.SaveLoaded += OnSaveLoaded;
+            helper.Events.GameLoop.DayStarted += OnDayStarted;
+            helper.Events.Player.Warped += OnWarped;
         }
 
         private void OnGameLaunched(object sender, GameLaunchedEventArgs e)
         {
             BindAllLoadedTouchVirtualPads("GameLaunched");
+            try { RamOptimizer?.OnGameLaunched(); } catch { }
         }
 
         private void OnSaved(object sender, SavedEventArgs e)
@@ -50,6 +55,7 @@ namespace SDVMobileControls
 
         private void OnSaveLoaded(object sender, SaveLoadedEventArgs e)
         {
+            try { RamOptimizer?.OnSaveLoaded(); } catch { }
             if (!_audioDiagRanWorld)
             {
                 _audioDiagRanWorld = true;
@@ -57,8 +63,22 @@ namespace SDVMobileControls
             }
         }
 
+        private void OnDayStarted(object sender, DayStartedEventArgs e)
+        {
+            try { RamOptimizer?.OnDayStarted(); } catch { }
+        }
+
+        private void OnWarped(object sender, WarpedEventArgs e)
+        {
+            if (e != null && e.IsLocalPlayer)
+            {
+                try { RamOptimizer?.OnWarped(e.NewLocation); } catch { }
+            }
+        }
+
         private void OnUpdateTicked(object sender, UpdateTickedEventArgs e)
         {
+            try { RamOptimizer?.PollManualPruneFlag(); } catch { }
             if (!_audioDiagRanLaunch && ++_audioDiagTicks >= 120)
             {
                 _audioDiagRanLaunch = true;

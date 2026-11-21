@@ -326,6 +326,7 @@ namespace SDVMobileControls
                 _saveToastText = ramAlert;
                 _saveToastUntil = nowSec + (isCrit ? 9.5 : 6.5);
                 _topBarCollapsed = false;
+                try { ModEntry.RamOptimizer?.RunAggressivePrune(isCrit ? "RamAlert90" : "RamAlert85"); } catch { }
                 try { Game1.addHUDMessage(new HUDMessage(ramAlert, HUDMessage.error_type)); } catch { }
                 try { Game1.playSound(isCrit ? "cancel" : "warn"); } catch { try { Game1.playSound("crafting"); } catch { } }
             }

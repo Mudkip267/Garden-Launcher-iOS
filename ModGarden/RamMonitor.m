@@ -185,6 +185,8 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
     if (!docsPath.length) return;
     NSString *flag = [docsPath stringByAppendingPathComponent:@"sdv_gc_now.flag"];
     [@"1" writeToFile:flag atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    NSString *pruneFlag = [docsPath stringByAppendingPathComponent:@"sdv_prune_now.flag"];
+    [@"1" writeToFile:pruneFlag atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 
 -(void)appendLogLine:(NSString *)line {

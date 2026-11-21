@@ -1,4 +1,18 @@
 #import "main.m"
+#import <AVFoundation/AVFoundation.h>
+
+static void sdvEnsurePlaybackAudioSession(void) {
+    @try {
+        AVAudioSession *sess = [AVAudioSession sharedInstance];
+        if (![sess.category isEqualToString:AVAudioSessionCategoryPlayback] ||
+            !(sess.categoryOptions & AVAudioSessionCategoryOptionMixWithOthers)) {
+            [sess setCategory:AVAudioSessionCategoryPlayback
+                  withOptions:AVAudioSessionCategoryOptionMixWithOthers
+                        error:nil];
+        }
+        [sess setActive:YES error:nil];
+    } @catch (NSException *ex) { }
+}
 
 // ---- Pass-through Overlay Window (never steals touches outside interactiveView) ----
 @interface SDVPassThroughWindow : UIWindow
@@ -794,12 +808,21 @@ __attribute__((constructor)) static void startGardenControls(void) {
         syncBundledLidgren(docs);
         syncBundledSmapi(docs);
         [SDVRamMonitor.shared startWithDocsPath:docs];
+        sdvEnsurePlaybackAudioSession();
     }
     dispatch_async(dispatch_get_main_queue(), ^{
+        sdvEnsurePlaybackAudioSession();
+        [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+            sdvEnsurePlaybackAudioSession();
+        }];
+        [NSNotificationCenter.defaultCenter addObserverForName:AVAudioSessionInterruptionNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+            sdvEnsurePlaybackAudioSession();
+        }];
         static SDVGardenGestureHost *host;
         host = [SDVGardenGestureHost new];
         [host attachToGameWindows];
         [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer *t) {
+            sdvEnsurePlaybackAudioSession();
             [host attachToGameWindows];
         }];
     });

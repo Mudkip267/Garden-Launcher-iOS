@@ -47,6 +47,7 @@ jobs:
             -framework UIKit \
             -framework QuartzCore \
             -framework CoreGraphics \
+            -framework AVFoundation \
             -framework UniformTypeIdentifiers \
             -o work/stage/Payload/SDViOS.app/Frameworks/SDVModGarden.framework/SDVModGarden \
             ModGarden/Embedded.m ModGarden/vendor/miniz.c

@@ -70,7 +70,7 @@ jobs:
             </PropertyGroup>
             <ItemGroup>
               <Reference Include="Mono.Cecil">
-                <HintPath>../../stage/Payload/SDViOS.app/Frameworks/SDVModGarden.framework/BundledSMAPI/smapi-internal/Mono.Cecil.dll</HintPath>
+                <HintPath>../stage/Payload/SDViOS.app/Frameworks/SDVModGarden.framework/BundledSMAPI/smapi-internal/Mono.Cecil.dll</HintPath>
               </Reference>
             </ItemGroup>
           </Project>

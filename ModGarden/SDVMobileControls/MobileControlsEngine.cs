@@ -61,6 +61,7 @@ namespace SDVMobileControls
         private string _saveToastText;
         private double _saveToastUntil;
         private double _ramWarningUntil;
+        private bool _ramCritical;
 
         // Context Menu Helper Bar (only in Inventory/Chest/Shop/TextInput, plus ESC-only on QuestLog!)
         private Rectangle _ctxX1Rect;
@@ -285,12 +286,16 @@ namespace SDVMobileControls
             if (Context.IsWorldReady && _cfg.TryConsumeRamAlertFlag(out string ramAlert))
             {
                 double nowSec = Environment.TickCount64 / 1000.0;
-                _ramWarningUntil = nowSec + 8.5;
+                bool isCrit = ramAlert.StartsWith("CRIT|", StringComparison.Ordinal);
+                if (isCrit || ramAlert.StartsWith("WARN|", StringComparison.Ordinal))
+                    ramAlert = ramAlert.Substring(5);
+                _ramCritical = isCrit;
+                _ramWarningUntil = nowSec + (isCrit ? 11.0 : 7.5);
                 _saveToastText = ramAlert;
-                _saveToastUntil = nowSec + 7.5;
+                _saveToastUntil = nowSec + (isCrit ? 9.5 : 6.5);
                 _topBarCollapsed = false;
                 try { Game1.addHUDMessage(new HUDMessage(ramAlert, HUDMessage.error_type)); } catch { }
-                try { Game1.playSound("warn"); } catch { try { Game1.playSound("crafting"); } catch { } }
+                try { Game1.playSound(isCrit ? "cancel" : "warn"); } catch { try { Game1.playSound("crafting"); } catch { } }
             }
 
             if (Context.IsWorldReady && Game1.activeClickableMenu == null && _cfg.ConsumeEditLayoutFlag())
@@ -2038,11 +2043,14 @@ namespace SDVMobileControls
                     DrawMinimalPill(sb, _btnQuestRect, "QST", false);
                     if (isRamWarn && !_saveMenuOpen)
                     {
-                        bool pulseRed = ((int)(nowSec * 3.5) % 2) == 0;
-                        Color warnBg = (pulseRed ? new Color(220, 44, 34) : new Color(230, 152, 18)) * 0.92f;
-                        Color warnBorder = pulseRed ? new Color(255, 224, 112) : Color.White;
+                        double rate = _ramCritical ? 6.0 : 3.0;
+                        bool pulse = ((int)(nowSec * rate) % 2) == 0;
+                        Color warnBg = _ramCritical
+                            ? (pulse ? new Color(235, 24, 24) : new Color(160, 12, 12)) * 0.96f
+                            : (pulse ? new Color(230, 138, 16) : new Color(185, 86, 14)) * 0.92f;
+                        Color warnBorder = pulse ? new Color(255, 232, 96) : Color.White;
                         sb.Draw(_pixel, _btnSaveRect, warnBg);
-                        DrawRectOutline(sb, _btnSaveRect, Math.Max(2, _vpH / 320), warnBorder);
+                        DrawRectOutline(sb, _btnSaveRect, Math.Max(2, _vpH / 300), warnBorder);
                         int fs = Math.Max(1, _vpH / 320);
                         _bridge?.DrawCenteredString(sb, _pixel, "SAVE!", _btnSaveRect, Color.White, fs);
                     }

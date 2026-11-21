@@ -45,9 +45,9 @@
 - **Tương thích Mod Shader PC 1.6 & Phản chiếu bóng nhân vật (`DynamicReflections` / `DynamicShader`)**:
   - Bộ đọc kép tự động nhận diện bytecode `MGFX v9` (1-byte counts của *Dynamic Reflections*, *DynamicShader*...) lẫn `MGFX v10` (4-byte counts) và tự chuẩn hóa header `precision highp float;` cho GPU iOS OpenGL ES.
   - Sửa `LazyIosDisplayDevice.DrawTile` ủy quyền về `base.DrawTile` (`XnaDisplayDevice.DrawTile`) giúp Harmony patch của *Dynamic Reflections* lọc đúng ô nước, vũng nước và bầu trời sao để **hiển thị đầy đủ bóng phản chiếu của nhân vật và NPC dưới mặt nước**.
-- **Thanh kéo Giới hạn RAM & Tự dọn GC kiểu PojavLauncher + Cảnh báo nhắc SAVE khi RAM cao**:
-  - Cho phép tự kéo chỉnh ngưỡng giới hạn RAM (`65%` – `92%` ngân sách Jetsam iOS, hiển thị trực tiếp số MB tương ứng trên máy) trong tab *Hiệu năng & Nút*.
-  - Khi RAM chạm mốc đã chọn: tự động kích hoạt thu hồi texture map cũ + nén bộ nhớ Mono (`Auto-GC`), đồng thời phát cảnh báo rung Haptic + Banner góc trên + thông báo trong game và **nhấp nháy đỏ/vàng nút `SAVE!`** nhắc người chơi lưu game ngay trước khi tràn RAM.
+- **Hệ thống Cảnh báo Lưu Game 2 cấp độ khi RAM cao (`85%` & `90%`) + Tự động dọn RAM (`Auto-GC`)**:
+  - **Mốc `85%` (Cảnh báo):** Tự động dọn RAM ngầm, rung Haptic Warning, hiện Banner cảnh báo màu cam góc trên + thông báo trong game và nhấp nháy cam/vàng nút **`SAVE!`** nhắc lưu game.
+  - **Mốc `90%` (Cảnh báo mạnh khẩn cấp):** Rung Haptic Error **3 nhịp liên tiếp**, hiện Banner đỏ đậm viền dày góc trên (`🚨 CẢNH BÁO MẠNH: RAM ĐẠT 90%+ ... SẮP TRÀN RAM VĂNG GAME!`) + hộp thoại đỏ trong game và nhấp nháy đỏ rực tốc độ cao nút **`SAVE!`** để người chơi kịp lưu game ngay lập tức.
 - **Sửa cảm ứng bảng Nhiệm vụ (`QuestLog`) & Menu**: Giữ nút **`ESC`** góc trên-trái riêng cho bảng Nhiệm vụ để thoát nhanh, đồng thời chạm xem chi tiết nhiệm vụ, nhận thưởng, kéo thanh trượt Options và mua/bán nhiều đồ trong Shop bằng cách giữ lì.
 - **Khóa thanh Home iPhone (`UIRectEdgeAll`)**: Tắt hẳn hiện tượng chạm gần cạnh dưới làm sáng thanh Home; cần vuốt chủ động từ đáy màn hình lên mới kích hoạt.
 - **Không còn hiện lại tay cầm SDViOS cũ**: Giữ cố định chế độ điều khiển Mobile khi mở mọi bảng phụ.

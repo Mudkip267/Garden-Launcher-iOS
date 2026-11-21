@@ -701,10 +701,9 @@ static void sdvApplyAutoHideHomeIndicator(UIViewController *vc) {
 
 -(void)refreshLabel {
     SDVRamSnapshot s = [SDVRamMonitor.shared sample];
-    double thresh = (double)[SDVRamMonitor.shared ramThresholdPct];
-    UIColor *ledCol = (s.usagePct >= thresh) ? kTintRed : ((s.usagePct >= 65.0) ? kTintOrange : kTintGreen);
+    UIColor *ledCol = (s.usagePct >= 90.0) ? kTintRed : ((s.usagePct >= 85.0) ? kTintOrange : kTintGreen);
     _led.backgroundColor = ledCol;
-    _lbl.textColor = (s.usagePct >= thresh) ? rgb(0xFF9F9A) : UIColor.whiteColor;
+    _lbl.textColor = (s.usagePct >= 90.0) ? rgb(0xFF8A80) : ((s.usagePct >= 85.0) ? rgb(0xFFD180) : UIColor.whiteColor);
     _lbl.text = [NSString stringWithFormat:@"RAM %@ · Dư %@ · %ldFPS",
         sdvFmtMemCompact(s.usedBytes), sdvFmtMemCompact(s.availBytes), (long)_fps];
 }
@@ -1074,8 +1073,17 @@ static SDVGardenGestureHost *gSdvGardenHost = nil;
     UIWindow *game = [self gameWindow];
     if (!game || [self isGardenOpen]) return;
 
-    [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:
-        critical ? UINotificationFeedbackTypeError : UINotificationFeedbackTypeWarning];
+    UINotificationFeedbackGenerator *haptic = [[UINotificationFeedbackGenerator alloc] init];
+    [haptic notificationOccurred:critical ? UINotificationFeedbackTypeError : UINotificationFeedbackTypeWarning];
+    if (critical) {
+        // Strong 3-pulse haptic alert when RAM hits 90%+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.32 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeError];
+        });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.68 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeError];
+        });
+    }
 
     if (self.toastWindow) {
         self.toastWindow.hidden = YES;
@@ -1096,20 +1104,23 @@ static SDVGardenGestureHost *gSdvGardenHost = nil;
     tw.rootViewController = vc;
 
     UIVisualEffectView *pill = mkGlassCard(UIBlurEffectStyleSystemChromeMaterialDark, 16.0);
-    pill.layer.borderWidth = 1.4;
+    pill.layer.borderWidth = critical ? 2.2 : 1.4;
     pill.layer.borderColor = (critical ? kTintRed : kTintOrange).CGColor;
+    if (critical) {
+        pill.contentView.backgroundColor = [kTintRed colorWithAlphaComponent:0.28];
+    }
     pill.translatesAutoresizingMaskIntoConstraints = NO;
 
     UIStackView *row = mkHStack(10);
-    UIImageView *ic = [[UIImageView alloc] initWithImage:sfIcon(@"exclamationmark.triangle.fill", 18, UIImageSymbolWeightBold)];
+    UIImageView *ic = [[UIImageView alloc] initWithImage:sfIcon(@"exclamationmark.triangle.fill", critical ? 21 : 18, UIImageSymbolWeightBold)];
     ic.tintColor = critical ? kTintRed : kTintOrange;
     [ic setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
-    UILabel *lbl = mkLabel(msg, 12.5, UIFontWeightSemibold, UIColor.whiteColor);
+    UILabel *lbl = mkLabel(msg, critical ? 13.0 : 12.5, critical ? UIFontWeightBold : UIFontWeightSemibold, UIColor.whiteColor);
     lbl.numberOfLines = 2;
     [row addArrangedSubview:ic];
     [row addArrangedSubview:lbl];
     [pill.contentView addSubview:row];
-    pinInsets(row, pill.contentView, UIEdgeInsetsMake(8, 14, 8, 14));
+    pinInsets(row, pill.contentView, UIEdgeInsetsMake(critical ? 10 : 8, 15, critical ? 10 : 8, 15));
 
     pill.alpha = 0.0;
     pill.transform = CGAffineTransformMakeTranslation(0, -14);
@@ -1117,7 +1128,7 @@ static SDVGardenGestureHost *gSdvGardenHost = nil;
     [NSLayoutConstraint activateConstraints:@[
         [pill.centerXAnchor constraintEqualToAnchor:vc.view.safeAreaLayoutGuide.centerXAnchor],
         [pill.topAnchor constraintEqualToAnchor:vc.view.safeAreaLayoutGuide.topAnchor constant:28],
-        [pill.widthAnchor constraintLessThanOrEqualToConstant:520]
+        [pill.widthAnchor constraintLessThanOrEqualToConstant:550]
     ]];
 
     tw.hidden = NO;
@@ -1127,7 +1138,7 @@ static SDVGardenGestureHost *gSdvGardenHost = nil;
         pill.alpha = 1.0;
         pill.transform = CGAffineTransformIdentity;
     } completion:^(BOOL finished) {
-        [UIView animateWithDuration:0.35 delay:6.0 options:UIViewAnimationOptionCurveEaseIn animations:^{
+        [UIView animateWithDuration:0.35 delay:(critical ? 8.0 : 5.5) options:UIViewAnimationOptionCurveEaseIn animations:^{
             pill.alpha = 0.0;
             pill.transform = CGAffineTransformMakeTranslation(0, -10);
         } completion:^(BOOL done) {

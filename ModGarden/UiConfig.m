@@ -344,9 +344,26 @@ static long long sdvNextRev(void) {
     for (SDVCustomKeyEntry *e in self.customKeys) {
         if (e.keyId >= nextId) nextId = e.keyId + 1;
     }
-    NSInteger idx = (NSInteger)self.customKeys.count;
-    NSInteger col = idx % 4;
-    NSInteger row = idx / 4;
+    float candX = 0.56f;
+    float candY = 0.16f;
+    for (NSInteger slot = 0; slot < 16; slot++) {
+        NSInteger col = slot % 4;
+        NSInteger row = slot / 4;
+        float cx = sdvClampf(0.56f + col * 0.085f, 0.05f, 0.90f);
+        float cy = sdvClampf(0.16f + row * 0.135f, 0.08f, 0.84f);
+        BOOL overlap = NO;
+        for (SDVCustomKeyEntry *ex in self.customKeys) {
+            if (fabsf(ex.x - cx) < 0.045f && fabsf(ex.y - cy) < 0.065f) {
+                overlap = YES;
+                break;
+            }
+        }
+        if (!overlap) {
+            candX = cx;
+            candY = cy;
+            break;
+        }
+    }
     NSString *clean = [[label stringByReplacingOccurrencesOfString:@"|" withString:@""] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].uppercaseString;
     if (!clean.length) clean = @"KEY";
     if (clean.length > 6) clean = [clean substringToIndex:6];
@@ -355,8 +372,8 @@ static long long sdvNextRev(void) {
     e.keyId = nextId;
     e.label = clean;
     e.keyCode = keyCode;
-    e.x = sdvClampf(0.56f + col * 0.085f, 0.05f, 0.90f);
-    e.y = sdvClampf(0.16f + row * 0.135f, 0.08f, 0.84f);
+    e.x = candX;
+    e.y = candY;
     e.w = 0.068f;
     e.h = 0.105f;
     [self.customKeys addObject:e];

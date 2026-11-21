@@ -114,11 +114,30 @@ namespace SDVMobileControls
             foreach (var b in CustomKeys)
                 if (b.Id >= nextId) nextId = b.Id + 1;
 
-            int idx = CustomKeys.Count;
-            int col = idx % 4;
-            int row = idx / 4;
-            float x = Math.Clamp(0.56f + col * 0.085f, 0.05f, 0.90f);
-            float y = Math.Clamp(0.16f + row * 0.135f, 0.08f, 0.84f);
+            float x = 0.56f;
+            float y = 0.16f;
+            for (int slot = 0; slot < 16; slot++)
+            {
+                int col = slot % 4;
+                int row = slot / 4;
+                float cx = Math.Clamp(0.56f + col * 0.085f, 0.05f, 0.90f);
+                float cy = Math.Clamp(0.16f + row * 0.135f, 0.08f, 0.84f);
+                bool overlap = false;
+                for (int i = 0; i < CustomKeys.Count; i++)
+                {
+                    if (Math.Abs(CustomKeys[i].X - cx) < 0.045f && Math.Abs(CustomKeys[i].Y - cy) < 0.065f)
+                    {
+                        overlap = true;
+                        break;
+                    }
+                }
+                if (!overlap)
+                {
+                    x = cx;
+                    y = cy;
+                    break;
+                }
+            }
 
             string cleanLabel = SanitizeLabel(label);
             var btn = new CustomKeyButton
@@ -132,6 +151,7 @@ namespace SDVMobileControls
                 H = 0.105f
             };
             CustomKeys.Add(btn);
+            Save();
             return btn;
         }
 
@@ -142,6 +162,7 @@ namespace SDVMobileControls
                 if (CustomKeys[i].Id == id)
                 {
                     CustomKeys.RemoveAt(i);
+                    Save();
                     return true;
                 }
             }

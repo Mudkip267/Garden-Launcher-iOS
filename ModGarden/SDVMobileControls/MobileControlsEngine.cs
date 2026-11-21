@@ -86,6 +86,7 @@ namespace SDVMobileControls
         // Custom PC Key Buttons runtime tracking (up to 16 simultaneous custom PC buttons)
         private readonly Dictionary<int, int> _customBtnTouchIds = new Dictionary<int, int>(16); // btnId -> touchId
         private readonly Dictionary<int, int> _customBtnPulseFrames = new Dictionary<int, int>(16); // btnId -> remaining pulse frames
+        private readonly Dictionary<int, double> _customBtnLastPressSec = new Dictionary<int, double>(16); // btnId -> last press timestamp
         private readonly HashSet<int> _customBtnsHeldNow = new HashSet<int>();
 
         // Active joystick runtime state
@@ -247,6 +248,14 @@ namespace SDVMobileControls
             return _bridge;
         }
 
+        private static bool IsContinuousHoldKey(int keyCode)
+        {
+            // Modifiers (Left/Right Shift, Ctrl, Alt), Arrow keys (Left/Up/Right/Down), Space
+            return (keyCode >= 160 && keyCode <= 165) ||
+                   (keyCode >= 37 && keyCode <= 40) ||
+                   keyCode == 32;
+        }
+
         public void PopulateExtraKeys(HashSet<Keys> targetSet)
         {
             if (targetSet == null || !IsMobileModeActive || _editMode)
@@ -255,11 +264,34 @@ namespace SDVMobileControls
             for (int i = 0; i < _cfg.CustomKeys.Count; i++)
             {
                 var btn = _cfg.CustomKeys[i];
+                if (btn.KeyCode <= 0) continue;
                 bool held = _customBtnsHeldNow.Contains(btn.Id);
                 bool pulsing = _customBtnPulseFrames.TryGetValue(btn.Id, out int rem) && rem > 0;
-                if ((held || pulsing) && btn.KeyCode > 0)
+                bool active = IsContinuousHoldKey(btn.KeyCode) ? (held || pulsing) : pulsing;
+                if (active)
                 {
                     targetSet.Add((Keys)btn.KeyCode);
+                }
+            }
+        }
+
+        public void PopulateExtraKeysList(List<Keys> targetList)
+        {
+            if (targetList == null || !IsMobileModeActive || _editMode)
+                return;
+
+            for (int i = 0; i < _cfg.CustomKeys.Count; i++)
+            {
+                var btn = _cfg.CustomKeys[i];
+                if (btn.KeyCode <= 0) continue;
+                bool held = _customBtnsHeldNow.Contains(btn.Id);
+                bool pulsing = _customBtnPulseFrames.TryGetValue(btn.Id, out int rem) && rem > 0;
+                bool active = IsContinuousHoldKey(btn.KeyCode) ? (held || pulsing) : pulsing;
+                if (active)
+                {
+                    Keys k = (Keys)btn.KeyCode;
+                    if (!targetList.Contains(k))
+                        targetList.Add(k);
                 }
             }
         }
@@ -401,7 +433,7 @@ namespace SDVMobileControls
         {
             var m = Game1.activeClickableMenu;
             if (m == null) return false;
-            if (m is LetterViewerMenu || m is DialogueBox || m is BobberBar || m is TitleMenu)
+            if (m is BobberBar || m is TitleMenu)
                 return false;
             return Context.IsWorldReady;
         }
@@ -459,7 +491,6 @@ namespace SDVMobileControls
             {
                 ResetMenuTapState();
                 _ctxTouchId = -1;
-                ClearCustomButtonTouches();
                 _invShop.Reset();
                 return false;
             }
@@ -529,7 +560,7 @@ namespace SDVMobileControls
             // Handle Custom PC Key Buttons in Inventory / Mod Menus
             if (allowCustomKeys)
             {
-                bool customConsumed = ProcessCustomKeyTouches(touches);
+                bool customConsumed = ProcessCustomKeyTouches(pad, br, touches, nowSec);
                 if (customConsumed)
                 {
                     ResetMenuTapState();
@@ -695,7 +726,7 @@ namespace SDVMobileControls
             return true;
         }
 
-        private bool ProcessCustomKeyTouches(TouchCollection touches)
+        private bool ProcessCustomKeyTouches(object pad, PadBridge br, TouchCollection touches, double nowSec)
         {
             _customBtnsHeldNow.Clear();
             bool anyCustomTouched = false;
@@ -739,7 +770,12 @@ namespace SDVMobileControls
                         {
                             _customBtnTouchIds[btn.Id] = tl.Id;
                             _customBtnsHeldNow.Add(btn.Id);
-                            _customBtnPulseFrames[btn.Id] = 3; // Guarantee SMAPI catches even a fast tap!
+                            if (!_customBtnLastPressSec.TryGetValue(btn.Id, out double lastSec) || (nowSec - lastSec) >= 0.16)
+                            {
+                                _customBtnLastPressSec[btn.Id] = nowSec;
+                                _customBtnPulseFrames[btn.Id] = 2; // Clean 2-tick rising-edge pulse for SMAPI + Game1 without menu double-toggling!
+                                OnCustomKeyActivated(pad, br, btn);
+                            }
                             anyCustomTouched = true;
                             break;
                         }
@@ -752,6 +788,22 @@ namespace SDVMobileControls
                 _customBtnTouchIds.Clear();
 
             return anyCustomTouched;
+        }
+
+        private void OnCustomKeyActivated(object pad, PadBridge br, CustomKeyButton btn)
+        {
+            if (btn == null || btn.KeyCode <= 0)
+                return;
+
+            if (Game1.activeClickableMenu == null)
+            {
+                // Tell SDViOSTouchControls that any menu opened by this key press (e.g. ESC, E, M, P, I, F6, F7) was requested by the player!
+                br?.SetPlayerRequestedMenuOpen(pad, true);
+            }
+            else if (btn.KeyCode == (int)Keys.Escape)
+            {
+                br?.SetPlayerRequestedMenuOpen(pad, false);
+            }
         }
 
         private bool IsTouchOwnedByCustomButton(int touchId)
@@ -857,7 +909,7 @@ namespace SDVMobileControls
 
             // --- 0. Process User Custom PC Key Buttons FIRST (never steal gameplay buttons!) ---
             if (_cfg.CustomKeys.Count > 0)
-                ProcessCustomKeyTouches(touches);
+                ProcessCustomKeyTouches(pad, br, touches, nowSec);
             else
                 ClearCustomButtonTouches();
 
@@ -1198,6 +1250,8 @@ namespace SDVMobileControls
                     if (_pickerCloseRect.Contains(pt) || !_pickerPanelRect.Contains(pt))
                     {
                         _keyPickerOpen = false;
+                        _editTouchId = tl.Id;
+                        _editDragTarget = EditTarget.None;
                         try { Game1.playSound("cancel"); } catch { }
                         return;
                     }
@@ -1217,6 +1271,8 @@ namespace SDVMobileControls
                                 try { Game1.playSound("coin"); } catch { }
                             }
                             _keyPickerOpen = false;
+                            _editTouchId = tl.Id;
+                            _editDragTarget = EditTarget.None;
                             return;
                         }
                     }
@@ -1236,6 +1292,8 @@ namespace SDVMobileControls
                     if (_editAddKeyBtnRect.Contains(pt))
                     {
                         _keyPickerOpen = true;
+                        _editTouchId = tl.Id;
+                        _editDragTarget = EditTarget.None;
                         try { Game1.playSound("smallSelect"); } catch { }
                         return;
                     }
@@ -1253,6 +1311,7 @@ namespace SDVMobileControls
                     if (_editResetBtnRect.Contains(pt))
                     {
                         _cfg.ResetLayoutDefaults();
+                        _cfg.Save();
                         ComputeLayout();
                         try { Game1.playSound("smallSelect"); } catch { }
                         return;
@@ -1334,6 +1393,8 @@ namespace SDVMobileControls
                 }
                 else if ((tl.State == TouchLocationState.Released || tl.State == TouchLocationState.Invalid) && tl.Id == _editTouchId)
                 {
+                    if (_editDragTarget != EditTarget.None)
+                        _cfg.Save();
                     _editTouchId = -1;
                     _editDragTarget = EditTarget.None;
                     _editDragCustomId = -1;

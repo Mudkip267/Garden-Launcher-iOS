@@ -538,8 +538,10 @@ if (-not $mPadUpdate -or -not $mPadDraw) { throw "Missing TouchVirtualPad.Update
 Add-MobileHook $mPadUpdate "MobileUpdateHook"
 Add-MobileHook $mPadDraw   "MobileDrawHook"
 
-# 1.6b Direct IL hook TouchVirtualPad.MobileExtraKeysHook (Action<HashSet<Keys>>) for unlimited custom PC hotkey buttons!
+# 1.6b Direct IL hook TouchVirtualPad.MobileExtraKeysHook (Action<HashSet<Keys>>) & MobileExtraKeysListHook (Action<List<Keys>>) for unlimited custom PC hotkey buttons!
 $fSimKeys = $padType.Fields | Where-Object { $_.Name -eq "_simKeysSet" }
+$fActiveKeysList = $padType.Fields | Where-Object { $_.Name -eq "_activeKeysList" }
+$fCachedSetKeys = $padType.Fields | Where-Object { $_.Name -eq "_cachedSetKeys" }
 $hashSetKeysType = $fSimKeys.FieldType
 $action1Ref = New-Object Mono.Cecil.TypeReference("System", "Action``1", $tMod, $coreScope, $false)
 $action1Ref.GenericParameters.Add((New-Object Mono.Cecil.GenericParameter("T", $action1Ref)))
@@ -549,9 +551,15 @@ $actionKeysInst.GenericArguments.Add($hashSetKeysType)
 $fExtraKeys = New-Object Mono.Cecil.FieldDefinition("MobileExtraKeysHook", [Mono.Cecil.FieldAttributes]"Public, Static", $actionKeysInst)
 $padType.Fields.Add($fExtraKeys)
 
+$fExtraKeysList = New-Object Mono.Cecil.FieldDefinition("MobileExtraKeysListHook", [Mono.Cecil.FieldAttributes]"Public, Static", $fCachedSetKeys.FieldType)
+$padType.Fields.Add($fExtraKeysList)
+
 $mActionInvoke = New-Object Mono.Cecil.MethodReference("Invoke", $tMod.TypeSystem.Void, $actionKeysInst)
 $mActionInvoke.HasThis = $true
 $mActionInvoke.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition($action1Ref.GenericParameters[0])))
+
+$mListActionInvoke = Find-Ref $tMod "System.Void System.Action``1<System.Collections.Generic.List``1<Microsoft.Xna.Framework.Input.Keys>>::Invoke(!0)"
+if (-not $mListActionInvoke) { throw "Missing Action<List<Keys>>::Invoke reference" }
 
 # 1) get_HasActiveHotkeyInput: if (MobileExtraKeysHook != null) return true;
 $mHasHotkey = $padType.Methods | Where-Object { $_.Name -eq "get_HasActiveHotkeyInput" }
@@ -587,7 +595,30 @@ $ek5 = $skp.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mActionInvoke)
 foreach ($ins in @($ek0, $ek1, $ek2, $ek3, $ek4, $ek5)) { $skp.InsertBefore($countAnchor, $ins) }
 Retarget-Branches $mSimKb $countAnchor $ek0
 $ek1.Operand = $countAnchor
-Write-Host "  Injected direct IL hook TouchVirtualPad.MobileExtraKeysHook (Action<HashSet<Keys>>) for custom PC buttons!"
+
+# 3) ForwardInputToGame: right after _hotkeyTouchActive[0..7] loop (before get_VerboseInputLogging), invoke MobileExtraKeysListHook(_activeKeysList)
+$mFwd = $padType.Methods | Where-Object { $_.Name -eq "ForwardInputToGame" }
+if (-not $mFwd) { throw "Missing ForwardInputToGame" }
+Expand-ShortBranches $mFwd
+$fwp = $mFwd.Body.GetILProcessor()
+$verbAnchor = $null
+foreach ($ins in $mFwd.Body.Instructions) {
+    if ($ins.OpCode.Name -eq "call" -and "$($ins.Operand)" -like "*ModEntry::get_VerboseInputLogging*") {
+        $verbAnchor = $ins
+        break
+    }
+}
+if (-not $verbAnchor) { throw "Could not find get_VerboseInputLogging anchor in ForwardInputToGame" }
+$fl0 = $fwp.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fExtraKeysList)
+$fl1 = $fwp.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $verbAnchor)
+$fl2 = $fwp.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fExtraKeysList)
+$fl3 = $fwp.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0)
+$fl4 = $fwp.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fActiveKeysList)
+$fl5 = $fwp.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mListActionInvoke)
+foreach ($ins in @($fl0, $fl1, $fl2, $fl3, $fl4, $fl5)) { $fwp.InsertBefore($verbAnchor, $ins) }
+Retarget-Branches $mFwd $verbAnchor $fl0
+$fl1.Operand = $verbAnchor
+Write-Host "  Injected direct IL hooks TouchVirtualPad.MobileExtraKeysHook + MobileExtraKeysListHook for custom PC buttons!"
 
 Write-Host "  v7 TouchControls: Native 3x/2x + Direct MobileHooks + PrefixClientBounds + MenuLag(stackSkip, GC 140MB x$gmLowered) + Poll 45f + Watchdog $bumped"
 $tAsm.Write($outTouch)

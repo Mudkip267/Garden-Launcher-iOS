@@ -64,7 +64,7 @@ namespace SDVMobileControls
                 _audioDiagRanLaunch = true;
                 RunAudioDiagnosticAndRepair("GameLaunched+2s");
             }
-            if (BoundPadTypes.Count > 0)
+            if (BoundPadTypes.Count >= 2 || (BoundPadTypes.Count > 0 && _retryTicks > 300))
                 return;
             if (++_retryTicks % 30 == 0)
                 BindAllLoadedTouchVirtualPads("UpdateTicked");
@@ -212,6 +212,7 @@ namespace SDVMobileControls
                     FieldInfo fUpd = tvp.GetField("MobileUpdateHook", stat);
                     FieldInfo fDrw = tvp.GetField("MobileDrawHook", stat);
                     FieldInfo fKeys = tvp.GetField("MobileExtraKeysHook", stat);
+                    FieldInfo fKeysList = tvp.GetField("MobileExtraKeysListHook", stat);
                     if (fUpd == null || fDrw == null)
                     {
                         _monitor.Log($"[{phase}] Found {tvp.FullName} in {asm.GetName().Name}, but MobileUpdateHook/MobileDrawHook fields missing!", LogLevel.Warn);
@@ -227,9 +228,14 @@ namespace SDVMobileControls
                         Action<HashSet<Keys>> keysDel = OnPopulateExtraKeys;
                         fKeys.SetValue(null, keysDel);
                     }
+                    if (fKeysList != null)
+                    {
+                        Action<List<Keys>> keysListDel = OnPopulateExtraKeysList;
+                        fKeysList.SetValue(null, keysListDel);
+                    }
 
                     BoundPadTypes.Add(tvp);
-                    _monitor.Log($"[{phase}] BOUND DIRECT IL HOOKS on {asm.GetName().Name} (ExtraKeys={fKeys != null})! Mode={Engine.CurrentMode}", LogLevel.Info);
+                    _monitor.Log($"[{phase}] BOUND DIRECT IL HOOKS on {asm.GetName().Name} (ExtraKeys={fKeys != null}, ExtraKeysList={fKeysList != null})! Mode={Engine.CurrentMode}", LogLevel.Info);
                 }
                 catch (Exception ex)
                 {
@@ -243,6 +249,15 @@ namespace SDVMobileControls
             try
             {
                 Engine?.PopulateExtraKeys(keySet);
+            }
+            catch { }
+        }
+
+        private static void OnPopulateExtraKeysList(List<Keys> keyList)
+        {
+            try
+            {
+                Engine?.PopulateExtraKeysList(keyList);
             }
             catch { }
         }

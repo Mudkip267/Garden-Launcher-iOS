@@ -299,11 +299,21 @@ static NSString *sdvProbeLocalNetwork(void) {
     UIView *_ramBarFill;
     NSLayoutConstraint *_ramBarFillW;
     NSTimer *_ramUiTimer;
+    BOOL _showPcKeyPicker;
 }
 
 -(void)dealloc {
     [_ramUiTimer invalidate];
     _ramUiTimer = nil;
+}
+
+-(void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    if (_root.path.length) {
+        _uiCfg = [SDVUiConfig loadFromDocuments:_root.path];
+        _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
+        if (_pane) [self renderAll:NO];
+    }
 }
 
 -(void)viewWillDisappear:(BOOL)animated {
@@ -481,18 +491,18 @@ static NSString *sdvProbeLocalNetwork(void) {
     pinInsets(brandRow, brandWrap, UIEdgeInsetsMake(2, 4, 4, 2));
     [sideStack addArrangedSubview:brandWrap];
 
-    // 5 Native iOS Split-View Sidebar Rows
-    _sidebarTabs = mkVStack(3);
+    // 6 Native iOS Split-View Sidebar Rows (Cài Mod | Thư viện | Hiệu năng & Nút | Co-op LAN | Hướng dẫn | Credit)
+    _sidebarTabs = mkVStack(2.5);
     NSMutableArray *tBtns = [NSMutableArray array];
-    for (NSInteger i = 0; i < 5; i++) {
+    for (NSInteger i = 0; i < 6; i++) {
         SDVAppleButton *b = [SDVAppleButton buttonWithType:UIButtonTypeCustom];
         b.tag = i;
-        b.layer.cornerRadius = 10.0;
+        b.layer.cornerRadius = 9.5;
         b.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeading;
         b.contentEdgeInsets = UIEdgeInsetsMake(0, 10, 0, 10);
         b.imageEdgeInsets = UIEdgeInsetsMake(0, 0, 0, 8);
         b.titleEdgeInsets = UIEdgeInsetsMake(0, 8, 0, -8);
-        [b.heightAnchor constraintEqualToConstant:35].active = YES;
+        [b.heightAnchor constraintEqualToConstant:31.5].active = YES;
         [b addTarget:self action:@selector(selectTab:) forControlEvents:UIControlEventTouchUpInside];
         [_sidebarTabs addArrangedSubview:b];
         [tBtns addObject:b];
@@ -528,11 +538,12 @@ static NSString *sdvProbeLocalNetwork(void) {
         _catalog.count > 0 ? [NSString stringWithFormat:@"Thư viện (%lu)", (unsigned long)_catalog.count] : @"Thư viện",
         @"Hiệu năng & Nút",
         @"Co-op LAN",
-        @"Hướng dẫn"
+        @"Hướng dẫn",
+        @"Credit"
     ];
-    NSArray *navTitles = @[@"Cài đặt Mod", @"Thư viện Mod", @"Hiệu năng & Điều khiển", @"Co-op LAN / IP", @"Hướng dẫn & Credit"];
-    NSArray *icons = @[@"square.and.arrow.down.fill", @"square.stack.3d.up.fill", @"slider.horizontal.3", @"wifi", @"info.circle.fill"];
-    NSArray *iconTints = @[kTintBlue, kTintIndigo, kTintGreen, kTintTeal, kTintOrange];
+    NSArray *navTitles = @[@"Cài đặt Mod", @"Thư viện Mod", @"Hiệu năng & Điều khiển", @"Co-op LAN / IP", @"Hướng dẫn sử dụng", @"Credit & Cộng đồng"];
+    NSArray *icons = @[@"square.and.arrow.down.fill", @"square.stack.3d.up.fill", @"slider.horizontal.3", @"wifi", @"book.fill", @"heart.fill"];
+    NSArray *iconTints = @[kTintBlue, kTintIndigo, kTintGreen, kTintTeal, kTintOrange, kTintPink];
 
     if (_tab >= 0 && _tab < (NSInteger)navTitles.count) {
         _navTitleLabel.text = navTitles[_tab];
@@ -544,10 +555,10 @@ static NSString *sdvProbeLocalNetwork(void) {
         b.backgroundColor = active ? kTintBlue : UIColor.clearColor;
         UIColor *fg = active ? UIColor.whiteColor : kInkPrimary;
         b.tintColor = active ? UIColor.whiteColor : iconTints[i];
-        [b setImage:sfIcon(icons[i], 14.5, active ? UIImageSymbolWeightSemibold : UIImageSymbolWeightMedium) forState:UIControlStateNormal];
+        [b setImage:sfIcon(icons[i], 14.0, active ? UIImageSymbolWeightSemibold : UIImageSymbolWeightMedium) forState:UIControlStateNormal];
         [b setTitle:titles[i] forState:UIControlStateNormal];
         [b setTitleColor:fg forState:UIControlStateNormal];
-        b.titleLabel.font = iosFont(13.5, active ? UIFontWeightSemibold : UIFontWeightRegular);
+        b.titleLabel.font = iosFont(13.0, active ? UIFontWeightSemibold : UIFontWeightRegular);
     }
 }
 
@@ -555,7 +566,10 @@ static NSString *sdvProbeLocalNetwork(void) {
     if (_tab == sender.tag) return;
     _tab = sender.tag;
     [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
-    if (_tab == 2) _uiCfg = [SDVUiConfig loadFromDocuments:_root.path];
+    if (_tab == 2) {
+        _uiCfg = [SDVUiConfig loadFromDocuments:_root.path];
+        _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
+    }
     [self renderAll:YES];
     [_scroll setContentOffset:CGPointZero animated:NO];
 }
@@ -601,7 +615,8 @@ static NSString *sdvProbeLocalNetwork(void) {
     else if (_tab == 1) [self renderLibraryTab];
     else if (_tab == 2) [self renderUiStudioTab];
     else if (_tab == 3) [self renderCoopTab];
-    else [self renderGuideCreditTab];
+    else if (_tab == 4) [self renderGuideTab];
+    else [self renderCreditTab];
 
     if (animate && !UIAccessibilityIsReduceMotionEnabled()) {
         _pane.alpha = 0.35;
@@ -998,7 +1013,7 @@ static NSString *sdvProbeLocalNetwork(void) {
     }
     [_pane addArrangedSubview:mkGroupedRows(mcRows, 48)];
 
-    // Section: Custom PC Key Buttons (Add any PC key, move & resize in Edit Layout!)
+    // Section: Custom PC Key Buttons (Add any PC key from full 56-key grid, move & resize in Edit Layout!)
     if (_mobileCfg.mode != 0) {
         [_pane addArrangedSubview:mkSectionTitle(@"Nút phím máy tính tùy chọn (PC Keys)")];
         NSMutableArray<UIView *> *ckRows = [NSMutableArray array];
@@ -1006,14 +1021,68 @@ static NSString *sdvProbeLocalNetwork(void) {
         UIStackView *addRow = mkHStack(10);
         [addRow addArrangedSubview:mkSettingsIconBadge(@"keyboard.fill", kTintPurple, 28)];
         UIStackView *addTxt = mkVStack(1);
-        [addTxt addArrangedSubview:mkLabel(@"Thêm nút phím PC lên màn hình", 13.5, UIFontWeightSemibold, kInkPrimary)];
-        [addTxt addArrangedSubview:mkLabel(@"P (CJB), I (Item), F1 (Lookup), TAB, SHIFT, F1–F12, A–Z… kéo & chỉnh cỡ trong Edit Layout", 11.5, UIFontWeightRegular, kInkSecondary)];
-        SDVAppleButton *addBtn = mkIOSButton(@"Thêm phím", @"plus.circle.fill", kTintPurple, UIColor.whiteColor, 12.5, UIEdgeInsetsMake(8, 12, 8, 12));
+        [addTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"Thêm nút phím PC lên màn hình (%lu/16)", (unsigned long)_mobileCfg.customKeys.count], 13.5, UIFontWeightSemibold, kInkPrimary)];
+        [addTxt addArrangedSubview:mkLabel(@"Chọn từ bảng 56 phím PC bên dưới hoặc bấm +PHIM trong Edit Layout", 11.5, UIFontWeightRegular, kInkSecondary)];
+        SDVAppleButton *addBtn = mkIOSButton(_showPcKeyPicker ? @"Ẩn bảng phím" : @"Thêm phím",
+            _showPcKeyPicker ? @"chevron.up.circle.fill" : @"plus.circle.fill",
+            kTintPurple, UIColor.whiteColor, 12.5, UIEdgeInsetsMake(8, 12, 8, 12));
         [addBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
         [addBtn addTarget:self action:@selector(openAddPcKeySheet) forControlEvents:UIControlEventTouchUpInside];
         [addRow addArrangedSubview:addTxt];
         [addRow addArrangedSubview:addBtn];
         [ckRows addObject:addRow];
+
+        if (_showPcKeyPicker) {
+            static NSArray<NSDictionary *> *kAllPcKeys = nil;
+            if (!kAllPcKeys) {
+                kAllPcKeys = @[
+                    @{@"l": @"P",    @"k": @80},  @{@"l": @"I",    @"k": @73},  @{@"l": @"F1",   @"k": @112}, @{@"l": @"TAB",  @"k": @9},
+                    @{@"l": @"ESC",  @"k": @27},  @{@"l": @"SHFT", @"k": @160}, @{@"l": @"CTRL", @"k": @162}, @{@"l": @"ALT",  @"k": @164},
+                    @{@"l": @"SPC",  @"k": @32},  @{@"l": @"ENT",  @"k": @13},  @{@"l": @"T",    @"k": @84},  @{@"l": @"Y",    @"k": @89},
+                    @{@"l": @"F2",   @"k": @113}, @{@"l": @"F3",   @"k": @114}, @{@"l": @"F4",   @"k": @115}, @{@"l": @"F5",   @"k": @116},
+                    @{@"l": @"F6",   @"k": @117}, @{@"l": @"F7",   @"k": @118}, @{@"l": @"F8",   @"k": @119}, @{@"l": @"F9",   @"k": @120},
+                    @{@"l": @"F10",  @"k": @121}, @{@"l": @"F11",  @"k": @122}, @{@"l": @"F12",  @"k": @123}, @{@"l": @"BCK",  @"k": @8},
+                    @{@"l": @"A",    @"k": @65},  @{@"l": @"B",    @"k": @66},  @{@"l": @"C",    @"k": @67},  @{@"l": @"D",    @"k": @68},
+                    @{@"l": @"E",    @"k": @69},  @{@"l": @"F",    @"k": @70},  @{@"l": @"G",    @"k": @71},  @{@"l": @"H",    @"k": @72},
+                    @{@"l": @"J",    @"k": @74},  @{@"l": @"K",    @"k": @75},  @{@"l": @"L",    @"k": @76},  @{@"l": @"M",    @"k": @77},
+                    @{@"l": @"N",    @"k": @78},  @{@"l": @"O",    @"k": @79},  @{@"l": @"Q",    @"k": @81},  @{@"l": @"R",    @"k": @82},
+                    @{@"l": @"S",    @"k": @83},  @{@"l": @"U",    @"k": @85},  @{@"l": @"V",    @"k": @86},  @{@"l": @"W",    @"k": @87},
+                    @{@"l": @"X",    @"k": @88},  @{@"l": @"Z",    @"k": @90},  @{@"l": @"1",    @"k": @49},  @{@"l": @"2",    @"k": @50},
+                    @{@"l": @"3",    @"k": @51},  @{@"l": @"4",    @"k": @52},  @{@"l": @"5",    @"k": @53},  @{@"l": @"6",    @"k": @54},
+                    @{@"l": @"7",    @"k": @55},  @{@"l": @"8",    @"k": @56},  @{@"l": @"9",    @"k": @57},  @{@"l": @"0",    @"k": @48},
+                    @{@"l": @"-",    @"k": @189}, @{@"l": @"+",    @"k": @187}, @{@"l": @"[",    @"k": @219}, @{@"l": @"]",    @"k": @221},
+                    @{@"l": @"~",    @"k": @192}, @{@"l": @"UP",   @"k": @38},  @{@"l": @"DN",   @"k": @40},  @{@"l": @"LT",   @"k": @37},
+                    @{@"l": @"RT",   @"k": @39}
+                ];
+            }
+            UIStackView *gridBox = mkVStack(6);
+            [gridBox addArrangedSubview:mkLabel(@"Chạm vào phím bất kỳ để thêm ngay lên màn hình game (hàng đầu là phím Mod thông dụng):", 11.5, UIFontWeightMedium, kInkSecondary)];
+            NSInteger cols = 8;
+            NSInteger total = (NSInteger)kAllPcKeys.count;
+            for (NSInteger r = 0; r < (total + cols - 1) / cols; r++) {
+                UIStackView *gRow = mkHStack(5);
+                gRow.distribution = UIStackViewDistributionFillEqually;
+                for (NSInteger c = 0; c < cols; c++) {
+                    NSInteger idx = r * cols + c;
+                    if (idx < total) {
+                        NSDictionary *kd = kAllPcKeys[idx];
+                        BOOL isHot = (idx < 12);
+                        UIColor *bg = isHot ? [kTintPurple colorWithAlphaComponent:0.16] : kBgCardSubtle;
+                        UIColor *fg = isHot ? kTintPurple : kInkPrimary;
+                        SDVAppleButton *kb = mkIOSButton(kd[@"l"], nil, bg, fg, 12, UIEdgeInsetsMake(7, 2, 7, 2));
+                        kb.layer.cornerRadius = 7.5;
+                        kb.tag = 6000 + [kd[@"k"] integerValue];
+                        kb.accessibilityValue = kd[@"l"];
+                        [kb addTarget:self action:@selector(pcKeyGridButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
+                        [gRow addArrangedSubview:kb];
+                    } else {
+                        [gRow addArrangedSubview:[UIView new]];
+                    }
+                }
+                [gridBox addArrangedSubview:gRow];
+            }
+            [ckRows addObject:gridBox];
+        }
 
         for (SDVCustomKeyEntry *ce in _mobileCfg.customKeys) {
             UIStackView *kr = mkHStack(10);
@@ -1328,8 +1397,6 @@ static NSString *sdvProbeLocalNetwork(void) {
 
 -(void)enterMobileEditLayoutTapped {
     if (_veil) return;
-    if (!_mobileCfg) _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
-    [_mobileCfg saveToDocuments:_root.path];
     [SDVMobileCtrlConfig triggerEditLayoutInDocs:_root.path];
     [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
 #ifdef GARDEN_IN_GAME
@@ -1340,7 +1407,7 @@ static NSString *sdvProbeLocalNetwork(void) {
 -(void)deleteCustomPcKeyTapped:(UIButton *)btn {
     NSInteger kid = btn.tag - 5000;
     if (kid <= 0) return;
-    if (!_mobileCfg) _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
+    _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
     [_mobileCfg removeCustomKeyWithId:kid];
     [_mobileCfg saveToDocuments:_root.path];
     [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
@@ -1349,55 +1416,30 @@ static NSString *sdvProbeLocalNetwork(void) {
 
 -(void)openAddPcKeySheet {
     if (_veil) return;
-    if (!_mobileCfg) _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
+    _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
+    _showPcKeyPicker = !_showPcKeyPicker;
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+    [self renderAll:NO];
+}
+
+-(void)pcKeyGridButtonTapped:(UIButton *)btn {
+    if (_veil) return;
+    NSInteger keyCode = btn.tag - 6000;
+    NSString *label = btn.accessibilityValue ?: @"KEY";
+    if (keyCode <= 0) return;
+    _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
     if (_mobileCfg.customKeys.count >= 16) {
         _message = @"Đã đạt tối đa 16 nút phím PC tùy chọn.";
         _messageIsError = YES;
         [self renderAll:NO];
         return;
     }
-
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Thêm nút phím PC"
-        message:@"Chọn nhanh phím Mod/PC bên dưới, hoặc dùng nút +PHIM ngay trong Edit Layout để chọn toàn bộ 56 phím bàn phím (A–Z, 0–9, F1–F12…)."
-        preferredStyle:UIAlertControllerStyleActionSheet];
-
-    NSArray<NSDictionary *> *presets = @[
-        @{@"t": @"P — CJB Cheats Menu",   @"l": @"P",    @"k": @80},
-        @{@"t": @"I — CJB Item Spawner",  @"l": @"I",    @"k": @73},
-        @{@"t": @"F1 — Lookup Anything",  @"l": @"F1",   @"k": @112},
-        @{@"t": @"TAB — Bản đồ / Mod",    @"l": @"TAB",  @"k": @9},
-        @{@"t": @"SHIFT — Left Shift",    @"l": @"SHFT", @"k": @160},
-        @{@"t": @"CTRL — Left Control",   @"l": @"CTRL", @"k": @162},
-        @{@"t": @"ALT — Left Alt",        @"l": @"ALT",  @"k": @164},
-        @{@"t": @"SPACE — Phím Cách",     @"l": @"SPC",  @"k": @32},
-        @{@"t": @"ENTER — Xác nhận",      @"l": @"ENT",  @"k": @13},
-        @{@"t": @"T — Mở khung Chat",     @"l": @"T",    @"k": @84},
-        @{@"t": @"Y — Biểu cảm (Emote)",  @"l": @"Y",    @"k": @89},
-        @{@"t": @"F2",                    @"l": @"F2",   @"k": @113},
-        @{@"t": @"F3",                    @"l": @"F3",   @"k": @114},
-        @{@"t": @"F4",                    @"l": @"F4",   @"k": @115},
-        @{@"t": @"F5",                    @"l": @"F5",   @"k": @116}
-    ];
-
-    __weak typeof(self) ws = self;
-    for (NSDictionary *pr in presets) {
-        [sheet addAction:[UIAlertAction actionWithTitle:pr[@"t"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-            __strong typeof(ws) s = ws;
-            if (!s) return;
-            [s->_mobileCfg addCustomKeyLabel:pr[@"l"] keyCode:[pr[@"k"] integerValue]];
-            [s->_mobileCfg saveToDocuments:s->_root.path];
-            s->_message = [NSString stringWithFormat:@"Đã thêm nút [%@] lên màn hình! Bấm Edit Layout để kéo vị trí & chỉnh kích thước.", pr[@"l"]];
-            s->_messageIsError = NO;
-            [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];
-            [s renderAll:NO];
-        }]];
-    }
-
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Mở bảng đầy đủ 56 phím trong Edit Layout…" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        [ws enterMobileEditLayoutTapped];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentSafely:sheet];
+    [_mobileCfg addCustomKeyLabel:label keyCode:keyCode];
+    [_mobileCfg saveToDocuments:_root.path];
+    _message = [NSString stringWithFormat:@"Đã thêm nút [%@] lên màn hình! Bấm Edit Layout để kéo vị trí & chỉnh kích thước.", label];
+    _messageIsError = NO;
+    [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];
+    [self renderAll:NO];
 }
 
 -(void)applyPreset:(UIButton *)btn {
@@ -1603,7 +1645,7 @@ static NSString *sdvProbeLocalNetwork(void) {
 }
 
 // ============================================================
-// TAB 4: HƯỚNG DẪN & CREDIT / ỦNG HỘ NHÀ PHÁT HÀNH
+// TAB 4: HƯỚNG DẪN SỬ DỤNG (CẬP NHẬT v7.10)
 // ============================================================
 -(UIView *)mkGuideStep:(NSString *)num title:(NSString *)title body:(NSString *)body color:(UIColor *)col {
     UIStackView *row = mkHStack(11);
@@ -1643,40 +1685,71 @@ static NSString *sdvProbeLocalNetwork(void) {
     return row;
 }
 
--(void)renderGuideCreditTab {
+-(void)renderGuideTab {
     NSString *appNm = sdvAppDisplayName();
 
     UIStackView *topRow = mkHStack(10);
     [topRow addArrangedSubview:mkSettingsIconBadge(@"book.fill", kTintOrange, 34)];
     UIStackView *topTxt = mkVStack(1);
-    [topTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"%@ v7.10", appNm], 15.5, UIFontWeightSemibold, kInkPrimary)];
-    [topTxt addArrangedSubview:mkLabel(@"Đồ họa Native · SMAPI 4.5.2 · Mobile Controls (iOS 14–27+)", 12, UIFontWeightRegular, kInkSecondary)];
-    SDVAppleButton *jumpBtn = mkIOSButton(@"Credit", @"heart.fill", [kTintPink colorWithAlphaComponent:0.13], kTintPink, 12.5, UIEdgeInsetsMake(7, 11, 7, 11));
+    [topTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"%@ v7.10 — Hướng dẫn toàn diện", appNm], 15.5, UIFontWeightSemibold, kInkPrimary)];
+    [topTxt addArrangedSubview:mkLabel(@"Đồ họa Native · SMAPI 4.5.2 · Mobile Controls · Shader GLSL ES (iOS 14–27+)", 12, UIFontWeightRegular, kInkSecondary)];
+    SDVAppleButton *jumpBtn = mkIOSButton(@"Xem Credit", @"heart.fill", [kTintPink colorWithAlphaComponent:0.13], kTintPink, 12.5, UIEdgeInsetsMake(7, 11, 7, 11));
     [jumpBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
-    [jumpBtn addTarget:self action:@selector(scrollToCreditCard) forControlEvents:UIControlEventTouchUpInside];
+    [jumpBtn addTarget:self action:@selector(switchToCreditTab) forControlEvents:UIControlEventTouchUpInside];
     [topRow addArrangedSubview:topTxt];
     [topRow addArrangedSubview:jumpBtn];
     [_pane addArrangedSubview:mkGroupedCard(topRow, UIEdgeInsetsMake(12, 14, 12, 14))];
 
-    [_pane addArrangedSubview:mkSectionTitle(@"Hướng dẫn cài Mod (5 bước)")];
+    [_pane addArrangedSubview:mkSectionTitle(@"1. Thiết lập Game & Cài đặt Mod (5 bước)")];
     [_pane addArrangedSubview:mkGroupedRows(@[
-        [self mkGuideStep:@"1" title:@"Tải file mod về iPhone" body:@"Tải tệp mod .zip hoặc .xnb vào ứng dụng Tệp (Files). Giữ nguyên tệp .zip, không cần giải nén trước." color:kTintBlue],
-        [self mkGuideStep:@"2" title:@"Mở Mod Garden ngay trong game" body:[NSString stringWithFormat:@"Mở %@ → chạm 3 ngón tay 2 lần lên màn hình bất kỳ lúc nào.", appNm] color:kTintGreen],
-        [self mkGuideStep:@"3" title:@"Chọn 1 hoặc nhiều file mod" body:@"Tại tab Cài Mod, bấm Chọn tệp Mod rồi chọn nhiều gói một lượt (có thể chọn kèm bản Việt hóa i18n)." color:kTintOrange],
-        [self mkGuideStep:@"4" title:@"Kiểm tra & Cài đặt" body:@"Mod Garden tự kiểm tra phụ thuộc, tránh trùng thư mục cũ và lưu lịch sử để Hoàn tác bất cứ lúc nào." color:kTintPurple],
-        [self mkGuideStep:@"5" title:@"Mở lại game & quản lý" body:@"Vuốt tắt hẳn ứng dụng rồi mở lại để SMAPI nạp mod mới. Quản lý Bật/Tắt/Xóa tại tab Thư viện." color:kTintTeal]
+        [self mkGuideStep:@"1" title:@"Nạp dữ liệu Stardew Valley PC 1.6.15" body:@"Lần đầu mở app, chọn tệp nén (.ZIP / .RAR / .7Z) hoặc thư mục chứa dữ liệu game PC 1.6.15 (gồm thư mục Content và Stardew Valley.dll). Hệ thống tự kiểm tra và giải nén chuẩn." color:kTintBlue],
+        [self mkGuideStep:@"2" title:@"Mở Mod Garden ngay trong lúc chơi" body:[NSString stringWithFormat:@"Chạm 3 ngón tay 2 lần (3-finger double tap) lên màn hình bất kỳ lúc nào để bật nhanh bảng quản lý %@.", appNm] color:kTintGreen],
+        [self mkGuideStep:@"3" title:@"Cài Mod & Việt hóa đa định dạng" body:@"Tại tab Cài Mod, bấm Chọn tệp Mod để nạp 1 hoặc nhiều gói .ZIP, .RAR, .7Z, .TAR.GZ, .XNB cùng lúc (hoặc Chọn thư mục Mod). Tương thích cả mod C# và mod Shader (DynamicReflections, DynamicShader…)." color:kTintOrange],
+        [self mkGuideStep:@"4" title:@"Quản lý Thư viện & Hoàn tác an toàn" body:@"Mod Garden tự kiểm tra mod phụ thuộc (Dependencies), cập nhật mod trùng tên mà không mất config.json và cho phép Bật/Tắt/Xóa hoặc Hoàn tác tại tab Thư viện." color:kTintPurple],
+        [self mkGuideStep:@"5" title:@"Khởi động lại để SMAPI 4.5.2 nạp mod" body:@"Sau khi cài thêm hoặc bật/tắt mod, hãy vuốt tắt hẳn ứng dụng rồi mở lại để SMAPI nạp danh sách mod mới." color:kTintTeal]
     ], 48)];
 
-    [_pane addArrangedSubview:mkSectionTitle(@"Lưu ý & Tương thích iOS 14 – iOS 27+")];
-    UILabel *tipsLbl = mkLabel(@"• Chạy thuần Mono Interpreter (không cần JIT), hỗ trợ đầy đủ UIScene & chuẩn Mach-O 16KB cho iOS 14 đến iOS 26 / iOS 27+ (kể cả thiết bị có TXM).\n• Nếu xảy ra lỗi sớm khi mở app, nhật ký tự động lưu tại Tệp → Garden Launcher → ErrorLogs/launcher-boot.log và native-crash.log.\n• Khi cập nhật bản IPA mới: chỉ cần cài đè cùng Bundle ID để giữ nguyên toàn bộ save và mod đã cài.", 13, UIFontWeightRegular, kInkSecondary);
-    [_pane addArrangedSubview:mkGroupedCard(tipsLbl, UIEdgeInsetsMake(12, 14, 12, 14))];
+    [_pane addArrangedSubview:mkSectionTitle(@"2. Điều khiển Mobile, Phím PC & Save Menu 20 mốc")];
+    [_pane addArrangedSubview:mkGroupedRows(@[
+        [self mkGuideStep:@"A" title:@"4 Chế độ Mobile Controls & Mua đồ kéo thả" body:@"Tại tab Hiệu năng & Nút, chuyển trực tiếp giữa Vô hình, 2 Nút, Chạm đi (A* Tap-to-Move), Kết hợp hoặc Tay cầm. Hỗ trợ thanh kéo số lượng khi mua đồ trong Shop và chạm chuyển nhanh vật phẩm vào Rương." color:kTintBlue],
+        [self mkGuideStep:@"B" title:@"Thanh tiện ích (BAG · MAP · QST · SAVE · KEY · EDIT)" body:@"Mở nhanh Túi đồ (BAG), Bản đồ (MAP), Nhiệm vụ (QST), Bàn phím ảo iOS (KEY) và chế độ chỉnh vị trí nút (EDIT). Bấm dấu < để thu gọn thanh khi cần màn hình thoáng." color:kTintGreen],
+        [self mkGuideStep:@"C" title:@"Save Menu lưu tới 20 mốc thời gian" body:@"Bấm nút SAVE trên thanh tiện ích để mở Save Menu phong cách Stardew Pixel: tạo tới 20 mốc lưu nhanh kèm ngày/giờ/vị trí, tải lại hoặc xóa từng mốc bất kỳ lúc nào." color:kTintOrange],
+        [self mkGuideStep:@"D" title:@"Thêm nút phím PC tùy chọn (PC Keys / +PHIM)" body:@"Thêm tối đa 16 phím máy tính (P, I, F1–F12, ESC, TAB, SHIFT, CTRL, ALT, A–Z, 0–9…) từ bảng 56 phím trong tab Hiệu năng & Nút hoặc bấm +PHIM trong Edit Layout. Kéo di chuyển & kéo góc dưới phải để chỉnh kích thước từng phím." color:kTintPurple]
+    ], 48)];
 
-    [_pane addArrangedSubview:mkSectionTitle(@"Credit & Ghi nhận đóng góp")];
+    [_pane addArrangedSubview:mkSectionTitle(@"3. Tối ưu RAM, Cảnh báo Lưu Game 85% / 90% & Lưu ý iOS 14–27+")];
+    UILabel *tipsLbl = mkLabel(@"• Cảnh báo RAM tự động 2 mức: Khi RAM đạt 85% giới hạn iOS, hệ thống tự động gom rác bộ nhớ (Auto-GC), hiện thông báo cam và nhấp nháy nút SAVE! để nhắc bạn lưu game. Khi đạt 90%+, hệ thống bật cảnh báo đỏ khẩn cấp và chớp nhanh nút SAVE! để tránh văng game do tràn RAM.\n• Mẹo giảm RAM khi dùng mod Recolor / Expansion: Các mod Recolor nạp nhiều bảng ảnh bản đồ vào bộ nhớ của Content Patcher. Bạn có thể bấm Dọn RAM ngay trong tab Hiệu năng & Nút hoặc tắt bớt tuỳ chọn recolor lễ hội trong GMCM.\n• Tương thích iOS 14 – iOS 27+: Chạy thuần Mono Interpreter (0% JIT), không cần bật JIT. Khi cập nhật IPA mới, chỉ cần cài đè cùng Bundle ID để giữ nguyên toàn bộ save và mod.", 13, UIFontWeightRegular, kInkSecondary);
+    [_pane addArrangedSubview:mkGroupedCard(tipsLbl, UIEdgeInsetsMake(12, 14, 12, 14))];
+}
+
+// ============================================================
+// TAB 5: CREDIT, CỘNG ĐỒNG STARDEW VALLEY VIỆT NAM & ỦNG HỘ NPH
+// ============================================================
+-(void)renderCreditTab {
+    NSString *appNm = sdvAppDisplayName();
+
+    UIStackView *topRow = mkHStack(10);
+    [topRow addArrangedSubview:mkSettingsIconBadge(@"heart.fill", kTintPink, 34)];
+    UIStackView *topTxt = mkVStack(1);
+    [topTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"%@ v7.10 — Credit & Cộng đồng", appNm], 15.5, UIFontWeightSemibold, kInkPrimary)];
+    [topTxt addArrangedSubview:mkLabel(@"Tri ân nhà phát triển game gốc, cộng đồng mã nguồn mở & Stardew Valley Việt Nam", 12, UIFontWeightRegular, kInkSecondary)];
+    [topRow addArrangedSubview:topTxt];
+    [_pane addArrangedSubview:mkGroupedCard(topRow, UIEdgeInsetsMake(12, 14, 12, 14))];
+
+    [_pane addArrangedSubview:mkSectionTitle(@"Cộng đồng Stardew Valley Việt Nam (Facebook Groups & Pages)")];
+    [_pane addArrangedSubview:mkGroupedRows(@[
+        [self mkCreditRow:@"GROUP CỘNG ĐỒNG FACEBOOK" name:@"Stardew Valley Việt Nam (Group)" detail:@"Nhóm giao lưu, chia sẻ kinh nghiệm chơi, hỏi đáp & hướng dẫn mod Stardew Valley." url:@"https://www.facebook.com/groups/261129932243154/" urlLabel:@"Tham gia"],
+        [self mkCreditRow:@"GROUP CỘNG ĐỒNG FACEBOOK" name:@"Cộng đồng Stardew Valley Việt Nam" detail:@"Sân chơi kết nối cộng đồng người chơi Stardew Valley trên PC & Mobile tại Việt Nam." url:@"https://www.facebook.com/groups/stardewvalleyvietnam/" urlLabel:@"Tham gia"],
+        [self mkCreditRow:@"FANPAGE CHÍNH THỨC" name:@"Stardew Valley Vietnam Official" detail:@"Trang thông tin, tin tức cập nhật & hoạt động cộng đồng Stardew Valley Vietnam." url:@"https://www.facebook.com/StardewValleyVietnam.Official" urlLabel:@"Mở Page"],
+        [self mkCreditRow:@"FANPAGE MOD & VIỆT HÓA" name:@"Stardew Valley Vietnam Mod" detail:@"Trang chia sẻ các bản Mod hay, bản dịch Việt hóa & hướng dẫn cài đặt Mod chi tiết." url:@"https://www.facebook.com/StardewValleyVietnam.Mod" urlLabel:@"Mở Page"]
+    ], 14)];
+
+    [_pane addArrangedSubview:mkSectionTitle(@"Đội ngũ phát triển & Nền tảng mã nguồn mở")];
     _creditCard = mkGroupedRows(@[
         [self mkCreditRow:@"GAME GỐC — NHÀ PHÁT TRIỂN" name:@"ConcernedApe (Eric Barone)" detail:@"Tác giả toàn bộ trò chơi Stardew Valley. Mọi bản quyền thuộc về ConcernedApe LLC." url:@"https://www.stardewvalley.net" urlLabel:@"Web"],
         [self mkCreditRow:@"NỀN TẢNG iOS PORT (MIT)" name:@"DeadAKJ — SDViosport" detail:@"Mã nguồn host .NET 8 iOS, MonoGame, tích hợp SMAPI và tay cầm cảm ứng SDViOSTouchControls." url:@"https://github.com/DeadAKJ/SDViosport" urlLabel:@"GitHub"],
-        [self mkCreditRow:@"NỀN TẢNG MODDING" name:@"SMAPI — Pathoschild & Cộng đồng" detail:@"Stardew Modding API cùng các tác giả mod và nhóm Việt hóa cộng đồng." url:@"https://smapi.io" urlLabel:@"smapi.io"],
-        [self mkCreditRow:@"TRÌNH QUẢN LÝ TRONG GAME" name:@"Mod Garden iOS (v7.10 Native Edition)" detail:@"Giao diện iOS chuẩn Apple, giải nén mọi định dạng (.ZIP/.RAR/.7Z/.TAR.GZ), âm thanh OpenAL chuẩn iOS, điều khiển kiểu Mobile (Edit Layout + Save Menu nhiều mốc), tương thích Shader MGFX v9/v10 GLSL ES và hỗ trợ iOS 14–27+." url:nil urlLabel:nil]
+        [self mkCreditRow:@"NỀN TẢNG MODDING" name:@"SMAPI — Pathoschild & Cộng đồng" detail:@"Stardew Modding API cùng các tác giả mod trên NexusMods và nhóm Việt hóa cộng đồng." url:@"https://smapi.io" urlLabel:@"smapi.io"],
+        [self mkCreditRow:@"TRÌNH QUẢN LÝ & LAUNCHER iOS" name:@"Garden Launcher iOS (v7.10 Native Edition)" detail:@"Giao diện iOS chuẩn Apple, giải nén mọi định dạng (.ZIP/.RAR/.7Z/.TAR.GZ), âm thanh OpenAL chuẩn iOS, điều khiển Mobile (Edit Layout + PC Keys + Save Menu 20 mốc), tương thích Shader MGFX v9/v10 GLSL ES, cảnh báo RAM 85%/90% và hỗ trợ iOS 14–27+." url:@"https://github.com/hanprm9-dot/Garden-Launcher-iOS" urlLabel:@"GitHub"]
     ], 14);
     [_pane addArrangedSubview:_creditCard];
 
@@ -1702,13 +1775,11 @@ static NSString *sdvProbeLocalNetwork(void) {
     [_pane addArrangedSubview:mkGroupedCard(supBox, UIEdgeInsetsMake(13, 14, 13, 14))];
 }
 
--(void)scrollToCreditCard {
-    if (!_creditCard) return;
-    [_scroll layoutIfNeeded];
-    CGRect r = [_creditCard convertRect:_creditCard.bounds toView:_scroll];
-    CGFloat maxY = MAX(0, _scroll.contentSize.height - _scroll.bounds.size.height);
-    CGFloat targetY = MIN(MAX(0, r.origin.y - 10), maxY);
-    [_scroll setContentOffset:CGPointMake(0, targetY) animated:YES];
+-(void)switchToCreditTab {
+    _tab = 5;
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+    [self renderAll:YES];
+    [_scroll setContentOffset:CGPointZero animated:NO];
 }
 
 -(void)openExternalLink:(UIButton *)btn {

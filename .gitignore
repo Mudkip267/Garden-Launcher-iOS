@@ -37,3 +37,5 @@ desktop.ini
 .idea/
 __pycache__/
 *.pyc
+
+!MobileControls/prebuilt/SDViOSTouchControls.dll

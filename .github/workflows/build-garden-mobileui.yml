@@ -1,0 +1,170 @@
+name: Build Garden Launcher Mobile UI (macOS Xcode)
+
+on:
+  push:
+    branches: [ main, mobile-ui ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Fork
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Download Verified Base Garden-Launcher-v6.ipa
+        run: |
+          mkdir -p work/stage
+          curl -fsSL -o work/base-v6.ipa "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.6.22/Garden-Launcher-v6.ipa"
+          ACTUAL_SHA=$(shasum -a 256 work/base-v6.ipa | awk '{print toupper($1)}')
+          EXPECTED_SHA="CDAF7038F71A6613945F4737824B05FEFAC5023DB92A9C5ABB4D0D22553680BE"
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            echo "SHA-256 mismatch: $ACTUAL_SHA != $EXPECTED_SHA"
+            exit 1
+          fi
+          unzip -q work/base-v6.ipa -d work/stage
+          ls -la work/stage/Payload/SDViOS.app
+
+      - name: Compile SDVModGarden.framework with Real Apple Xcode Clang
+        run: |
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "Using Apple iPhoneOS SDK: $SDK_PATH"
+          xcrun --sdk iphoneos clang \
+            -arch arm64 \
+            -isysroot "$SDK_PATH" \
+            -miphoneos-version-min=14.0 \
+            -fobjc-arc -Os -dynamiclib \
+            -install_name "@executable_path/Frameworks/SDVModGarden.framework/SDVModGarden" \
+            -Wl,-headerpad_max_install_names \
+            -framework Foundation \
+            -framework UIKit \
+            -framework QuartzCore \
+            -framework CoreGraphics \
+            -framework UniformTypeIdentifiers \
+            -o work/stage/Payload/SDViOS.app/Frameworks/SDVModGarden.framework/SDVModGarden \
+            ModGarden/Embedded.m ModGarden/vendor/miniz.c
+          chmod 755 work/stage/Payload/SDViOS.app/Frameworks/SDVModGarden.framework/SDVModGarden
+          file work/stage/Payload/SDViOS.app/Frameworks/SDVModGarden.framework/SDVModGarden
+          otool -L work/stage/Payload/SDViOS.app/Frameworks/SDVModGarden.framework/SDVModGarden
+
+      - name: Inject Audited Mobile UI SDViOSTouchControls.dll into App & SDViOS.dll
+        run: |
+          APP="work/stage/Payload/SDViOS.app"
+          CECIL="$APP/Frameworks/SDVModGarden.framework/BundledSMAPI/smapi-internal/Mono.Cecil.dll"
+          NEW_DLL="MobileControls/prebuilt/SDViOSTouchControls.dll"
+          NEW_MF="MobileControls/prebuilt/manifest.json"
+
+          mkdir -p work/embed_tool
+          cat > work/embed_tool/embed_tool.csproj << 'EOF'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup>
+              <OutputType>Exe</OutputType>
+              <TargetFramework>net8.0</TargetFramework>
+            </PropertyGroup>
+            <ItemGroup>
+              <Reference Include="Mono.Cecil">
+                <HintPath>../../stage/Payload/SDViOS.app/Frameworks/SDVModGarden.framework/BundledSMAPI/smapi-internal/Mono.Cecil.dll</HintPath>
+              </Reference>
+            </ItemGroup>
+          </Project>
+          EOF
+
+          cat > work/embed_tool/Program.cs << 'EOF'
+          using System;
+          using System.IO;
+          using Mono.Cecil;
+
+          class Program {
+              static void Main(string[] args) {
+                  byte[] touchBytes = File.ReadAllBytes(args[1]);
+                  using var asm = AssemblyDefinition.ReadAssembly(args[0]);
+                  var resList = asm.MainModule.Resources;
+                  bool replaced = false;
+                  for (int i = 0; i < resList.Count; i++) {
+                      if (resList[i].Name.EndsWith("SDViOSTouchControls.dll", StringComparison.OrdinalIgnoreCase)) {
+                          string name = resList[i].Name;
+                          resList[i] = new EmbeddedResource(name, ManifestResourceAttributes.Public, touchBytes);
+                          Console.WriteLine($"Replaced embedded resource: {name} ({touchBytes.Length} bytes)");
+                          replaced = true;
+                      }
+                  }
+                  if (!replaced) throw new Exception("Missing embedded SDViOSTouchControls.dll resource");
+                  asm.Write(args[2]);
+              }
+          }
+          EOF
+
+          dotnet run --project work/embed_tool/embed_tool.csproj -- "$APP/SDViOS.dll" "$NEW_DLL" "work/SDViOS.patched.dll"
+          cp -f work/SDViOS.patched.dll "$APP/SDViOS.dll"
+          cp -f "$NEW_DLL" "$APP/Mods/SDViOSTouchControls/SDViOSTouchControls.dll"
+          cp -f "$NEW_DLL" "$APP/Mods/SDViOSTouchControls/SDViOSTouchControlsMod.dll"
+          cp -f "$NEW_MF"  "$APP/Mods/SDViOSTouchControls/manifest.json"
+
+      - name: Sign & Strictly Verify Entire App Bundle with Apple codesign
+        run: |
+          APP="work/stage/Payload/SDViOS.app"
+          rm -rf "$APP/_CodeSignature"
+          rm -rf "$APP/Frameworks/SDVModGarden.framework/_CodeSignature"
+          rm -rf "$APP/Frameworks/libSkiaSharp.framework/_CodeSignature"
+
+          chmod 755 "$APP/SDViOS"
+          chmod 755 "$APP/Frameworks/SDVModGarden.framework/SDVModGarden"
+          chmod 755 "$APP/Frameworks/libSkiaSharp.framework/libSkiaSharp"
+
+          codesign --force --sign - "$APP/Frameworks/libSkiaSharp.framework"
+          codesign --force --sign - "$APP/Frameworks/SDVModGarden.framework"
+          codesign --force --sign - "$APP"
+
+          echo "=== Verifying signatures strictly with Apple codesign ==="
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
+      - name: Package Clean IPA & Audit Integrity
+        run: |
+          cd work/stage
+          zip -r -y -q ../../Garden-Launcher-v6-MobileUI.ipa Payload
+          cd ../..
+          python3 - << 'EOF'
+          import zipfile, hashlib, pathlib
+          ipa = pathlib.Path("Garden-Launcher-v6-MobileUI.ipa")
+          new_dll = pathlib.Path("MobileControls/prebuilt/SDViOSTouchControls.dll").read_bytes()
+          with zipfile.ZipFile(ipa, "r") as z:
+              assert z.testzip() is None, "Corrupt ZIP!"
+              for n in z.namelist():
+                  assert "stardew valley.dll" not in n.lower(), f"Proprietary file found: {n}"
+                  assert "/Content/" not in n, f"Proprietary Content found: {n}"
+              assert hashlib.sha256(z.read("Payload/SDViOS.app/Mods/SDViOSTouchControls/SDViOSTouchControls.dll")).digest() == hashlib.sha256(new_dll).digest()
+              assert "Payload/SDViOS.app/_CodeSignature/CodeResources" in z.NameToInfo
+              assert "Payload/SDViOS.app/Frameworks/SDVModGarden.framework/_CodeSignature/CodeResources" in z.NameToInfo
+          print(f"VERIFIED CLEAN IPA: {ipa} ({ipa.stat().st_size} bytes, sha256={hashlib.sha256(ipa.read_bytes()).hexdigest().upper()})")
+          EOF
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Garden-Launcher-v6-MobileUI
+          path: Garden-Launcher-v6-MobileUI.ipa
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Garden-Launcher-v6-MobileUI.ipa
+          tag_name: v1.6.22-mobileui
+          name: Garden Launcher v6 + Mobile UI (Apple Xcode Built)
+          body: |
+            Nhánh nâng cấp **Giao diện & Điều khiển chuẩn Stardew Valley Mobile iOS** xây dựng trực tiếp trên nền gốc `hanprm9-dot/Garden-Launcher-iOS` (`v1.6.22`).
+
+            ### Điểm nâng cấp
+            - Giữ nguyên 100% tính năng hoàn thiện của **Garden Launcher v6** (giao diện Apple iOS, nhập game `.ZIP` PC 1.6.15, cài/hoàn tác Mod `.ZIP` SHA-256, tích hợp SMAPI 4.5.2, tối ưu RAM 4 lớp, vá Co-op LAN).
+            - Biên dịch lại `SDVModGarden.framework` bằng **Apple Xcode `clang` thật trên macOS** và ký chuẩn `codesign --verify --deep --strict` (khắc phục lỗi `code signature invalid` trên LiveContainer).
+            - Giao diện & điều khiển chuẩn **Stardew Valley Mobile iOS**: Toolbar dọc cuộn mượt, cụm Ngày/Giờ/Tiền + `[!]` + `[≡]` gọn góc trên phải, Tap-to-Move + Auto-Tool + Auto-Attack + Pinch-to-Zoom, nút `+ .` bật/tắt Joystick + 2 nút tròn `X`/`A`, thanh chỉnh đường kính & vị trí nút, và **Auto-Theme tự động đổi giao diện & nút bấm khi cài Mod UI** (*Overgrown Flowery Interface*, *Cat Valley*, v.v.).
+          draft: false
+          prerelease: false
+          make_latest: true

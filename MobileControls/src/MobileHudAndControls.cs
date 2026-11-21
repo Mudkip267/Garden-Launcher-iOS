@@ -44,6 +44,10 @@ namespace SDViOSTouchControls
         private Rectangle _questBtnRect;
         private Rectangle _menuBtnRect;
 
+        public Rectangle DayTimeBoxRect => _dayTimeBoxRect;
+        public Rectangle QuestBtnRect => _questBtnRect;
+        public Rectangle MenuBtnRect => _menuBtnRect;
+
         // Top-left Toggle Joystick button (+ .)
         private Rectangle _toggleJoyBtnRect;
         private int _toggleTouchId = -1;
@@ -177,11 +181,12 @@ namespace SDViOSTouchControls
             _toggleJoyBtnRect = new Rectangle(_toolbarRect.Right + (int)(12 * scale), (int)(12 * scale), toggleSize, toggleSize);
 
             // 3. Top-Right Compact Mobile Day/Time/Money HUD (95x31 aspect ratio)
+            // Keep clean iOS Safe-Area inset from top-right curved screen corners!
             int hudPixelScale = Math.Max(3, (int)Math.Round(3.4f * scale));
             int dtW = MobileThemeEngine.SrcDayTimeBox.Width * hudPixelScale;
             int dtH = MobileThemeEngine.SrcDayTimeBox.Height * hudPixelScale;
-            int rightMargin = (int)(10 * scale);
-            int topMargin = (int)(10 * scale);
+            int rightMargin = ModEntry.IsRunningOnIos ? Math.Max(34, (int)(28 * scale)) : (int)(12 * scale);
+            int topMargin = ModEntry.IsRunningOnIos ? Math.Max(14, (int)(12 * scale)) : (int)(10 * scale);
             _dayTimeBoxRect = new Rectangle(width - dtW - rightMargin, topMargin, dtW, dtH);
 
             // [!] Quest button and [≡] Menu button stacked neatly below top-right money box
@@ -436,20 +441,25 @@ namespace SDViOSTouchControls
                     // Top-Right [!] Quest Button
                     if (_questBtnRect.Contains(pt))
                     {
+                        // Swallow the remainder of this touch so lifting the finger never clicks outside QuestLog and closes it!
+                        TouchVirtualPad.Instance.SwallowTouchAfterMenuOpen(touch.Id, 14);
                         MobileTapAndAutoController.Instance.CancelAll();
+                        ResetTransientState();
                         try
                         {
                             Game1.activeClickableMenu = new QuestLog();
                             Game1.playSound("bigSelect");
                         }
                         catch { }
-                        continue;
+                        return true;
                     }
 
                     // Top-Right [≡] Menu Button
                     if (_menuBtnRect.Contains(pt))
                     {
+                        TouchVirtualPad.Instance.SwallowTouchAfterMenuOpen(touch.Id, 12);
                         MobileTapAndAutoController.Instance.CancelAll();
+                        ResetTransientState();
                         try
                         {
                             TouchVirtualPad.Instance.PlayerRequestedMenuOpen = true;
@@ -457,7 +467,7 @@ namespace SDViOSTouchControls
                             Game1.playSound("bigSelect");
                         }
                         catch { }
-                        continue;
+                        return true;
                     }
 
                     // Top-Right Day/Time/Money box (absorbs accidental taps; tapping it does not walk)

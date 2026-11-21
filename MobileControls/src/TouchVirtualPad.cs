@@ -119,6 +119,8 @@ namespace SDViOSTouchControls
 
         private int _simulatedRightClickFrames = 0;
         private int _mobileUseToolPulseFrames = 0;
+        private int _swallowedTouchId = -1;
+        private int _menuOpenGraceFrames = 0;
         private int _gcFlagPollTick = 0;
         private bool _pcPrevMouseLeftDown = false;
         private readonly List<TouchLocation> _syntheticTouchList = new(4);
@@ -128,6 +130,21 @@ namespace SDViOSTouchControls
         {
             if (frames > _mobileUseToolPulseFrames)
                 _mobileUseToolPulseFrames = frames;
+        }
+
+        /// <summary>
+        /// Swallows the remaining Moved/Released frames of a touch that just opened a menu (e.g. QuestLog or GameMenu)
+        /// from the Mobile HUD so the finger-lift never fires a ghost outside-click that immediately closes QuestLog!
+        /// </summary>
+        public void SwallowTouchAfterMenuOpen(int touchId, int graceFrames = 12)
+        {
+            _swallowedTouchId = touchId;
+            if (graceFrames > _menuOpenGraceFrames)
+                _menuOpenGraceFrames = graceFrames;
+            _pointClickTouchId = -1;
+            _pointClickHoldFrames = 0;
+            SimulatedMouseLeftDown = false;
+            SimulatedMouseRightDown = false;
         }
 
         private static void CheckManualGcFlag()
@@ -816,6 +833,7 @@ namespace SDViOSTouchControls
             if (_yPulseFrames > 0) _yPulseFrames--;
             if (_bPulseFrames > 0) _bPulseFrames--;
             if (_menuPulseFrames > 0) _menuPulseFrames--;
+            if (_menuOpenGraceFrames > 0) _menuOpenGraceFrames--;
 
             if (_yVisualFrames > 0) _yVisualFrames--;
             if (_bVisualFrames > 0) _bVisualFrames--;
@@ -1022,8 +1040,20 @@ namespace SDViOSTouchControls
                 }
             }
 
+            bool swallowedStillPresent = false;
             foreach (var touch in touches)
             {
+                if (_swallowedTouchId != -1 && touch.Id == _swallowedTouchId)
+                {
+                    if (touch.State != TouchLocationState.Released)
+                        swallowedStillPresent = true;
+                    continue;
+                }
+                if (_menuOpenGraceFrames > 0)
+                {
+                    continue;
+                }
+
                 if (touch.Id == _trackpadPrimaryTouchId) trackpadPrimaryPresent = true;
                 if (touch.Id == _trackpadSecondTouchId) trackpadSecondPresent = true;
 
@@ -1416,6 +1446,11 @@ namespace SDViOSTouchControls
 
                 // Touch on background area (outside virtual pad buttons)
                 HandleBackgroundTouch(touch, pt, gameTime);
+            }
+
+            if (!swallowedStillPresent)
+            {
+                _swallowedTouchId = -1;
             }
 
             if (!stickTouchPresent && _stickTouchId != -1)

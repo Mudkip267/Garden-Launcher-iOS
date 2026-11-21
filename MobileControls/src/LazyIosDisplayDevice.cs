@@ -67,6 +67,60 @@ namespace SDViOSTouchControls
             }
         }
 
+        public void InvalidateMatchingTileSheets(IEnumerable<StardewModdingAPI.IAssetName> invalidatedNames)
+        {
+            try
+            {
+                if (m_tileSheetTextures == null || m_tileSheetTextures.Count == 0)
+                    return;
+
+                HashSet<string>? normNames = null;
+                foreach (var n in invalidatedNames)
+                {
+                    if (n == null) continue;
+                    string s = n.Name.Replace('\\', '/');
+                    normNames ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    normNames.Add(s);
+                    if (s.StartsWith("Maps/", StringComparison.OrdinalIgnoreCase))
+                        normNames.Add(s.Substring(5));
+                }
+                if (normNames == null || normNames.Count == 0) return;
+
+                List<TileSheet>? toEvict = null;
+                foreach (var ts in m_tileSheetTextures.Keys)
+                {
+                    if (ts == null || string.IsNullOrEmpty(ts.ImageSource)) continue;
+                    string src = ts.ImageSource.Replace('\\', '/');
+                    if (normNames.Contains(src) ||
+                        (src.StartsWith("Maps/", StringComparison.OrdinalIgnoreCase) && normNames.Contains(src.Substring(5))) ||
+                        normNames.Contains("Maps/" + src))
+                    {
+                        toEvict ??= new List<TileSheet>();
+                        toEvict.Add(ts);
+                    }
+                }
+                if (toEvict != null)
+                {
+                    for (int i = 0; i < toEvict.Count; i++)
+                    {
+                        m_tileSheetTextures.Remove(toEvict[i]);
+                        _failedTileSheets.Remove(toEvict[i]);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public void ClearTileSheetCache()
+        {
+            try
+            {
+                m_tileSheetTextures?.Clear();
+                _failedTileSheets.Clear();
+            }
+            catch { }
+        }
+
         public void PruneTileSheets(Map? keepMap)
         {
             try

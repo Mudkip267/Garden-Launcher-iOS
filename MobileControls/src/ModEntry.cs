@@ -744,15 +744,13 @@ namespace SDViOSTouchControls
                             if (mPropMap != null)
                             {
                                 harmony.Patch(mPropMap, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixPropagateMap), BindingFlags.Static | BindingFlags.NonPublic)));
-                                Monitor.Log("[SDViOSTouchControls] Harmony patched CoreAssetPropagator.PropagateMap -> skip during save load.", LogLevel.Info);
+                                Monitor.Log("[SDViOSTouchControls] Harmony patched CoreAssetPropagator.PropagateMap -> skip only during save load.", LogLevel.Info);
                             }
 
-                            var mPropTex = propType.GetMethod("PropagateTexture", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                            if (mPropTex != null)
-                            {
-                                harmony.Patch(mPropTex, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixPropagateMap), BindingFlags.Static | BindingFlags.NonPublic)));
-                                Monitor.Log("[SDViOSTouchControls] Harmony patched CoreAssetPropagator.PropagateTexture -> skip during save load.", LogLevel.Info);
-                            }
+                            // NOTE: NEVER block CoreAssetPropagator.PropagateTexture!
+                            // Content Patcher UI / recolor / farmhouse / portrait mods (e.g. Overgrown Flowery Interface,
+                            // Italian Countryside Farmhouse, Recolor packs) rely on PropagateTexture to update
+                            // Game1.menuTexture, Game1.mouseCursors, Farm.houseTextures, and core sprites!
                             break;
                         }
                     }
@@ -1354,8 +1352,14 @@ namespace SDViOSTouchControls
 
         private static bool PrefixPropagateMap(ref bool __result)
         {
-            __result = false;
-            return false;
+            // Only skip heavy bulk map propagation while save is actively loading (gameMode == 6) to avoid iOS Jetsam RAM spikes.
+            // Allow map propagation normally during gameplay / day transitions so map mods update cleanly!
+            if (Game1.gameMode == 6)
+            {
+                __result = false;
+                return false;
+            }
+            return true;
         }
 
         private static Exception? FinalizerSilenceException(Exception? __exception)
@@ -2098,13 +2102,22 @@ namespace SDViOSTouchControls
 
         private void OnAssetsInvalidated(object? sender, AssetsInvalidatedEventArgs e)
         {
-            // Auto-refresh Mobile HUD & Button theme whenever Content Patcher or any UI mod updates UI textures!
+            // 1. Evict matching cached tilesheets in LazyIosDisplayDevice so recolor / seasonal / map texture mods apply immediately!
+            try
+            {
+                LazyIosDisplayDevice.Instance?.InvalidateMatchingTileSheets(e.Names);
+            }
+            catch { }
+
+            // 2. Auto-refresh Mobile HUD & Button theme whenever Content Patcher or any UI mod updates UI textures!
             try
             {
                 foreach (var name in e.Names)
                 {
                     if (name.IsEquivalentTo("LooseSprites/MobileAtlas_manually_made") ||
                         name.IsEquivalentTo("LooseSprites/Cursors") ||
+                        name.IsEquivalentTo("LooseSprites/Cursors2") ||
+                        name.IsEquivalentTo("LooseSprites/Cursors_1_6") ||
                         name.IsEquivalentTo("Maps/MenuTiles"))
                     {
                         MobileThemeEngine.MarkDirty();
@@ -2135,6 +2148,7 @@ namespace SDViOSTouchControls
                 }
 
                 RepairStaticTextures();
+                LazyIosDisplayDevice.Instance?.ClearTileSheetCache();
                 EnsureLocationMapAndTileSheetsLoaded(Game1.currentLocation);
                 MemoryWatchdog.ForceCollect("SaveLoaded", minIntervalMs: 500);
                 LogBackup.BackupLogs("SaveLoaded");
@@ -2179,7 +2193,9 @@ namespace SDViOSTouchControls
                     Game1.exitActiveMenu();
                 }
 
+                MobileThemeEngine.MarkDirty();
                 RepairStaticTextures();
+                LazyIosDisplayDevice.Instance?.ClearTileSheetCache();
                 EnsureLocationMapAndTileSheetsLoaded(Game1.currentLocation);
                 MemoryWatchdog.ForceCollect("DayStarted", minIntervalMs: 1000);
                 LogBackup.BackupLogs("DayStarted");
@@ -3060,16 +3076,41 @@ namespace SDViOSTouchControls
                             menus.RemoveAt(i);
                         }
                     }
-                }
-                else if (_stashedPcHudMenus.Count > 0)
-                {
-                    for (int i = 0; i < _stashedPcHudMenus.Count; i++)
+
+                    // Keep Game1.dayTimeMoneyBox.position cleanly anchored so UI Info Suite 2's top-right icons
+                    // (Weather / Luck / Birthday / Cart) sit neatly under our Mobile clock and to the LEFT of [!] / [≡]
+                    // without overlapping buttons or getting clipped by iPhone's curved top-right screen bezel!
+                    if (Game1.dayTimeMoneyBox != null)
                     {
-                        var m = _stashedPcHudMenus[i];
-                        if (m != null && !menus.Contains(m))
-                            menus.Add(m);
+                        var mobDt = MobileHudAndControls.Instance.DayTimeBoxRect;
+                        var mobQuest = MobileHudAndControls.Instance.QuestBtnRect;
+                        if (mobDt.Width > 0 && mobQuest.Width > 0)
+                        {
+                            float targetX = Math.Max(mobDt.X - 68f, mobQuest.Left - 270f);
+                            float targetY = mobDt.Bottom - 238f;
+                            Game1.dayTimeMoneyBox.position = new Vector2(targetX, targetY);
+                        }
                     }
-                    _stashedPcHudMenus.Clear();
+                }
+                else
+                {
+                    if (_stashedPcHudMenus.Count > 0)
+                    {
+                        for (int i = 0; i < _stashedPcHudMenus.Count; i++)
+                        {
+                            var m = _stashedPcHudMenus[i];
+                            if (m != null && !menus.Contains(m))
+                                menus.Add(m);
+                        }
+                        _stashedPcHudMenus.Clear();
+                    }
+
+                    // When GameMenu is open on iOS, inset DayTimeMoneyBox cleanly away from iPhone's curved top-right bezel
+                    if (IsRunningOnIos && Game1.dayTimeMoneyBox != null && Game1.uiViewport.Width > 400)
+                    {
+                        float safeMaxX = Game1.uiViewport.Width - 300f - 32f;
+                        Game1.dayTimeMoneyBox.position = new Vector2(safeMaxX, 12f);
+                    }
                 }
             }
             catch { }

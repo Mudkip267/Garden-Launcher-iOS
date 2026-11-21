@@ -1,11 +1,6 @@
-param(
-    [string]$WorkDir  = (Join-Path $env:TEMP 'sdv-clean-ui'),
-    [string]$CecilDll = (Join-Path $env:TEMP 'sdv-viewport\Mono.Cecil.dll'),
-    [string]$SrcPath  = (Join-Path $env:TEMP 'lidgren_bundled.dll')
-)
 $ErrorActionPreference = 'Stop'
-$d = $WorkDir
-[void][Reflection.Assembly]::LoadFrom($CecilDll)
+$d = Join-Path $env:TEMP 'sdv-clean-ui'
+[void][Reflection.Assembly]::LoadFrom((Join-Path $env:TEMP 'sdv-viewport\Mono.Cecil.dll'))
 $ops = [Mono.Cecil.Cil.OpCodes]
 
 function Expand-ShortBranches($body) {
@@ -81,7 +76,7 @@ function Wrap-MethodSafe($method, $refException, [scriptblock]$emitFallback) {
     $body.ExceptionHandlers.Add($eh)
 }
 
-$srcPath = $SrcPath
+$srcPath = Join-Path $env:TEMP 'lidgren_bundled.dll'
 $outPath = Join-Path $d 'lidgren-ios.dll'
 $asm = [Mono.Cecil.AssemblyDefinition]::ReadAssembly($srcPath)
 try {

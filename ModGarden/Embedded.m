@@ -1,4 +1,217 @@
+#define GARDEN_IN_GAME 1
+#import <AVFAudio/AVAudioSession.h>
+#import <objc/runtime.h>
+#import <execinfo.h>
+#import <signal.h>
+#import <fcntl.h>
+#import <unistd.h>
+#import <string.h>
+#import <sys/sysctl.h>
 #import "main.m"
+
+// Self-contained compiler-rt helper for @available(...) when linking directly with LLVM ld64.lld
+__attribute__((visibility("hidden")))
+int32_t __isPlatformVersionAtLeast(uint32_t platform, uint32_t major, uint32_t minor, uint32_t subminor) {
+    (void)platform;
+    NSOperatingSystemVersion v = { (NSInteger)major, (NSInteger)minor, (NSInteger)subminor };
+    return [NSProcessInfo.processInfo isOperatingSystemAtLeastVersion:v] ? 1 : 0;
+}
+
+// ---- Native Boot & Crash Logger (always writes to Documents/ErrorLogs/ even on instant crash!) ----
+static char gSdvBootLogPath[1024] = {0};
+static char gSdvCrashLogPath[1024] = {0};
+static volatile sig_atomic_t gSdvCrashHandled = 0;
+
+static void sdvWriteRawFd(const char *path, const char *buf, size_t len) {
+    if (!path || !path[0] || !buf || len == 0) return;
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd >= 0) {
+        (void)write(fd, buf, len);
+        fsync(fd);
+        close(fd);
+    }
+}
+
+static void sdvBootLog(const char *msg) {
+    if (!gSdvBootLogPath[0] || !msg) return;
+    sdvWriteRawFd(gSdvBootLogPath, msg, strlen(msg));
+    sdvWriteRawFd(gSdvBootLogPath, "\n", 1);
+}
+
+static void sdvBootLogFmt(NSString *line) {
+    if (!line.length) return;
+    const char *utf8 = line.UTF8String;
+    if (utf8) sdvBootLog(utf8);
+}
+
+static void sdvSignalCrashHandler(int sig, siginfo_t *info, void *ucontext) {
+    (void)ucontext;
+    if (gSdvCrashHandled) {
+        signal(sig, SIG_DFL);
+        raise(sig);
+        return;
+    }
+    gSdvCrashHandled = 1;
+    int fd = open(gSdvCrashLogPath, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd >= 0) {
+        const char *hdr = "\n=== NATIVE SIGNAL CRASH ===\nSignal: ";
+        (void)write(fd, hdr, strlen(hdr));
+        char num[32];
+        int n = 0;
+        int v = sig;
+        if (v < 0) { num[n++] = '-'; v = -v; }
+        char rev[16]; int rn = 0;
+        do { rev[rn++] = (char)('0' + (v % 10)); v /= 10; } while (v > 0 && rn < 15);
+        while (rn > 0) num[n++] = rev[--rn];
+        num[n++] = '\n';
+        (void)write(fd, num, (size_t)n);
+        if (info) {
+            const char *ah = "Fault addr (hex): 0x";
+            (void)write(fd, ah, strlen(ah));
+            uintptr_t addr = (uintptr_t)info->si_addr;
+            char hex[17];
+            const char *hd = "0123456789abcdef";
+            for (int i = 15; i >= 0; i--) { hex[15 - i] = hd[(addr >> (i * 4)) & 0xF]; }
+            hex[16] = '\n';
+            (void)write(fd, hex, 17);
+        }
+        const char *bh = "Backtrace:\n";
+        (void)write(fd, bh, strlen(bh));
+        void *frames[64];
+        int count = backtrace(frames, 64);
+        if (count > 0) backtrace_symbols_fd(frames, count, fd);
+        fsync(fd);
+        close(fd);
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static NSUncaughtExceptionHandler *gPrevUncaughtHandler = NULL;
+static void sdvUncaughtExceptionHandler(NSException *exception) {
+    @try {
+        NSString *txt = [NSString stringWithFormat:@"\n=== UNCAUGHT NSException ===\nName: %@\nReason: %@\nStack:\n%@\n",
+            exception.name ?: @"?", exception.reason ?: @"?",
+            [exception.callStackSymbols componentsJoinedByString:@"\n"] ?: @""];
+        const char *u = txt.UTF8String;
+        if (u) sdvWriteRawFd(gSdvCrashLogPath, u, strlen(u));
+    } @catch (NSException *ignored) { }
+    if (gPrevUncaughtHandler) gPrevUncaughtHandler(exception);
+}
+
+static NSString *sdvDeviceMachineModel(void) {
+    size_t sz = 0;
+    if (sysctlbyname("hw.machine", NULL, &sz, NULL, 0) != 0 || sz == 0 || sz > 128) return @"unknown";
+    char buf[129] = {0};
+    if (sysctlbyname("hw.machine", buf, &sz, NULL, 0) != 0) return @"unknown";
+    return [NSString stringWithUTF8String:buf] ?: @"unknown";
+}
+
+static void sdvInitBootAndCrashLogging(NSString *docsPath) {
+    if (!docsPath.length) return;
+    @try {
+        NSString *errDir = [docsPath stringByAppendingPathComponent:@"ErrorLogs"];
+        [fm() createDirectoryAtPath:errDir withIntermediateDirectories:YES attributes:nil error:nil];
+        NSString *bootCur = [errDir stringByAppendingPathComponent:@"launcher-boot.log"];
+        NSString *bootPrev = [errDir stringByAppendingPathComponent:@"launcher-boot-previous.log"];
+        if ([fm() fileExistsAtPath:bootCur]) {
+            [fm() removeItemAtPath:bootPrev error:nil];
+            [fm() moveItemAtPath:bootCur toPath:bootPrev error:nil];
+        }
+        NSString *crashLog = [errDir stringByAppendingPathComponent:@"native-crash.log"];
+        strlcpy(gSdvBootLogPath, bootCur.fileSystemRepresentation, sizeof(gSdvBootLogPath));
+        strlcpy(gSdvCrashLogPath, crashLog.fileSystemRepresentation, sizeof(gSdvCrashLogPath));
+
+        // Install Objective-C exception + POSIX signal handlers immediately
+        gPrevUncaughtHandler = NSGetUncaughtExceptionHandler();
+        NSSetUncaughtExceptionHandler(&sdvUncaughtExceptionHandler);
+
+        int sigs[] = { SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGTRAP, SIGFPE };
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_sigaction = sdvSignalCrashHandler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+        for (size_t i = 0; i < sizeof(sigs) / sizeof(sigs[0]); i++) {
+            sigaction(sigs[i], &sa, NULL);
+        }
+
+        NSString *osVer = NSProcessInfo.processInfo.operatingSystemVersionString ?: @"?";
+        NSString *model = sdvDeviceMachineModel();
+        double ramGB = (double)NSProcessInfo.processInfo.physicalMemory / (1024.0 * 1024.0 * 1024.0);
+        NSString *bid = NSBundle.mainBundle.bundleIdentifier ?: @"?";
+        sdvBootLogFmt([NSString stringWithFormat:
+            @"[BOOT 1] Garden Launcher v7.10 | iOS %@ | Device=%@ | RAM=%.2f GB | Bundle=%@",
+            osVer, model, ramGB, bid]);
+    } @catch (NSException *ex) { }
+}
+
+// ---- Native iOS Audio Session Manager (guarantees Playback audio even with hardware Mute switch ON!) ----
+static void sdvEnsureAudioSession(const char *reason) {
+    @try {
+        AVAudioSession *s = AVAudioSession.sharedInstance;
+        NSError *catErr = nil;
+        NSError *actErr = nil;
+        [s setCategory:AVAudioSessionCategoryPlayback
+                  mode:AVAudioSessionModeDefault
+               options:AVAudioSessionCategoryOptionMixWithOthers
+                 error:&catErr];
+        [s setActive:YES error:&actErr];
+        NSString *outPort = s.currentRoute.outputs.firstObject.portType ?: @"none";
+        sdvBootLogFmt([NSString stringWithFormat:
+            @"[AUDIO] %s | cat=%@ | out=%@ | vol=%.2f | catErr=%@ | actErr=%@",
+            reason ?: "init", s.category ?: @"?", outPort, s.outputVolume,
+            catErr ? catErr.localizedDescription : @"none",
+            actErr ? actErr.localizedDescription : @"none"]);
+    } @catch (NSException *ex) {
+        sdvBootLogFmt([NSString stringWithFormat:@"[AUDIO] exception: %@", ex]);
+    }
+}
+
+// ---- Home Indicator Lock & Auto-Hide (requires deliberate swipe-up instead of waking on bottom taps!) ----
+static BOOL sdvAlwaysHideHomeIndicator(id self, SEL _cmd) { (void)self; (void)_cmd; return YES; }
+static UIRectEdge sdvDeferAllSystemEdges(id self, SEL _cmd) { (void)self; (void)_cmd; return UIRectEdgeAll; }
+
+static void sdvApplyAutoHideHomeIndicator(UIViewController *vc) {
+    if (!vc) return;
+    @try {
+        Class cls = object_getClass(vc);
+        if (!cls) return;
+        NSString *cn = NSStringFromClass(cls);
+        // CRITICAL for iOS 26/27: NEVER mutate Apple's system UIKit classes (UIViewController, UINavigationController, _UI*...)!
+        if (cn.length && ![cn hasPrefix:@"UI"] && ![cn hasPrefix:@"_"]) {
+            static NSMutableSet<NSString *> *patched;
+            static dispatch_once_t onceToken;
+            dispatch_once(&onceToken, ^{ patched = [NSMutableSet set]; });
+            if (![patched containsObject:cn]) {
+                [patched addObject:cn];
+                class_replaceMethod(cls, @selector(prefersHomeIndicatorAutoHidden), (IMP)sdvAlwaysHideHomeIndicator, "B@:");
+                class_replaceMethod(cls, @selector(preferredScreenEdgesDeferringSystemGestures), (IMP)sdvDeferAllSystemEdges, "Q@:");
+            }
+        }
+        [vc setNeedsUpdateOfHomeIndicatorAutoHidden];
+        [vc setNeedsUpdateOfScreenEdgesDeferringSystemGestures];
+    } @catch (NSException *ex) { }
+}
+
+// ---- Native UIScene Lifecycle Support (iOS 14 – iOS 26 & iOS 27 Mandatory Scene Compliance) ----
+@interface SDVSceneHostViewController : UIViewController
+@end
+@implementation SDVSceneHostViewController
+-(void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor colorWithRed:0.06 green:0.07 blue:0.10 alpha:1.0];
+}
+-(BOOL)prefersStatusBarHidden { return YES; }
+-(BOOL)prefersHomeIndicatorAutoHidden { return YES; }
+-(UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }
+-(UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
+@end
+
+@interface SDVSceneHostWindow : UIWindow
+@end
+@implementation SDVSceneHostWindow
+@end
 
 // ---- Pass-through Overlay Window (never steals touches outside interactiveView) ----
 @interface SDVPassThroughWindow : UIWindow
@@ -48,6 +261,8 @@
 
 -(UIView *)capsuleView { return _capsuleShadow; }
 -(BOOL)prefersStatusBarHidden { return YES; }
+-(BOOL)prefersHomeIndicatorAutoHidden { return YES; }
+-(UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }
 -(UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
 
 -(UISlider *)makeHudSliderWithTag:(NSInteger)tag tint:(UIColor *)tint {
@@ -392,6 +607,8 @@
 
 -(UIView *)badgeView { return _badge; }
 -(BOOL)prefersStatusBarHidden { return YES; }
+-(BOOL)prefersHomeIndicatorAutoHidden { return YES; }
+-(UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeNone; }
 -(UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
 
 -(void)dealloc {
@@ -507,6 +724,100 @@
 @property(nonatomic, strong) SDVPassThroughWindow *toastWindow;
 @property(nonatomic, assign) BOOL shownStartupToast;
 @property(nonatomic, assign) BOOL autoOpenedSetup;
+-(void)attachToGameWindows;
+@end
+
+static SDVGardenGestureHost *gSdvGardenHost = nil;
+
+// ---- Native UIWindowSceneDelegate for iOS 14 – iOS 26 & iOS 27 Mandatory Scene Lifecycle ----
+@interface SDVSceneDelegate : UIResponder <UIWindowSceneDelegate>
+@property(nonatomic, strong) UIWindow *window;
+@property(nonatomic, strong) SDVSceneHostWindow *placeholderWindow;
+@end
+
+@implementation SDVSceneDelegate
+
+-(void)adoptRealWindowForScene:(UIWindowScene *)ws {
+    if (!ws) return;
+    @try {
+        // 1. Check if AppDelegate already created a window (e.g. ShowMissingFilesScreen / ShowErrorScreen)
+        id<UIApplicationDelegate> appDel = UIApplication.sharedApplication.delegate;
+        if (appDel && [appDel respondsToSelector:@selector(window)]) {
+            UIWindow *dw = [appDel window];
+            if (dw && ![dw isKindOfClass:SDVSceneHostWindow.class] &&
+                ![dw isKindOfClass:SDVGardenOverlayWindow.class] &&
+                ![dw isKindOfClass:SDVPassThroughWindow.class]) {
+                if (dw.windowScene != ws) {
+                    dw.windowScene = ws;
+                    dw.frame = ws.coordinateSpace.bounds;
+                }
+                if (dw.hidden) dw.hidden = NO;
+                [dw makeKeyAndVisible];
+                self.window = dw;
+                if (self.placeholderWindow && self.placeholderWindow != dw) {
+                    self.placeholderWindow.hidden = YES;
+                    self.placeholderWindow = nil;
+                }
+                sdvBootLog("[SCENE] Adopted AppDelegate.window onto UIWindowScene");
+                return;
+            }
+        }
+        // 2. Check if MonoGame / SDViOS already attached its own real UIWindow to this scene
+        for (UIWindow *w in ws.windows) {
+            if ([w isKindOfClass:SDVSceneHostWindow.class] ||
+                [w isKindOfClass:SDVGardenOverlayWindow.class] ||
+                [w isKindOfClass:SDVPassThroughWindow.class]) continue;
+            if (w.windowLevel >= UIWindowLevelAlert || w.hidden || !w.rootViewController) continue;
+            self.window = w;
+            if (self.placeholderWindow) {
+                self.placeholderWindow.hidden = YES;
+                self.placeholderWindow = nil;
+                sdvBootLog("[SCENE] Retired placeholder host window (real game window active)");
+            }
+            return;
+        }
+    } @catch (NSException *ex) { }
+}
+
+-(void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)connectionOptions {
+    (void)session; (void)connectionOptions;
+    if (![scene isKindOfClass:UIWindowScene.class]) return;
+    UIWindowScene *ws = (UIWindowScene *)scene;
+    sdvBootLog("[BOOT 5] SDVSceneDelegate willConnectToSession");
+
+    [self adoptRealWindowForScene:ws];
+    if (!self.window) {
+        SDVSceneHostWindow *hw = [[SDVSceneHostWindow alloc] initWithWindowScene:ws];
+        hw.backgroundColor = [UIColor colorWithRed:0.06 green:0.07 blue:0.10 alpha:1.0];
+        hw.windowLevel = UIWindowLevelNormal - 1;
+        hw.rootViewController = [SDVSceneHostViewController new];
+        [hw makeKeyAndVisible];
+        self.placeholderWindow = hw;
+        self.window = hw;
+        sdvBootLog("[SCENE] Installed placeholder SDVSceneHostWindow while game initializes");
+    }
+    if (gSdvGardenHost) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [gSdvGardenHost attachToGameWindows];
+        });
+    }
+}
+
+-(void)sceneDidBecomeActive:(UIScene *)scene {
+    if ([scene isKindOfClass:UIWindowScene.class]) {
+        [self adoptRealWindowForScene:(UIWindowScene *)scene];
+    }
+    if (gSdvGardenHost) {
+        [gSdvGardenHost attachToGameWindows];
+    }
+}
+
+-(void)sceneWillEnterForeground:(UIScene *)scene {
+    if ([scene isKindOfClass:UIWindowScene.class]) {
+        [self adoptRealWindowForScene:(UIWindowScene *)scene];
+    }
+}
+
 @end
 
 @implementation SDVGardenGestureHost
@@ -516,8 +827,31 @@
     if (self) {
         _attachedWindows = [NSHashTable weakObjectsHashTable];
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(syncRamHudVisibility) name:kSDVRamHudToggleNotification object:nil];
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onSceneOrAppNotification) name:UISceneDidActivateNotification object:nil];
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onSceneOrAppNotification) name:UIApplicationDidBecomeActiveNotification object:nil];
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onAudioInterruption:) name:AVAudioSessionInterruptionNotification object:nil];
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onAudioRouteChange:) name:AVAudioSessionRouteChangeNotification object:nil];
     }
     return self;
+}
+
+-(void)onAudioInterruption:(NSNotification *)n {
+    NSNumber *t = n.userInfo[AVAudioSessionInterruptionTypeKey];
+    if (t && t.unsignedIntegerValue == AVAudioSessionInterruptionTypeEnded) {
+        sdvEnsureAudioSession("interruption-ended");
+    }
+}
+
+-(void)onAudioRouteChange:(NSNotification *)n {
+    (void)n;
+    sdvEnsureAudioSession("route-change");
+}
+
+-(void)onSceneOrAppNotification {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        sdvEnsureAudioSession("did-become-active");
+        [self attachToGameWindows];
+    });
 }
 
 -(NSString *)docsPath {
@@ -530,28 +864,51 @@
            [w isKindOfClass:SDVGardenOverlayWindow.class] || [w isKindOfClass:SDVPassThroughWindow.class];
 }
 
--(UIWindow *)gameWindow {
-    UIWindow *fallback = nil;
+-(UIWindowScene *)primaryWindowScene {
+    UIWindowScene *fallback = nil;
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if (![scene isKindOfClass:UIWindowScene.class]) continue;
-        UISceneActivationState st = scene.activationState;
-        if (st != UISceneActivationStateForegroundActive && st != UISceneActivationStateForegroundInactive) continue;
         UIWindowScene *ws = (UIWindowScene *)scene;
+        if (ws.activationState == UISceneActivationStateForegroundActive) return ws;
+        if (ws.activationState == UISceneActivationStateForegroundInactive && !fallback) fallback = ws;
+        if (!fallback) fallback = ws;
+    }
+    return fallback;
+}
+
+-(UIWindow *)gameWindow {
+    UIWindow *fallback = nil;
+    UIWindow *hostFallback = nil;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        UIWindowScene *ws = (UIWindowScene *)scene;
+        UISceneActivationState st = ws.activationState;
+        BOOL fg = (st == UISceneActivationStateForegroundActive || st == UISceneActivationStateForegroundInactive);
         if (@available(iOS 15.0, *)) {
             UIWindow *kw = ws.keyWindow;
             if (kw && ![self isOwnWindow:kw] && !kw.hidden && kw.windowLevel < UIWindowLevelAlert && kw.rootViewController) {
-                return kw;
+                if ([kw isKindOfClass:SDVSceneHostWindow.class]) {
+                    if (!hostFallback) hostFallback = kw;
+                } else if (fg) {
+                    return kw;
+                } else if (!fallback) {
+                    fallback = kw;
+                }
             }
         }
         for (UIWindow *w in ws.windows) {
             if ([self isOwnWindow:w] || w.hidden) continue;
             if (w.windowLevel >= UIWindowLevelAlert) continue;
             if (!w.rootViewController) continue;
-            if (w.isKeyWindow) return w;
+            if ([w isKindOfClass:SDVSceneHostWindow.class]) {
+                if (!hostFallback) hostFallback = w;
+                continue;
+            }
+            if (fg && w.isKeyWindow) return w;
             if (!fallback) fallback = w;
         }
     }
-    return fallback;
+    return fallback ?: hostFallback;
 }
 
 -(BOOL)isGardenOpen {
@@ -559,51 +916,77 @@
 }
 
 -(void)attachToGameWindows {
-    NSMutableArray<UIWindow *> *candidates = [NSMutableArray array];
-    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-        if (![scene isKindOfClass:UIWindowScene.class]) continue;
-        for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-            if ([self isOwnWindow:w]) continue;
-            if (w.windowLevel >= UIWindowLevelAlert) continue;
-            [candidates addObject:w];
-        }
-    }
-
-    for (UIWindow *w in candidates) {
-        if ([self.attachedWindows containsObject:w]) continue;
-        w.multipleTouchEnabled = YES;
-        if (w.rootViewController.view) w.rootViewController.view.multipleTouchEnabled = YES;
-
-        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleThreeFingerDoubleTap:)];
-        tap.numberOfTouchesRequired = 3;
-        tap.numberOfTapsRequired = 2;
-        tap.cancelsTouchesInView = NO;
-        tap.delaysTouchesBegan = NO;
-        tap.delaysTouchesEnded = NO;
-        tap.delegate = self;
-        [w addGestureRecognizer:tap];
-        [self.attachedWindows addObject:w];
-    }
-
-    if (self.gardenWindow && !self.gardenWindow.hidden) {
-        UIWindow *game = [self gameWindow];
-        if (game) self.gardenWindow.frame = game.frame;
-    }
-    [self syncRamHudVisibility];
-
-    if (!self.autoOpenedSetup && [self gameWindow] && ![gameDataStatus([self docsPath])[@"ready"] boolValue]) {
-        self.autoOpenedSetup = YES;
-        self.shownStartupToast = YES;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (![gameDataStatus([self docsPath])[@"ready"] boolValue]) {
-                [self openGarden];
+    @try {
+        // Ensure any detached AppDelegate.window (created before scene connected) is linked to the active UIWindowScene!
+        UIWindowScene *activeScene = [self primaryWindowScene];
+        if (activeScene) {
+            if ([activeScene.delegate isKindOfClass:SDVSceneDelegate.class]) {
+                [(SDVSceneDelegate *)activeScene.delegate adoptRealWindowForScene:activeScene];
+            } else {
+                id<UIApplicationDelegate> appDel = UIApplication.sharedApplication.delegate;
+                if (appDel && [appDel respondsToSelector:@selector(window)]) {
+                    UIWindow *dw = [appDel window];
+                    if (dw && !dw.windowScene && ![self isOwnWindow:dw]) {
+                        dw.windowScene = activeScene;
+                        dw.frame = activeScene.coordinateSpace.bounds;
+                        [dw makeKeyAndVisible];
+                    }
+                }
             }
-        });
-    } else if (!self.shownStartupToast && [self gameWindow]) {
-        self.shownStartupToast = YES;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [self showStartupHintToast];
-        });
+        }
+
+        NSMutableArray<UIWindow *> *candidates = [NSMutableArray array];
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (![scene isKindOfClass:UIWindowScene.class]) continue;
+            for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+                if ([self isOwnWindow:w]) continue;
+                if (w.windowLevel >= UIWindowLevelAlert) continue;
+                [candidates addObject:w];
+            }
+        }
+
+        for (UIWindow *w in candidates) {
+            if (w.rootViewController) sdvApplyAutoHideHomeIndicator(w.rootViewController);
+            if ([self.attachedWindows containsObject:w]) continue;
+            w.multipleTouchEnabled = YES;
+            if (w.rootViewController.view) w.rootViewController.view.multipleTouchEnabled = YES;
+
+            UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleThreeFingerDoubleTap:)];
+            tap.numberOfTouchesRequired = 3;
+            tap.numberOfTapsRequired = 2;
+            tap.cancelsTouchesInView = NO;
+            tap.delaysTouchesBegan = NO;
+            tap.delaysTouchesEnded = NO;
+            tap.delegate = self;
+            [w addGestureRecognizer:tap];
+            [self.attachedWindows addObject:w];
+        }
+
+        if (self.gardenWindow && !self.gardenWindow.hidden) {
+            UIWindow *game = [self gameWindow];
+            if (game && !CGRectIsEmpty(game.frame)) self.gardenWindow.frame = game.frame;
+        }
+        [self syncRamHudVisibility];
+
+        BOOL hasWindow = ([self gameWindow] != nil);
+        if (!self.autoOpenedSetup && hasWindow && ![gameDataStatus([self docsPath])[@"ready"] boolValue]) {
+            self.autoOpenedSetup = YES;
+            self.shownStartupToast = YES;
+            sdvBootLog("[BOOT 6] Game data missing -> scheduling Mod Garden setup UI");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (![gameDataStatus([self docsPath])[@"ready"] boolValue]) {
+                    [self openGarden];
+                }
+            });
+        } else if (!self.shownStartupToast && hasWindow) {
+            self.shownStartupToast = YES;
+            sdvBootLog("[BOOT 6] Game data ready -> scheduling startup hint toast");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [self showStartupHintToast];
+            });
+        }
+    } @catch (NSException *ex) {
+        sdvBootLogFmt([NSString stringWithFormat:@"[WARN] attachToGameWindows exception: %@", ex]);
     }
 }
 
@@ -679,18 +1062,20 @@
 -(void)openGarden {
     if ([self isGardenOpen]) return;
     UIWindow *game = [self gameWindow];
-    if (!game) return;
+    UIWindowScene *ws = game.windowScene ?: [self primaryWindowScene];
+    if (!game && !ws) return;
 
-    SDVGardenOverlayWindow *gw = game.windowScene
-        ? [[SDVGardenOverlayWindow alloc] initWithWindowScene:game.windowScene]
-        : [[SDVGardenOverlayWindow alloc] initWithFrame:game.frame];
-    gw.frame = game.frame;
+    CGRect bounds = (game && !CGRectIsEmpty(game.frame)) ? game.frame : (ws ? ws.coordinateSpace.bounds : CGRectZero);
+    SDVGardenOverlayWindow *gw = ws
+        ? [[SDVGardenOverlayWindow alloc] initWithWindowScene:ws]
+        : [[SDVGardenOverlayWindow alloc] initWithFrame:bounds];
+    if (!CGRectIsEmpty(bounds)) gw.frame = bounds;
     gw.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     gw.backgroundColor = kBgCanvas;
     gw.overrideUserInterfaceStyle = UIUserInterfaceStyleUnspecified;
     gw.windowLevel = UIWindowLevelNormal + 5;
 
-    SDVGardenManagerController *mgr = [SDVGardenManagerController new];
+    Home *mgr = [Home new];
     __weak typeof(self) weakSelf = self;
     mgr.onRequestClose = ^{
         [weakSelf closeGarden];
@@ -701,7 +1086,9 @@
     gw.rootViewController = mgr;
     gw.alpha = 0.0;
     gw.hidden = NO;
+    [gw makeKeyAndVisible];
     self.gardenWindow = gw;
+    sdvBootLog("[BOOT 7] Mod Garden overlay window opened");
 
     [UIView animateWithDuration:0.18 delay:0 options:UIViewAnimationOptionCurveEaseOut animations:^{
         gw.alpha = 1.0;
@@ -790,17 +1177,31 @@
 
 __attribute__((constructor)) static void startGardenControls(void) {
     @autoreleasepool {
-        NSString *docs = [fm() URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject.path;
-        syncBundledLidgren(docs);
-        syncBundledSmapi(docs);
-        [SDVRamMonitor.shared startWithDocsPath:docs];
+        @try {
+            NSString *docs = [fm() URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject.path;
+            sdvInitBootAndCrashLogging(docs);
+            sdvEnsureAudioSession("constructor");
+            syncBundledLidgren(docs);
+            syncBundledSmapi(docs);
+            syncBundledMobileControls(docs);
+            sdvBootLog("[BOOT 2] Bundled Lidgren / SMAPI / SDVMobileControls synced");
+            [SDVRamMonitor.shared startWithDocsPath:docs];
+            sdvBootLog("[BOOT 3] SDVRamMonitor started");
+        } @catch (NSException *ex) {
+            sdvBootLogFmt([NSString stringWithFormat:@"[ERR] constructor exception: %@", ex]);
+        }
     }
     dispatch_async(dispatch_get_main_queue(), ^{
-        static SDVGardenGestureHost *host;
-        host = [SDVGardenGestureHost new];
-        [host attachToGameWindows];
-        [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer *t) {
-            [host attachToGameWindows];
-        }];
+        @try {
+            sdvBootLog("[BOOT 4] Main runloop active -> starting SDVGardenGestureHost");
+            gSdvGardenHost = [SDVGardenGestureHost new];
+            [gSdvGardenHost attachToGameWindows];
+            [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer *t) {
+                (void)t;
+                [gSdvGardenHost attachToGameWindows];
+            }];
+        } @catch (NSException *ex) {
+            sdvBootLogFmt([NSString stringWithFormat:@"[ERR] main init exception: %@", ex]);
+        }
     });
 }

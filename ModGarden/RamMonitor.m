@@ -51,9 +51,11 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
 -(void)saveHudOffset:(CGPoint)offset;
 -(void)resetHudOffset;
 
-// v6 Performance Config (Documents/sdv_perf.cfg -> "1,<trimLogs>")
+// v5 Performance Config (Documents/sdv_perf.cfg -> "renderMode,trimLogs")
+// renderMode: 0 = Smooth 1.5x, 1 = Balanced 2.0x (Default), 2 = Native 3.0x
+-(NSInteger)renderScaleModeForDocs:(NSString *)docsPath;
 -(BOOL)trimLogsEnabledForDocs:(NSString *)docsPath;
--(void)saveTrimLogs:(BOOL)trimLogs toDocs:(NSString *)docsPath;
+-(void)savePerfConfig:(NSInteger)renderMode trimLogs:(BOOL)trimLogs toDocs:(NSString *)docsPath;
 -(void)triggerManualGCInDocs:(NSString *)docsPath;
 @end
 
@@ -88,18 +90,21 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
 }
 
 -(SDVRamSnapshot)sample {
-    uint64_t used = [self currentFootprintBytes];
-    uint64_t avail = (uint64_t)os_proc_available_memory();
-    uint64_t budget = used + avail;
-    if (used > _peakBytes) _peakBytes = used;
     SDVRamSnapshot s;
-    s.usedBytes = used;
-    s.availBytes = avail;
-    s.budgetBytes = budget;
-    s.peakBytes = _peakBytes;
-    s.deviceBytes = NSProcessInfo.processInfo.physicalMemory;
-    s.usagePct = (budget > 0) ? ((double)used * 100.0 / (double)budget) : 0.0;
-    s.thermal = NSProcessInfo.processInfo.thermalState;
+    memset(&s, 0, sizeof(s));
+    @try {
+        uint64_t used = [self currentFootprintBytes];
+        uint64_t avail = (uint64_t)os_proc_available_memory();
+        uint64_t budget = used + avail;
+        if (used > _peakBytes) _peakBytes = used;
+        s.usedBytes = used;
+        s.availBytes = avail;
+        s.budgetBytes = budget;
+        s.peakBytes = _peakBytes;
+        s.deviceBytes = NSProcessInfo.processInfo.physicalMemory;
+        s.usagePct = (budget > 0) ? ((double)used * 100.0 / (double)budget) : 0.0;
+        s.thermal = NSProcessInfo.processInfo.thermalState;
+    } @catch (NSException *ex) { }
     return s;
 }
 
@@ -135,6 +140,10 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
     [NSNotificationCenter.defaultCenter postNotificationName:kSDVRamHudResetPosNotification object:nil];
 }
 
+-(NSInteger)renderScaleModeForDocs:(NSString *)docsPath {
+    return 1; // v6: Always locked to crisp integer 2.0x
+}
+
 -(BOOL)trimLogsEnabledForDocs:(NSString *)docsPath {
     if (!docsPath.length) return YES;
     NSString *p = [docsPath stringByAppendingPathComponent:@"sdv_perf.cfg"];
@@ -143,8 +152,9 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
     return ![raw containsString:@",0"];
 }
 
--(void)saveTrimLogs:(BOOL)trimLogs toDocs:(NSString *)docsPath {
+-(void)savePerfConfig:(NSInteger)renderMode trimLogs:(BOOL)trimLogs toDocs:(NSString *)docsPath {
     if (!docsPath.length) return;
+    (void)renderMode;
     [NSFileManager.defaultManager createDirectoryAtPath:docsPath withIntermediateDirectories:YES attributes:nil error:nil];
     NSString *p = [docsPath stringByAppendingPathComponent:@"sdv_perf.cfg"];
     NSString *s = [NSString stringWithFormat:@"1,%d", trimLogs ? 1 : 0]; // v6 locked 2.0x
@@ -183,7 +193,7 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
 
     if (docsPath.length) {
         BOOL trimLogs = [self trimLogsEnabledForDocs:docsPath];
-        [self saveTrimLogs:trimLogs toDocs:docsPath]; // v6: always enforce 2.0x locked
+        [self savePerfConfig:1 trimLogs:trimLogs toDocs:docsPath]; // v6: always enforce 2.0x locked
         NSString *errDir = [docsPath stringByAppendingPathComponent:@"ErrorLogs"];
         NSString *cur = [errDir stringByAppendingPathComponent:@"ram-monitor.log"];
         NSString *prev = [errDir stringByAppendingPathComponent:@"ram-monitor-previous.log"];
@@ -195,7 +205,7 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
         }
         _logPath = cur;
         SDVRamSnapshot s0 = [self sample];
-        [self appendLogLine:[NSString stringWithFormat:@"=== Garden Launcher v6 RAM Monitor Started | Device RAM: %.2f GB | Initial Budget: %@ | RenderScale: 2.0x Locked ===",
+        [self appendLogLine:[NSString stringWithFormat:@"=== Garden Launcher v7 RAM Monitor Started | Device RAM: %.2f GB | Initial Budget: %@ | RenderScale: Dynamic Native ===",
             (double)s0.deviceBytes / (1024.0 * 1024.0 * 1024.0), sdvFmtMemMB(s0.budgetBytes)]];
     }
 

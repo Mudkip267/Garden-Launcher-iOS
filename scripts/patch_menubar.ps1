@@ -1,10 +1,6 @@
-﻿param(
-    [string]$WorkDir  = (Join-Path $env:TEMP 'sdv-clean-ui'),
-    [string]$CecilDll = (Join-Path $env:TEMP 'sdv-viewport\Mono.Cecil.dll')
-)
-$ErrorActionPreference = 'Stop'
-$d = $WorkDir
-[void][Reflection.Assembly]::LoadFrom($CecilDll)
+﻿$ErrorActionPreference = 'Stop'
+$d = Join-Path $env:TEMP 'sdv-clean-ui'
+[void][Reflection.Assembly]::LoadFrom((Join-Path $env:TEMP 'sdv-viewport\Mono.Cecil.dll'))
 $ops = [Mono.Cecil.Cil.OpCodes]
 
 function Expand-ShortBranches($body) {

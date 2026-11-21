@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>SDVMobileControls</AssemblyName>
+    <RootNamespace>SDVMobileControls</RootNamespace>
+    <LangVersion>10.0</LangVersion>
+    <Nullable>disable</Nullable>
+    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+    <DebugType>none</DebugType>
+    <Optimize>true</Optimize>
+    <NoWarn>$(NoWarn);CA1416;MSB3270</NoWarn>
+    <SdvRefsDir Condition="'$(SdvRefsDir)' == ''">$(TEMP)\sdv-refs</SdvRefsDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="SMAPI.Toolkit.CoreInterfaces">
+      <HintPath>$(SdvRefsDir)\SMAPI.Toolkit.CoreInterfaces.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Stardew Valley">
+      <HintPath>$(SdvRefsDir)\Stardew Valley.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="StardewValley.GameData">
+      <HintPath>$(SdvRefsDir)\StardewValley.GameData.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="MonoGame.Framework">
+      <HintPath>$(SdvRefsDir)\MonoGame.Framework.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="xTile">
+      <HintPath>$(SdvRefsDir)\xTile.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="StardewModdingAPI">
+      <HintPath>$(SdvRefsDir)\StardewModdingAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

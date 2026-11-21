@@ -243,3 +243,175 @@ static long long sdvNextRev(void) {
 }
 
 @end
+
+// ---- Mobile Touch Controls Config (Documents/sdv_mobile_ctrl.cfg -> SDVMobileControls.dll) ----
+@interface SDVCustomKeyEntry : NSObject
+@property(nonatomic, assign) NSInteger keyId;
+@property(nonatomic, copy) NSString *label;
+@property(nonatomic, assign) NSInteger keyCode;
+@property(nonatomic, assign) float x, y, w, h;
+@end
+@implementation SDVCustomKeyEntry @end
+
+@interface SDVMobileCtrlConfig : NSObject
+@property(nonatomic, assign) NSInteger mode; // 0=Gamepad, 1=InvisibleJoy+2Btn, 2=VisibleJoy+2Btn, 3=TapToMove, 4=Hybrid
+@property(nonatomic, assign) BOOL autoTool;
+@property(nonatomic, assign) BOOL autoAttack; // Default OFF
+@property(nonatomic, assign) BOOL pinchZoom;
+@property(nonatomic, assign) BOOL showTouchHint; // Default OFF (no blinking)
+@property(nonatomic, assign) BOOL showTopUtility;
+@property(nonatomic, assign) BOOL swapRightButtons;
+@property(nonatomic, assign) BOOL mobileShopAndDrag;
+@property(nonatomic, assign) float buttonScale;
+@property(nonatomic, strong) NSMutableArray<SDVCustomKeyEntry *> *customKeys;
+
++(instancetype)defaults;
++(instancetype)loadFromDocuments:(NSString *)docsPath;
+-(void)saveToDocuments:(NSString *)docsPath;
+-(SDVCustomKeyEntry *)addCustomKeyLabel:(NSString *)label keyCode:(NSInteger)keyCode;
+-(void)removeCustomKeyWithId:(NSInteger)keyId;
++(void)triggerEditLayoutInDocs:(NSString *)docsPath;
+@end
+
+@implementation SDVMobileCtrlConfig
+
++(instancetype)defaults {
+    SDVMobileCtrlConfig *c = [SDVMobileCtrlConfig new];
+    c.mode = 1;
+    c.autoTool = YES;
+    c.autoAttack = NO;
+    c.pinchZoom = YES;
+    c.showTouchHint = NO; // Default OFF (no flashing!)
+    c.showTopUtility = YES;
+    c.swapRightButtons = NO;
+    c.mobileShopAndDrag = YES;
+    c.buttonScale = 1.00f;
+    c.customKeys = [NSMutableArray array];
+    return c;
+}
+
++(instancetype)loadFromDocuments:(NSString *)docsPath {
+    SDVMobileCtrlConfig *c = [self defaults];
+    if (!docsPath.length) return c;
+    NSString *p = [docsPath stringByAppendingPathComponent:@"sdv_mobile_ctrl.cfg"];
+    NSString *raw = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil];
+    if (!raw.length) return c;
+    for (NSString *line in [raw componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
+        NSRange eq = [line rangeOfString:@"="];
+        if (eq.location == NSNotFound) continue;
+        NSString *k = [[line substringToIndex:eq.location] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].lowercaseString;
+        NSString *v = [[line substringFromIndex:eq.location + 1] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if ([k isEqualToString:@"mode"]) {
+            NSInteger m = v.integerValue;
+            if (m >= 0 && m <= 4) c.mode = m;
+        } else if ([k isEqualToString:@"autotool"]) {
+            c.autoTool = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
+        } else if ([k isEqualToString:@"autoattack"]) {
+            c.autoAttack = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
+        } else if ([k isEqualToString:@"pinchzoom"]) {
+            c.pinchZoom = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
+        } else if ([k isEqualToString:@"touchhint2"]) {
+            c.showTouchHint = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
+        } else if ([k isEqualToString:@"toputility"]) {
+            c.showTopUtility = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
+        } else if ([k isEqualToString:@"swapbuttons"]) {
+            c.swapRightButtons = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
+        } else if ([k isEqualToString:@"mobileshopdrag"]) {
+            c.mobileShopAndDrag = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
+        } else if ([k isEqualToString:@"buttonscale"]) {
+            c.buttonScale = sdvClampf(v.floatValue, 0.75f, 1.45f);
+        } else if ([k isEqualToString:@"ckey"] && c.customKeys.count < 16) {
+            NSArray<NSString *> *pts = [v componentsSeparatedByString:@"|"];
+            if (pts.count >= 7 && pts[2].integerValue > 0) {
+                SDVCustomKeyEntry *e = [SDVCustomKeyEntry new];
+                e.keyId = pts[0].integerValue;
+                e.label = pts[1].length ? pts[1] : @"KEY";
+                e.keyCode = pts[2].integerValue;
+                e.x = sdvClampf(pts[3].floatValue, 0.0f, 0.95f);
+                e.y = sdvClampf(pts[4].floatValue, 0.0f, 0.92f);
+                e.w = sdvClampf(pts[5].floatValue, 0.035f, 0.35f);
+                e.h = sdvClampf(pts[6].floatValue, 0.050f, 0.45f);
+                [c.customKeys addObject:e];
+            }
+        }
+    }
+    return c;
+}
+
+-(SDVCustomKeyEntry *)addCustomKeyLabel:(NSString *)label keyCode:(NSInteger)keyCode {
+    if (self.customKeys.count >= 16) return nil;
+    NSInteger nextId = 1;
+    for (SDVCustomKeyEntry *e in self.customKeys) {
+        if (e.keyId >= nextId) nextId = e.keyId + 1;
+    }
+    NSInteger idx = (NSInteger)self.customKeys.count;
+    NSInteger col = idx % 4;
+    NSInteger row = idx / 4;
+    NSString *clean = [[label stringByReplacingOccurrencesOfString:@"|" withString:@""] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].uppercaseString;
+    if (!clean.length) clean = @"KEY";
+    if (clean.length > 6) clean = [clean substringToIndex:6];
+
+    SDVCustomKeyEntry *e = [SDVCustomKeyEntry new];
+    e.keyId = nextId;
+    e.label = clean;
+    e.keyCode = keyCode;
+    e.x = sdvClampf(0.56f + col * 0.085f, 0.05f, 0.90f);
+    e.y = sdvClampf(0.16f + row * 0.135f, 0.08f, 0.84f);
+    e.w = 0.068f;
+    e.h = 0.105f;
+    [self.customKeys addObject:e];
+    return e;
+}
+
+-(void)removeCustomKeyWithId:(NSInteger)keyId {
+    for (NSInteger i = (NSInteger)self.customKeys.count - 1; i >= 0; i--) {
+        if (self.customKeys[i].keyId == keyId) {
+            [self.customKeys removeObjectAtIndex:i];
+            break;
+        }
+    }
+}
+
+-(void)saveToDocuments:(NSString *)docsPath {
+    if (!docsPath.length) return;
+    [NSFileManager.defaultManager createDirectoryAtPath:docsPath withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *p = [docsPath stringByAppendingPathComponent:@"sdv_mobile_ctrl.cfg"];
+
+    // Preserve custom Edit Layout coordinates (inv_*, vis_*, topbar_*) saved by SDVMobileControls.dll
+    NSMutableArray<NSString *> *extraLines = [NSMutableArray array];
+    NSString *existing = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil];
+    if (existing.length) {
+        for (NSString *line in [existing componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
+            NSString *tr = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            if (!tr.length) continue;
+            if ([tr hasPrefix:@"inv_"] || [tr hasPrefix:@"vis_"] || [tr hasPrefix:@"topbar_"]) {
+                [extraLines addObject:tr];
+            }
+        }
+    }
+
+    NSMutableString *s = [NSMutableString stringWithFormat:
+        @"mode=%ld\nautotool=%d\nautoattack=%d\npinchzoom=%d\ntouchhint2=%d\ntoputility=%d\nswapbuttons=%d\nmobileshopdrag=%d\nbuttonscale=%.2f\n",
+        (long)self.mode, self.autoTool ? 1 : 0, self.autoAttack ? 1 : 0,
+        self.pinchZoom ? 1 : 0, self.showTouchHint ? 1 : 0,
+        self.showTopUtility ? 1 : 0, self.swapRightButtons ? 1 : 0,
+        self.mobileShopAndDrag ? 1 : 0,
+        sdvClampf(self.buttonScale, 0.75f, 1.45f)];
+    for (NSString *ex in extraLines) {
+        [s appendFormat:@"%@\n", ex];
+    }
+    for (SDVCustomKeyEntry *e in self.customKeys) {
+        [s appendFormat:@"ckey=%ld|%@|%ld|%.3f|%.3f|%.3f|%.3f\n",
+            (long)e.keyId, e.label ?: @"KEY", (long)e.keyCode, e.x, e.y, e.w, e.h];
+    }
+    [s writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:nil];
+}
+
++(void)triggerEditLayoutInDocs:(NSString *)docsPath {
+    if (!docsPath.length) return;
+    [NSFileManager.defaultManager createDirectoryAtPath:docsPath withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *flag = [docsPath stringByAppendingPathComponent:@"sdv_mobile_edit.flag"];
+    [@"1" writeToFile:flag atomically:YES encoding:NSUTF8StringEncoding error:nil];
+}
+
+@end

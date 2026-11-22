@@ -213,6 +213,21 @@ static void sdvApplyAutoHideHomeIndicator(UIViewController *vc) {
 @implementation SDVSceneHostWindow
 @end
 
+// ---- Transparent Toast / Banner VC (keeps Status Bar hidden & Home Indicator deferred on all iOS 14-27+) ----
+@interface SDVOverlayToastController : UIViewController
+@end
+@implementation SDVOverlayToastController
+-(void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = UIColor.clearColor;
+    self.view.userInteractionEnabled = NO;
+}
+-(BOOL)prefersStatusBarHidden { return YES; }
+-(BOOL)prefersHomeIndicatorAutoHidden { return NO; }
+-(UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }
+-(UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
+@end
+
 // ---- Pass-through Overlay Window (never steals touches outside interactiveView) ----
 @interface SDVPassThroughWindow : UIWindow
 @property(nonatomic, weak) UIView *interactiveView;
@@ -1018,9 +1033,7 @@ static SDVGardenGestureHost *gSdvGardenHost = nil;
     tw.userInteractionEnabled = NO;
     tw.interactiveView = nil;
 
-    UIViewController *vc = [UIViewController new];
-    vc.view.backgroundColor = UIColor.clearColor;
-    vc.view.userInteractionEnabled = NO;
+    SDVOverlayToastController *vc = [SDVOverlayToastController new];
     tw.rootViewController = vc;
 
     UIVisualEffectView *pill = mkGlassCard(UIBlurEffectStyleSystemMaterialDark, 16.0);
@@ -1086,9 +1099,7 @@ static SDVGardenGestureHost *gSdvGardenHost = nil;
     tw.userInteractionEnabled = NO;
     tw.interactiveView = nil;
 
-    UIViewController *vc = [UIViewController new];
-    vc.view.backgroundColor = UIColor.clearColor;
-    vc.view.userInteractionEnabled = NO;
+    SDVOverlayToastController *vc = [SDVOverlayToastController new];
     tw.rootViewController = vc;
 
     UIVisualEffectView *pill = mkGlassCard(UIBlurEffectStyleSystemChromeMaterialDark, 16.0);
@@ -1183,6 +1194,11 @@ static SDVGardenGestureHost *gSdvGardenHost = nil;
     } completion:^(BOOL finished) {
         gw.hidden = YES;
         gw.rootViewController = nil;
+        UIWindow *game = [self gameWindow];
+        if (game) {
+            [game makeKeyAndVisible];
+            if (game.rootViewController) sdvApplyAutoHideHomeIndicator(game.rootViewController);
+        }
     }];
 }
 

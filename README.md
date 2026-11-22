@@ -29,10 +29,10 @@
 ## ✨ Tính năng chính
 
 - **Quản lý Mod & Việt hóa trong game** — Chạm **3 ngón tay × 2** để mở Mod Garden; hỗ trợ cài trực tiếp `.ZIP`, `.RAR`, `.7Z`, `.TAR.GZ`, `.XNB` hoặc thư mục, bật/tắt, xóa và hoàn tác an toàn.
-- **Điều khiển kiểu Mobile & Phím PC** — 4 chế độ (*Vô hình*, *2 Nút*, *Chạm đi A\**, *Kết hợp*), kéo thả chỉnh cỡ nút (`EDIT`), thêm tới 16 phím PC, vuốt/đổi hàng Toolbar (`ROW`), gắn mồi/phao kéo thả, xoay nội thất (`ROT`), kéo ngắm súng cao su, lia camera ở Robin/Bảo tàng, chế tạo 2 chạm an toàn, tự bật bàn phím iOS và tự hiện nút máy thùng cho Mini-game.
+- **Điều khiển kiểu Mobile & Phím PC** — 4 chế độ (*Vô hình*, *2 Nút*, *Chạm đi A\**, *Kết hợp*), kéo thả chỉnh cỡ nút (`EDIT`), thêm tới 16 phím PC, nút `ESC` đa năng cho mọi menu Mod, chỉnh trực tiếp **Cỡ giao diện UI (`75%–150%`)**, vuốt/đổi hàng Toolbar (`ROW`), nút thả vật phẩm (`DROP`), gắn mồi/phao kéo thả, xoay nội thất (`ROT`), chạm trực tiếp ô xung quanh, đặt nhanh Lò Rèn/Máy May, kéo ngắm súng cao su, lia camera ở Robin/Bảo tàng, chế tạo & bó Junimo 2 chạm an toàn, tự bật bàn phím iOS, tự hiện nút Mini-game và giữ mờ thanh Home Bar (tránh bật sáng khi chạm cạnh dưới).
 - **Save Menu 20 mốc + Auto-Save tùy chọn** — Lưu và tải lại tới 20 bản lưu nhanh cùng tùy chọn tự lưu định kỳ slot `[AUTO]` khi đứng yên ngoài hang/mỏ.
 - **Hỗ trợ Shader & Âm thanh chuẩn iOS** — Tương thích mod Shader (`DynamicReflections`, `DynamicShader`...) kèm phản chiếu nhân vật trên mặt nước và âm thanh OpenAL ổn định.
-- **Cảnh báo RAM tự động (`85%` / `90%`) & Tối ưu Cache Map/Recolor** — Tự động xả cache ảnh bản đồ cũ & bản sao trùng của Content Patcher khi chuyển khu vực (không nén ảnh, không ảnh hưởng âm thanh), kèm cảnh báo nhắc lưu game kịp thời tránh văng app.
+- **Cảnh báo RAM tự động (`85%` / `90%`) & Tối ưu Cache Map/Portrait/Thời tiết** — Tự động xả cache bản đồ cũ, chân dung HD NPC ngoài màn hình & bản sao trùng của Content Patcher khi chuyển khu vực (không nén ảnh, không ảnh hưởng âm thanh), kèm giảm hạt lá/cánh hoa bay giữ mượt FPS và cảnh báo nhắc lưu game kịp thời.
 - **Co-op LAN / IP** — Hỗ trợ chơi cùng Wi-Fi LAN hoặc qua ZeroTier / Tailscale.
 
 ---
@@ -59,7 +59,7 @@ dotnet build ModGarden\SDVMobileControls\SDVMobileControls.csproj -c Release
 powershell -ExecutionPolicy Bypass -File scripts\patch_perf_v7.ps1
 
 # 3. Đóng gói 2 bản IPA sạch (iOS 26–27+ & iOS 14–18)
-python scripts\package_embedded.py base-sdvios.ipa build\SDVModGarden_ios26 zsign.exe dist\Garden-Launcher-v7.10-iOS26-27.ipa "$WorkDir\v7-host.dll" "$WorkDir\v7-touch.dll" "$WorkDir\Lidgren.Network.dll" --launcher --min-ios=15.0
+python scripts\package_embedded.py base-sdvios.ipa build\SDVModGarden_ios26 zsign.exe dist\Garden-Launcher-v7.10-iOS26-27.ipa "$WorkDir\v7-host.dll" "$WorkDir\v7-touch.dll" "$WorkDir\Lidgren.Network.dll" --launcher --min-ios=16.0
 python scripts\package_embedded.py base-sdvios.ipa build\SDVModGarden_ios14 zsign.exe dist\Garden-Launcher-v7.10-iOS14-18.ipa "$WorkDir\v7-host.dll" "$WorkDir\v7-touch.dll" "$WorkDir\Lidgren.Network.dll" --launcher --no-scene --min-ios=14.0
 ```
 

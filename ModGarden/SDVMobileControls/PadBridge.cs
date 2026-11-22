@@ -30,6 +30,7 @@ namespace SDVMobileControls
         private readonly MethodInfo _resetSimulatedMouse;
         private readonly MethodInfo _setSimulatedMousePosition;
         private readonly MethodInfo _setSimulatedMouseLeftDown;
+        private readonly MethodInfo _setSimulatedMouseRightDown;
         private readonly MethodInfo _forwardInputToGame;
         private readonly MethodInfo _syncMenuBarConfig;
         private readonly MethodInfo _triggerVirtualKeyboard;
@@ -57,6 +58,10 @@ namespace SDVMobileControls
 
         private readonly PropertyInfo _settingsInstanceProp;
         private readonly PropertyInfo _settingsTargetZoomProp;
+        private readonly PropertyInfo _settingsMouseModeProp;
+        private readonly FieldInfo _rawScreenWidthField;
+        private readonly FieldInfo _rawScreenHeightField;
+        private readonly object _mouseModePointAndClick;
 
         private readonly MethodInfo _drawCenteredString;
 
@@ -90,6 +95,7 @@ namespace SDVMobileControls
             _resetSimulatedMouse = padType.GetMethod("ResetSimulatedMouse", any);
             _setSimulatedMousePosition = padType.GetMethod("set_SimulatedMousePosition", any);
             _setSimulatedMouseLeftDown = padType.GetMethod("set_SimulatedMouseLeftDown", any);
+            _setSimulatedMouseRightDown = padType.GetMethod("set_SimulatedMouseRightDown", any);
             _forwardInputToGame = padType.GetMethod("ForwardInputToGame", any);
             _syncMenuBarConfig = padType.GetMethod("SyncMenuBarConfig", any);
             _triggerVirtualKeyboard = padType.GetMethod("TriggerVirtualKeyboard", any);
@@ -123,6 +129,13 @@ namespace SDVMobileControls
             Type setType = asm.GetType("SDViOSTouchControls.TouchOverlaySettings");
             _settingsInstanceProp = setType?.GetProperty("Instance", stat);
             _settingsTargetZoomProp = setType?.GetProperty("TargetZoomLevel", any);
+            _settingsMouseModeProp = setType?.GetProperty("MouseControlMode", any);
+            _rawScreenWidthField = padType.GetField("_rawScreenWidth", any);
+            _rawScreenHeightField = padType.GetField("_rawScreenHeight", any);
+            if (_settingsMouseModeProp != null && _settingsMouseModeProp.PropertyType.IsEnum)
+            {
+                try { _mouseModePointAndClick = Enum.ToObject(_settingsMouseModeProp.PropertyType, 0); } catch { }
+            }
 
             Type fontType = asm.GetType("SDViOSTouchControls.OverlayFont");
             _drawCenteredString = fontType?.GetMethod("DrawCenteredString", stat, null,
@@ -383,14 +396,39 @@ namespace SDVMobileControls
             catch { }
         }
 
+        public void SyncScreenBoundsAndMouseOverride(object pad, int rawW, int rawH)
+        {
+            if (pad == null) return;
+            try
+            {
+                if (rawW > 0 && _rawScreenWidthField != null)
+                    _rawScreenWidthField.SetValue(pad, rawW);
+                if (rawH > 0 && _rawScreenHeightField != null)
+                    _rawScreenHeightField.SetValue(pad, rawH);
+                if (_settingsInstanceProp != null && _settingsMouseModeProp != null && _mouseModePointAndClick != null)
+                {
+                    object st = _settingsInstanceProp.GetValue(null);
+                    if (st != null)
+                    {
+                        object cur = _settingsMouseModeProp.GetValue(st);
+                        if (cur != null && Convert.ToInt32(cur) == 2) // 2 = MouseMode.Disabled breaks PrefixMouseGetState!
+                            _settingsMouseModeProp.SetValue(st, _mouseModePointAndClick);
+                    }
+                }
+            }
+            catch { }
+        }
+
         public void ApplyInput(object pad, Vector2 stick, bool btnX, bool btnA, bool btnMenu)
         {
             ApplyInputWithMouse(pad, stick, btnX, btnA, btnMenu, null, false);
         }
 
-        public void ApplyInputWithMouse(object pad, Vector2 stick, bool btnX, bool btnA, bool btnMenu, Point? mousePos, bool mouseLeftDown)
+        public void ApplyInputWithMouse(object pad, Vector2 stick, bool btnX, bool btnA, bool btnMenu, Point? mousePos, bool mouseLeftDown, bool mouseRightDown = false, int rawW = 0, int rawH = 0)
         {
             if (pad == null) return;
+            if (rawW > 0 && rawH > 0)
+                SyncScreenBoundsAndMouseOverride(pad, rawW, rawH);
             _arg1[0] = stick;
             _setLeftStick?.Invoke(pad, _arg1);
             _setButtonX?.Invoke(pad, btnX ? _argBoolTrue : _argBoolFalse);
@@ -405,6 +443,7 @@ namespace SDVMobileControls
                 _arg1[0] = mousePos.Value;
                 _setSimulatedMousePosition?.Invoke(pad, _arg1);
                 _setSimulatedMouseLeftDown?.Invoke(pad, mouseLeftDown ? _argBoolTrue : _argBoolFalse);
+                _setSimulatedMouseRightDown?.Invoke(pad, mouseRightDown ? _argBoolTrue : _argBoolFalse);
             }
             else
             {

@@ -59,6 +59,9 @@ namespace SDVMobileControls
         public float PixelOpacity { get; set; } = 1.0f;           // 0.25..1.00 opacity scale for Pixel-Art touch controls
         public bool LeftHandedMobile { get; set; } = false;       // 1-tap mirror layout for left-handed players (Joy right, Buttons left)
         public float JoyDeadzone { get; set; } = 0.11f;           // 0.05..0.25 joystick deadzone sensitivity
+        public float ToolbarSize { get; set; } = 1.00f;           // 0.60..1.45 thickness / slot size of vertical toolbar
+        public float ToolbarOpacity { get; set; } = 0.90f;        // 0.20..1.00 opacity of vertical toolbar
+        public bool ShowToolHitLocation { get; set; } = true;     // Always show red tool hit box (PC default false -> essential for mobile!)
 
         // Normalized layout (0..1 of viewport) for Invisible Mode: Left Joystick Rect + 2 Right Vertical Rectangular Bars
         public float InvJoyX { get; set; }
@@ -379,6 +382,9 @@ namespace SDVMobileControls
                         case "pixelopacity": PixelOpacity = ParseFloat(v, 1.0f, 0.25f, 1.00f); break;
                         case "lefthanded": LeftHandedMobile = ParseBool(v, false); break;
                         case "joydeadzone": JoyDeadzone = ParseFloat(v, 0.11f, 0.05f, 0.25f); break;
+                        case "tbsize": ToolbarSize = ParseFloat(v, 1.00f, 0.60f, 1.45f); break;
+                        case "tbopacity": ToolbarOpacity = ParseFloat(v, 0.90f, 0.20f, 1.00f); break;
+                        case "toolhitbox": ShowToolHitLocation = ParseBool(v, true); break;
 
                         case "inv_joy_x": InvJoyX = ParseFloat(v, InvJoyX, 0.0f, 0.90f); break;
                         case "inv_joy_y": InvJoyY = ParseFloat(v, InvJoyY, 0.0f, 0.90f); break;
@@ -484,6 +490,9 @@ namespace SDVMobileControls
                 sb.AppendLine($"pixelopacity={PixelOpacity.ToString("0.00", CultureInfo.InvariantCulture)}");
                 sb.AppendLine($"lefthanded={(LeftHandedMobile ? 1 : 0)}");
                 sb.AppendLine($"joydeadzone={JoyDeadzone.ToString("0.00", CultureInfo.InvariantCulture)}");
+                sb.AppendLine($"tbsize={ToolbarSize.ToString("0.00", CultureInfo.InvariantCulture)}");
+                sb.AppendLine($"tbopacity={ToolbarOpacity.ToString("0.00", CultureInfo.InvariantCulture)}");
+                sb.AppendLine($"toolhitbox={(ShowToolHitLocation ? 1 : 0)}");
                 sb.AppendLine($"inv_joy_x={F(InvJoyX)}");
                 sb.AppendLine($"inv_joy_y={F(InvJoyY)}");
                 sb.AppendLine($"inv_joy_w={F(InvJoyW)}");

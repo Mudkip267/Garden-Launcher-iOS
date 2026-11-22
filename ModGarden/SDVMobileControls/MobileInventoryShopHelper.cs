@@ -5,27 +5,37 @@ using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using Microsoft.Xna.Framework.Input.Touch;
 using StardewValley;
+using StardewValley.Inventories;
+using StardewValley.ItemTypeDefinitions;
 using StardewValley.Menus;
 
 namespace SDVMobileControls
 {
     /// <summary>
-    /// Mobile-style Pixel UI Shopping (quantity slider -> direct into Backpack),
-    /// Chest 1-Tap Transfer, Long-Press Split Stack, and 1-Finger Drag-and-Drop / Tap-to-Move
+    /// Authentic Stardew Mobile Texture UI for Shopping, Crafting (Cooking & Workbench),
+    /// Dresser 1-Tap, Chest 1-Tap Transfer, Long-Press Split Stack, and 1-Finger Drag-and-Drop
     /// with ZERO stuck mouse cursor. Zero hardcoded resolutions.
     /// </summary>
     internal sealed class MobileInventoryShopHelper
     {
+        private static readonly Rectangle MobileBoxSrc = new Rectangle(0, 256, 60, 60);
         private static readonly MethodInfo ShopTryPurchaseMethod =
             typeof(ShopMenu).GetMethod("tryToPurchaseItem", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        private static readonly FieldInfo ShopIsStorageField =
+            typeof(ShopMenu).GetField("_isStorageShop", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly MethodInfo CraftClickRecipeMethod =
+            typeof(CraftingPage).GetMethod("clickCraftingRecipe", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
 
-        private enum PopupKind { None = 0, ShopBuy = 1, ShopSell = 2, ChestSplit = 3, BagSplit = 4 }
+        private enum PopupKind { None = 0, ShopBuy = 1, ShopSell = 2, ChestSplit = 3, BagSplit = 4, Craft = 5 }
 
         // Active Popup state
         private PopupKind _popupKind = PopupKind.None;
         private IClickableMenu _popupOwnerMenu;
         private ISalable _popupSaleItem;
         private Item _popupItem;
+        private CraftingPage _popupCraftPage;
+        private ClickableTextureComponent _popupCraftBtn;
+        private CraftingRecipe _popupCraftRecipe;
         private InventoryMenu _popupSrcInv;
         private InventoryMenu _popupDstInv;
         private int _popupSrcSlot = -1;
@@ -35,12 +45,14 @@ namespace SDVMobileControls
         private int _popupMaxQty = 1;
         private int _popupUnitPrice;
         private int _popupCurrency;
+        private int _popupStock = ShopMenu.infiniteStock;
         private string _popupTradeItemId;
         private int _popupTradeCount;
         private bool _popupCanAfford = true;
 
         // Popup interactive rects (viewport pixel space)
         private Rectangle _popPanel;
+        private Rectangle _popCloseX;
         private Rectangle _popSliderTrack;
         private Rectangle _popBtnM10;
         private Rectangle _popBtnM1;
@@ -98,12 +110,115 @@ namespace SDVMobileControls
             _popupOwnerMenu = null;
             _popupSaleItem = null;
             _popupItem = null;
+            _popupCraftPage = null;
+            _popupCraftBtn = null;
+            _popupCraftRecipe = null;
             _popupSrcInv = null;
             _popupDstInv = null;
             _popupSrcSlot = -1;
+            _popupStock = ShopMenu.infiniteStock;
             _popSliderTouchId = -1;
             _popHoldTouchId = -1;
             _popHoldDelta = 0;
+        }
+
+        private static bool IsStorageShop(ShopMenu shop)
+        {
+            if (shop == null) return false;
+            try
+            {
+                if (ShopIsStorageField != null && ShopIsStorageField.GetValue(shop) is bool b && b)
+                    return true;
+            }
+            catch { }
+            return false;
+        }
+
+        public bool OpenCraftingPopup(IClickableMenu ownerMenu, CraftingPage cp, ClickableTextureComponent recipeBtn, CraftingRecipe recipe, int consumeTouchId)
+        {
+            if (ownerMenu == null || cp == null || recipeBtn == null || recipe == null)
+                return false;
+
+            Item preview = null;
+            try { preview = recipe.createItem(); } catch { }
+
+            int craftable = 0;
+            IList<Item> matItems = GetContainerItemsList(cp._materialContainers);
+            try { craftable = recipe.getCraftableCount(matItems); } catch { craftable = 0; }
+            if (craftable <= 0)
+            {
+                try
+                {
+                    if (recipe.doesFarmerHaveIngredientsInInventory(matItems))
+                        craftable = 1;
+                }
+                catch { }
+            }
+
+            _popupKind = PopupKind.Craft;
+            _popupOwnerMenu = ownerMenu;
+            _popupCraftPage = cp;
+            _popupCraftBtn = recipeBtn;
+            _popupCraftRecipe = recipe;
+            _popupItem = preview;
+            _popupSaleItem = preview;
+            _popupMinQty = 1;
+            _popupMaxQty = Math.Clamp(Math.Max(1, craftable), 1, 999);
+            _popupQty = 1;
+            _popupUnitPrice = 0;
+            _popupTradeItemId = null;
+            _popupTradeCount = 0;
+            _popupCanAfford = craftable >= 1;
+            _popConsumeTouchId = consumeTouchId;
+            try { Game1.playSound("smallSelect"); } catch { }
+            return true;
+        }
+
+        private static int CountMatchingCraftIngredients(string rawId, IList<Item> extraItems)
+        {
+            if (string.IsNullOrEmpty(rawId)) return 0;
+            int total = 0;
+            try
+            {
+                var pItems = Game1.player?.Items;
+                if (pItems != null)
+                {
+                    for (int i = 0; i < pItems.Count; i++)
+                    {
+                        Item it = pItems[i];
+                        if (it != null && CraftingRecipe.ItemMatchesForCrafting(it, rawId))
+                            total += it.Stack;
+                    }
+                }
+                if (extraItems != null)
+                {
+                    for (int i = 0; i < extraItems.Count; i++)
+                    {
+                        Item it = extraItems[i];
+                        if (it != null && CraftingRecipe.ItemMatchesForCrafting(it, rawId))
+                            total += it.Stack;
+                    }
+                }
+            }
+            catch { }
+            return total;
+        }
+
+        private static IList<Item> GetContainerItemsList(List<IInventory> containers)
+        {
+            if (containers == null || containers.Count == 0)
+                return null;
+            var all = new List<Item>();
+            for (int i = 0; i < containers.Count; i++)
+            {
+                var inv = containers[i];
+                if (inv == null) continue;
+                for (int j = 0; j < inv.Count; j++)
+                {
+                    if (inv[j] != null) all.Add(inv[j]);
+                }
+            }
+            return all;
         }
 
         private void ResetTouch()
@@ -125,7 +240,8 @@ namespace SDVMobileControls
             int vpW, int vpH,
             double nowSec)
         {
-            if (activeMenu == null || (IsPopupOpen && activeMenu != _popupOwnerMenu))
+            if (activeMenu == null || (IsPopupOpen && activeMenu != _popupOwnerMenu) ||
+                (_popupKind == PopupKind.Craft && activeMenu is GameMenu gmCraft && !ReferenceEquals(gmCraft.GetCurrentPage(), _popupCraftPage)))
             {
                 Reset();
                 return false;
@@ -298,13 +414,28 @@ namespace SDVMobileControls
                         int saleIdx = shop.currentItemIndex + btnIdx;
                         if (saleIdx >= 0 && saleIdx < shop.forSale.Count)
                         {
-                            OpenShopBuyPopup(shop, shop.forSale[saleIdx], shop.forSaleButtons[btnIdx].bounds.Center);
+                            ISalable sale = shop.forSale[saleIdx];
+                            Point uiCenter = shop.forSaleButtons[btnIdx].bounds.Center;
+                            if (IsStorageShop(shop))
+                            {
+                                // 1-Tap Dresser withdraw directly into Backpack (zero "Mua 0g" popup!)
+                                DirectBuyOneIntoBackpack(shop, sale, uiCenter);
+                                return true;
+                            }
+                            OpenShopBuyPopup(shop, sale, uiCenter);
                             return true;
                         }
                     }
                     else if (sellInv != null && sellSlot >= 0 && sellItem != null)
                     {
-                        OpenShopSellPopup(shop, sellInv, sellSlot, sellItem, sellInv.inventory[sellSlot].bounds.Center);
+                        Point uiCenter = sellInv.inventory[sellSlot].bounds.Center;
+                        if (IsStorageShop(shop))
+                        {
+                            // 1-Tap Dresser store directly from Backpack (zero "Bán 0g" popup!)
+                            try { shop.receiveLeftClick(uiCenter.X, uiCenter.Y, true); } catch { }
+                            return true;
+                        }
+                        OpenShopSellPopup(shop, sellInv, sellSlot, sellItem, uiCenter);
                         return true;
                     }
                 }
@@ -312,6 +443,41 @@ namespace SDVMobileControls
             }
 
             return true;
+        }
+
+        private static void DirectBuyOneIntoBackpack(ShopMenu shop, ISalable sale, Point uiCenter)
+        {
+            if (shop == null || sale == null) return;
+            if (shop.heldItem is Item prevHeld)
+                shop.heldItem = Game1.player.addItemToInventory(prevHeld);
+
+            if (!sale.IsRecipe && sale is Item checkItem && !Game1.player.couldInventoryAcceptThisItem(checkItem.getOne()))
+            {
+                try { Game1.playSound("cancel"); } catch { }
+                return;
+            }
+
+            bool soldOut = false;
+            try
+            {
+                if (ShopTryPurchaseMethod != null)
+                    soldOut = (bool)ShopTryPurchaseMethod.Invoke(shop, new object[] { sale, null, 1, uiCenter.X, uiCenter.Y });
+            }
+            catch { soldOut = false; }
+
+            if (soldOut)
+            {
+                try
+                {
+                    shop.itemPriceAndStock?.Remove(sale);
+                    shop.forSale?.Remove(sale);
+                }
+                catch { }
+            }
+            if (shop.heldItem is Item bought)
+                shop.heldItem = Game1.player.addItemToInventory(bought);
+            else
+                shop.heldItem = null;
         }
 
         private void OpenShopBuyPopup(ShopMenu shop, ISalable sale, Point uiCenter)
@@ -355,6 +521,7 @@ namespace SDVMobileControls
             _popupQty = 1;
             _popupUnitPrice = price;
             _popupCurrency = shop.currency;
+            _popupStock = stock;
             _popupTradeItemId = tradeId;
             _popupTradeCount = tradeCount;
             _popupCanAfford = (affordable >= 1 && maxByStock >= 1);
@@ -401,8 +568,13 @@ namespace SDVMobileControls
                     shop.heldItem = Game1.player.addItemToInventory(prevHeld);
                 }
 
-                // Check Backpack capacity before buying non-recipe physical items so items never get stuck on cursor!
-                if (!_popupSaleItem.IsRecipe && _popupSaleItem is Item checkItem)
+                // Do NOT block Clint's Tool Upgrades / special action purchases (which remove the old tool or trigger instant services!) when Backpack is full
+                bool isUpgradeOrService = _popupSaleItem.IsRecipe
+                    || _popupSaleItem is Tool
+                    || shop.onPurchase != null
+                    || (!string.IsNullOrEmpty(shop.ShopId) && shop.ShopId.IndexOf("Upgrade", StringComparison.OrdinalIgnoreCase) >= 0);
+
+                if (!isUpgradeOrService && _popupSaleItem is Item checkItem)
                 {
                     Item probe = checkItem.getOne();
                     probe.Stack = _popupQty;
@@ -446,6 +618,58 @@ namespace SDVMobileControls
                 else
                 {
                     shop.heldItem = null;
+                }
+            }
+            else if (_popupKind == PopupKind.Craft && _popupCraftPage != null && _popupCraftBtn != null && _popupCraftRecipe != null)
+            {
+                if (!_popupCanAfford)
+                {
+                    try { Game1.playSound("cancel"); } catch { }
+                    return;
+                }
+
+                // Clear any leftover heldItem first
+                if (_popupCraftPage.heldItem != null && Game1.player != null)
+                {
+                    try { _popupCraftPage.heldItem = Game1.player.addItemToInventory(_popupCraftPage.heldItem); } catch { }
+                }
+
+                int craftedAny = 0;
+                for (int c = 0; c < _popupQty; c++)
+                {
+                    int avail = 0;
+                    try { avail = _popupCraftRecipe.getCraftableCount(GetContainerItemsList(_popupCraftPage._materialContainers)); } catch { avail = 0; }
+                    if (avail <= 0)
+                        break;
+
+                    // Verify Backpack can accept crafted item before consuming materials
+                    try
+                    {
+                        Item testOut = _popupCraftRecipe.createItem();
+                        if (testOut != null && Game1.player != null && !Game1.player.couldInventoryAcceptThisItem(testOut))
+                        {
+                            if (craftedAny == 0)
+                                try { Game1.playSound("cancel"); } catch { }
+                            break;
+                        }
+                    }
+                    catch { }
+
+                    try
+                    {
+                        if (CraftClickRecipeMethod != null)
+                            CraftClickRecipeMethod.Invoke(_popupCraftPage, new object[] { _popupCraftBtn, c == 0 });
+                    }
+                    catch { break; }
+
+                    if (_popupCraftPage.heldItem != null && Game1.player != null)
+                    {
+                        Item rem = Game1.player.addItemToInventory(_popupCraftPage.heldItem);
+                        _popupCraftPage.heldItem = rem;
+                        if (rem != null)
+                            break;
+                    }
+                    craftedAny++;
                 }
             }
             else if (_popupKind == PopupKind.ShopSell && _popupOwnerMenu is ShopMenu sellShop && _popupSrcInv != null && _popupSrcSlot >= 0)
@@ -1201,7 +1425,7 @@ namespace SDVMobileControls
                 return;
             }
 
-            if (_popBtnCancel.Contains(pt) || !_popPanel.Contains(pt))
+            if (_popBtnCancel.Contains(pt) || _popCloseX.Contains(pt) || !_popPanel.Contains(pt))
             {
                 _popConsumeTouchId = tl.Id;
                 ClosePopup();
@@ -1225,34 +1449,45 @@ namespace SDVMobileControls
 
         private void ComputePopupLayout(int vpW, int vpH)
         {
-            int pw = (int)Math.Clamp(vpW * 0.50f, 360f, vpW * 0.88f);
+            bool isCraft = _popupKind == PopupKind.Craft;
+            bool isShop = _popupKind == PopupKind.ShopBuy || _popupKind == PopupKind.ShopSell;
             bool hasSlider = _popupMaxQty > _popupMinQty;
-            int ph = (int)Math.Clamp(vpH * (hasSlider ? 0.60f : 0.40f), 250f, vpH * 0.86f);
+
+            float wFrac = isCraft ? 0.58f : (isShop ? 0.54f : 0.48f);
+            float hFrac = isCraft
+                ? (hasSlider ? 0.78f : 0.62f)
+                : (isShop ? (hasSlider ? 0.68f : 0.48f) : (hasSlider ? 0.58f : 0.40f));
+
+            int pw = (int)Math.Clamp(vpW * wFrac, 380f, vpW * 0.90f);
+            int ph = (int)Math.Clamp(vpH * hFrac, 260f, vpH * 0.90f);
             int px = (vpW - pw) / 2;
             int py = (vpH - ph) / 2;
             _popPanel = new Rectangle(px, py, pw, ph);
 
-            int pad = Math.Max(28, pw / 18);
-            int trackH = Math.Max(24, ph / 18);
-            int sliderY = py + (int)(ph * 0.43f);
-            _popSliderTrack = new Rectangle(px + pad, sliderY, pw - pad * 2, trackH);
+            int closeSz = Math.Max(36, Math.Min(56, vpH / 16));
+            _popCloseX = new Rectangle(_popPanel.Right - closeSz / 2 - 4, _popPanel.Y - closeSz / 3 + 4, closeSz, closeSz);
 
-            int qGap = Math.Max(10, pw / 56);
+            int pad = Math.Max(28, pw / 19);
+            int actH = Math.Max(48, Math.Min(74, ph / 7));
+            int actY = py + ph - pad - actH;
+            int qGap = Math.Max(8, pw / 60);
+            int cancelW = (int)((pw - pad * 2 - qGap) * 0.32f);
+            int confirmW = (pw - pad * 2 - qGap) - cancelW;
+            _popBtnCancel  = new Rectangle(px + pad, actY, cancelW, actH);
+            _popBtnConfirm = new Rectangle(px + pad + cancelW + qGap, actY, confirmW, actH);
+
+            int qH = Math.Max(40, Math.Min(60, ph / 9));
+            int qY = actY - Math.Max(14, ph / 32) - qH;
             int qW = (pw - pad * 2 - qGap * 4) / 5;
-            int qH = Math.Max(44, ph / 7);
-            int qY = sliderY + trackH + Math.Max(22, ph / 14);
             _popBtnM10 = new Rectangle(px + pad, qY, qW, qH);
             _popBtnM1  = new Rectangle(px + pad + (qW + qGap) * 1, qY, qW, qH);
             _popBtnP1  = new Rectangle(px + pad + (qW + qGap) * 2, qY, qW, qH);
             _popBtnP10 = new Rectangle(px + pad + (qW + qGap) * 3, qY, qW, qH);
             _popBtnMax = new Rectangle(px + pad + (qW + qGap) * 4, qY, qW, qH);
 
-            int actH = Math.Max(52, ph / 6);
-            int actY = py + ph - pad - actH;
-            int cancelW = (int)((pw - pad * 2 - qGap) * 0.34f);
-            int confirmW = (pw - pad * 2 - qGap) - cancelW;
-            _popBtnCancel  = new Rectangle(px + pad, actY, cancelW, actH);
-            _popBtnConfirm = new Rectangle(px + pad + cancelW + qGap, actY, confirmW, actH);
+            int trackH = Math.Max(22, Math.Min(34, ph / 20));
+            int sliderY = qY - Math.Max(14, ph / 34) - trackH;
+            _popSliderTrack = new Rectangle(px + pad, sliderY, pw - pad * 2, trackH);
         }
 
         // =========================================================================
@@ -1344,26 +1579,45 @@ namespace SDVMobileControls
 
         private void DrawStardewPixelPopup(SpriteBatch sb, Texture2D pixel, int vpW, int vpH)
         {
-            // Warm dark vignette behind Stardew parchment box
-            sb.Draw(pixel, new Rectangle(0, 0, vpW, vpH), Color.Black * 0.52f);
+            // Warm dark vignette behind Stardew Mobile wooden dialog box
+            sb.Draw(pixel, new Rectangle(0, 0, vpW, vpH), Color.Black * 0.56f);
 
-            // Authentic Stardew Valley wooden parchment dialog box!
+            // Authentic Stardew Valley Mobile wooden 9-slice parchment dialog box!
+            bool drewBox = false;
             try
             {
-                IClickableMenu.drawTextureBox(sb, _popPanel.X, _popPanel.Y, _popPanel.Width, _popPanel.Height, Color.White);
+                if (Game1.menuTexture != null)
+                {
+                    IClickableMenu.drawTextureBox(sb, Game1.menuTexture, MobileBoxSrc,
+                        _popPanel.X, _popPanel.Y, _popPanel.Width, _popPanel.Height, Color.White, 1f, drawShadow: true);
+                    drewBox = true;
+                }
             }
-            catch
+            catch { }
+            if (!drewBox)
             {
-                sb.Draw(pixel, _popPanel, new Color(249, 216, 156));
-                DrawBorder(sb, pixel, _popPanel, 4, new Color(90, 45, 12));
+                try { IClickableMenu.drawTextureBox(sb, _popPanel.X, _popPanel.Y, _popPanel.Width, _popPanel.Height, Color.White); }
+                catch
+                {
+                    sb.Draw(pixel, _popPanel, new Color(249, 216, 156));
+                    DrawBorder(sb, pixel, _popPanel, 4, new Color(90, 45, 12));
+                }
             }
 
-            int pad = Math.Max(28, _popPanel.Width / 18);
-            float fontScale = Math.Clamp(vpH / 760f, 0.85f, 1.85f);
-            float iconScale = Math.Clamp(vpH / 780f, 0.95f, 1.80f);
+            // Official Stardew Valley red close 'X' button on top-right corner!
+            try
+            {
+                if (Game1.mouseCursors != null)
+                    sb.Draw(Game1.mouseCursors, _popCloseX, new Rectangle(337, 494, 12, 12), Color.White);
+            }
+            catch { }
+
+            int pad = Math.Max(28, _popPanel.Width / 19);
+            float fontScale = Math.Clamp(vpH / 790f, 0.78f, 1.65f);
+            float iconScale = Math.Clamp(vpH / 820f, 0.90f, 1.65f);
             int slotPx = (int)(68f * iconScale);
 
-            // Stardew Valley pixel item slot frame + item sprite
+            // Stardew Valley Mobile item slot frame (tile 10) + item sprite
             var slotBox = new Rectangle(_popPanel.X + pad, _popPanel.Y + pad, slotPx, slotPx);
             try
             {
@@ -1377,44 +1631,123 @@ namespace SDVMobileControls
                 try { _popupSaleItem.drawInMenu(sb, iconPos, iconScale, 1f, 1f, StackDrawType.Hide, Color.White, true); } catch { }
             }
 
-            // Item name & price in warm Stardew wood ink (Game1.textColor + parchment shadow!)
+            // Header title & subtitle in warm Stardew wood ink
             float textX = slotBox.Right + Math.Max(14, pad / 2);
             float textY = _popPanel.Y + pad;
+            float maxTextW = Math.Max(160f, (_popPanel.Right - pad - 18) - textX);
 
-            string title = _popupSaleItem?.DisplayName ?? _popupItem?.DisplayName ?? "Vật phẩm";
-            string sub;
+            string title = _popupKind == PopupKind.Craft && _popupCraftRecipe != null
+                ? (_popupCraftRecipe.DisplayName ?? _popupCraftRecipe.name)
+                : (_popupSaleItem?.DisplayName ?? _popupItem?.DisplayName ?? "Vật phẩm");
+            if (_popupKind == PopupKind.Craft && _popupCraftRecipe != null && _popupCraftRecipe.numberProducedPerCraft > 1)
+                title += $" (×{_popupCraftRecipe.numberProducedPerCraft})";
+
+            DrawStardewText(sb, title, new Vector2(textX, textY), Game1.textColor, fontScale * 1.06f);
+            float lineH = Math.Max(26f, vpH / 27f);
+            float curY = textY + lineH * 1.08f;
+
             if (_popupKind == PopupKind.ShopBuy)
             {
                 if (!string.IsNullOrEmpty(_popupTradeItemId) && _popupTradeCount > 0)
-                    sub = $"Đổi: {_popupTradeCount * _popupQty} vật phẩm · SL: {_popupQty}/{_popupMaxQty}";
+                {
+                    int trSz = Math.Max(22, (int)(26f * fontScale));
+                    string trName = "vật phẩm";
+                    try
+                    {
+                        var td = ItemRegistry.GetDataOrErrorItem(_popupTradeItemId);
+                        if (td != null)
+                        {
+                            trName = td.DisplayName ?? trName;
+                            sb.Draw(td.GetTexture(), new Rectangle((int)textX, (int)curY - 2, trSz, trSz), td.GetSourceRect(), Color.White);
+                        }
+                    }
+                    catch { }
+                    int haveTrade = Game1.player?.Items?.CountId(_popupTradeItemId) ?? 0;
+                    int needTrade = _popupTradeCount * _popupQty;
+                    Color trCol = haveTrade >= needTrade ? new Color(36, 118, 42) : new Color(180, 32, 24);
+                    DrawStardewText(sb, $"{trName}: {haveTrade}/{needTrade}", new Vector2(textX + trSz + 8, curY), trCol, fontScale * 0.86f);
+                    curY += lineH;
+                }
                 else
-                    sub = $"Giá: {_popupUnitPrice:N0}g × {_popupQty} = {(_popupUnitPrice * (long)_popupQty):N0}g";
+                {
+                    string unitTag = _popupCurrency == 1 ? "★" : (_popupCurrency == 2 ? "QC" : (_popupCurrency == 4 ? "Qi" : "g"));
+                    string priceSub = _popupUnitPrice <= 0
+                        ? $"Miễn phí · SL: {_popupQty}"
+                        : $"Giá: {_popupUnitPrice:N0}{unitTag} × {_popupQty} = {(_popupUnitPrice * (long)_popupQty):N0}{unitTag}";
+                    if (_popupStock != ShopMenu.infiniteStock && _popupStock > 0)
+                        priceSub += $"  (Còn {_popupStock})";
+                    DrawStardewText(sb, priceSub, new Vector2(textX, curY), new Color(92, 42, 16), fontScale * 0.88f);
+                    curY += lineH;
+
+                    if (_popupUnitPrice > 0)
+                    {
+                        int have = ShopMenu.getPlayerCurrencyAmount(Game1.player, _popupCurrency);
+                        int coinSz = Math.Max(18, (int)(22f * fontScale));
+                        Rectangle coinSrc = _popupCurrency == 1
+                            ? new Rectangle(338, 400, 8, 8)
+                            : new Rectangle(193, 373, 9, 10);
+                        try { sb.Draw(Game1.mouseCursors, new Rectangle((int)textX, (int)curY + 2, coinSz, coinSz), coinSrc, Color.White); } catch { }
+                        Color haveCol = _popupCanAfford ? new Color(36, 118, 42) : new Color(180, 32, 24);
+                        DrawStardewText(sb, $"Hiện có: {have:N0}{unitTag}", new Vector2(textX + coinSz + 8, curY), haveCol, fontScale * 0.84f);
+                        curY += lineH;
+                    }
+                }
             }
             else if (_popupKind == PopupKind.ShopSell)
             {
-                sub = $"Bán: {_popupQty}/{_popupMaxQty} · Thu: {(_popupUnitPrice * (long)_popupQty):N0}g";
+                DrawStardewText(sb, $"Bán: {_popupQty}/{_popupMaxQty} · Thu: {(_popupUnitPrice * (long)_popupQty):N0}g", new Vector2(textX, curY), new Color(92, 42, 16), fontScale * 0.88f);
+                curY += lineH;
+            }
+            else if (_popupKind == PopupKind.Craft && _popupCraftRecipe != null)
+            {
+                string craftMeta = _popupCraftRecipe.isCookingRecipe
+                    ? $"Đã nấu: {_popupCraftRecipe.timesCrafted} lần · Có thể nấu: {(_popupCanAfford ? _popupMaxQty : 0)}"
+                    : $"Đã chế: {_popupCraftRecipe.timesCrafted} lần · Có thể chế: {(_popupCanAfford ? _popupMaxQty : 0)}";
+                Color metaCol = _popupCanAfford ? new Color(36, 118, 42) : new Color(176, 36, 26);
+                DrawStardewText(sb, craftMeta, new Vector2(textX, curY), metaCol, fontScale * 0.84f);
+                curY += lineH;
             }
             else
             {
-                sub = $"Số lượng: {_popupQty} / {_popupMaxQty}";
+                DrawStardewText(sb, $"Số lượng: {_popupQty} / {_popupMaxQty}", new Vector2(textX, curY), new Color(92, 42, 16), fontScale * 0.88f);
+                curY += lineH;
             }
 
-            DrawStardewText(sb, title, new Vector2(textX, textY), Game1.textColor, fontScale * 1.08f);
-            DrawStardewText(sb, sub, new Vector2(textX, textY + Math.Max(32, vpH / 23)), new Color(92, 42, 16), fontScale * 0.90f);
-
-            if (_popupKind == PopupKind.ShopBuy && _popupUnitPrice > 0)
+            // Energy / Health icons for edible items (authentic Stardew Mobile tooltip icons!)
+            if (_popupItem is StardewValley.Object edObj && edObj.Edibility > 0)
             {
-                int have = ShopMenu.getPlayerCurrencyAmount(Game1.player, _popupCurrency);
-                // Pixel gold coin icon from Game1.mouseCursors (193, 373, 9, 10)
-                int coinSz = Math.Max(18, (int)(22f * fontScale));
-                int coinY = (int)(textY + Math.Max(62, vpH / 12.2f));
-                try
+                int en = edObj.staminaRecoveredOnConsumption();
+                int hp = edObj.healthRecoveredOnConsumption();
+                int statSz = Math.Max(18, (int)(22f * fontScale));
+                float sx = textX;
+                try { sb.Draw(Game1.mouseCursors, new Rectangle((int)sx, (int)curY + 2, statSz, statSz), new Rectangle(0, 428, 10, 10), Color.White); } catch { }
+                string enTxt = $"+{en}";
+                DrawStardewText(sb, enTxt, new Vector2(sx + statSz + 5, curY), new Color(34, 122, 44), fontScale * 0.82f);
+                sx += statSz + 5 + MeasureWidth(enTxt, fontScale * 0.82f) + 18f;
+                try { sb.Draw(Game1.mouseCursors, new Rectangle((int)sx, (int)curY + 2, statSz, statSz), new Rectangle(0, 438, 10, 10), Color.White); } catch { }
+                DrawStardewText(sb, $"+{hp}", new Vector2(sx + statSz + 5, curY), new Color(180, 42, 34), fontScale * 0.82f);
+                curY += lineH;
+            }
+
+            // Wooden divider below header
+            int bodyTop = Math.Max(slotBox.Bottom + Math.Max(10, pad / 3), (int)curY + 4);
+            int bodyBot = (_popupMaxQty > _popupMinQty ? _popSliderTrack.Y : _popBtnConfirm.Y) - Math.Max(12, pad / 3);
+            sb.Draw(pixel, new Rectangle(_popPanel.X + pad, bodyTop, _popPanel.Width - pad * 2, Math.Max(2, vpH / 420)), new Color(138, 86, 42) * 0.45f);
+            bodyTop += Math.Max(8, pad / 4);
+
+            // Body area: Ingredient list for Crafting OR Description for Shop
+            if (_popupKind == PopupKind.Craft && _popupCraftRecipe != null && bodyBot > bodyTop + 28)
+            {
+                DrawCraftingIngredientsArea(sb, pixel, _popupCraftPage, _popupCraftRecipe, _popPanel.X + pad, bodyTop, _popPanel.Width - pad * 2, bodyBot - bodyTop, fontScale);
+            }
+            else if ((_popupKind == PopupKind.ShopBuy || _popupKind == PopupKind.ShopSell) && bodyBot > bodyTop + 22)
+            {
+                string desc = "";
+                try { desc = (_popupSaleItem?.getDescription() ?? _popupItem?.getDescription() ?? "").Replace("\r", " ").Replace("\n", " ").Trim(); } catch { }
+                if (!string.IsNullOrEmpty(desc))
                 {
-                    sb.Draw(Game1.mouseCursors, new Rectangle((int)textX, coinY + 2, coinSz, coinSz), new Rectangle(193, 373, 9, 10), Color.White);
+                    DrawWrappedStardewText(sb, desc, _popPanel.X + pad, bodyTop, _popPanel.Width - pad * 2, bodyBot - bodyTop, new Color(86, 46, 22), fontScale * 0.80f);
                 }
-                catch { }
-                Color haveCol = _popupCanAfford ? new Color(36, 118, 42) : new Color(180, 32, 24);
-                DrawStardewText(sb, $"Hiện có: {have:N0}g", new Vector2(textX + coinSz + 8, coinY), haveCol, fontScale * 0.84f);
             }
 
             // Pixel Wooden Slider Track + Stardew Pixel Knob + Step Buttons
@@ -1437,7 +1770,6 @@ namespace SDVMobileControls
                 int kx = _popSliderTrack.X + (int)(usableW * frac);
                 int ky = _popSliderTrack.Center.Y - knobH / 2;
 
-                // Subtle warm gold fill inside track up to knob
                 if (kx > _popSliderTrack.X + 4)
                     sb.Draw(pixel, new Rectangle(_popSliderTrack.X + 4, _popSliderTrack.Y + 4, kx - _popSliderTrack.X, Math.Max(4, _popSliderTrack.Height - 8)), new Color(235, 178, 52) * 0.65f);
 
@@ -1450,28 +1782,34 @@ namespace SDVMobileControls
                     sb.Draw(pixel, new Rectangle(kx, ky, knobW, knobH), new Color(120, 64, 24));
                 }
 
-                DrawStardewPixelButton(sb, _popBtnM10, "-10", Color.White, fontScale * 0.90f);
-                DrawStardewPixelButton(sb, _popBtnM1,  "-1",  Color.White, fontScale * 0.90f);
-                DrawStardewPixelButton(sb, _popBtnP1,  "+1",  Color.White, fontScale * 0.90f);
-                DrawStardewPixelButton(sb, _popBtnP10, "+10", Color.White, fontScale * 0.90f);
+                DrawStardewPixelButton(sb, _popBtnM10, "-10", Color.White, fontScale * 0.88f);
+                DrawStardewPixelButton(sb, _popBtnM1,  "-1",  Color.White, fontScale * 0.88f);
+                DrawStardewPixelButton(sb, _popBtnP1,  "+1",  Color.White, fontScale * 0.88f);
+                DrawStardewPixelButton(sb, _popBtnP10, "+10", Color.White, fontScale * 0.88f);
                 string maxLbl = _popupKind == PopupKind.BagSplit ? "1/2" : "MAX";
-                DrawStardewPixelButton(sb, _popBtnMax, maxLbl, new Color(255, 232, 160), fontScale * 0.90f);
+                DrawStardewPixelButton(sb, _popBtnMax, maxLbl, new Color(255, 232, 160), fontScale * 0.88f);
             }
 
-            // Bottom Pixel Buttons (Hủy + Mua / Bán / Chuyển / Tách)
-            DrawStardewPixelButton(sb, _popBtnCancel, "Hủy", new Color(245, 200, 190), fontScale * 1.0f);
+            // Bottom Stardew Wooden Buttons (Hủy + Mua / Bán / Chế tạo / Chuyển / Tách)
+            DrawStardewPixelButton(sb, _popBtnCancel, "Hủy", new Color(245, 200, 190), fontScale * 0.96f);
 
             string confirmLbl;
             Color confirmTint;
             if (_popupKind == PopupKind.ShopBuy)
             {
-                if (!_popupCanAfford) { confirmLbl = "Không đủ tiền"; confirmTint = new Color(230, 165, 160); }
+                if (!_popupCanAfford) { confirmLbl = "Không đủ điều kiện"; confirmTint = new Color(230, 165, 160); }
                 else { confirmLbl = $"Mua ×{_popupQty}"; confirmTint = new Color(178, 242, 165); }
             }
             else if (_popupKind == PopupKind.ShopSell)
             {
                 confirmLbl = $"Bán ×{_popupQty}";
                 confirmTint = new Color(255, 224, 140);
+            }
+            else if (_popupKind == PopupKind.Craft)
+            {
+                bool cook = _popupCraftRecipe != null && _popupCraftRecipe.isCookingRecipe;
+                if (!_popupCanAfford) { confirmLbl = "Thiếu nguyên liệu"; confirmTint = new Color(230, 165, 160); }
+                else { confirmLbl = cook ? $"Nấu ×{_popupQty}" : $"Chế tạo ×{_popupQty}"; confirmTint = new Color(178, 242, 165); }
             }
             else if (_popupKind == PopupKind.ChestSplit)
             {
@@ -1483,7 +1821,117 @@ namespace SDVMobileControls
                 confirmLbl = $"Tách ×{_popupQty}";
                 confirmTint = new Color(175, 225, 255);
             }
-            DrawStardewPixelButton(sb, _popBtnConfirm, confirmLbl, confirmTint, fontScale * 1.02f);
+            DrawStardewPixelButton(sb, _popBtnConfirm, confirmLbl, confirmTint, fontScale * 0.98f);
+        }
+
+        private void DrawCraftingIngredientsArea(SpriteBatch sb, Texture2D pixel, CraftingPage cp, CraftingRecipe recipe, int x, int y, int w, int h, float fontScale)
+        {
+            if (recipe == null || recipe.recipeList == null) return;
+            float descH = 0f;
+            string desc = "";
+            try { desc = (recipe.description ?? "").Replace("\r", " ").Replace("\n", " ").Trim(); } catch { }
+            if (!string.IsNullOrEmpty(desc) && h > 95)
+            {
+                int maxDescH = Math.Min((int)(h * 0.36f), Math.Max(34, (int)(54f * fontScale)));
+                descH = DrawWrappedStardewText(sb, desc, x, y, w, maxDescH, new Color(86, 46, 22), fontScale * 0.76f) + 6f;
+            }
+
+            int ingTop = y + (int)descH;
+            int ingAvailH = Math.Max(28, (y + h) - ingTop);
+            int count = recipe.recipeList.Count;
+            if (count <= 0) return;
+
+            int cols = count >= 3 && w >= 420 ? 2 : 1;
+            int rows = (count + cols - 1) / cols;
+            int cellH = Math.Clamp(ingAvailH / Math.Max(1, rows), 28, Math.Max(36, (int)(44f * fontScale)));
+            int cellW = cols == 2 ? (w - 14) / 2 : w;
+            int iconSz = Math.Clamp((int)(cellH * 0.80f), 22, 38);
+
+            IList<Item> extraItems = GetContainerItemsList(cp?._materialContainers);
+            int idx = 0;
+            foreach (var kv in recipe.recipeList)
+            {
+                int r = idx / cols;
+                int c = idx % cols;
+                idx++;
+                int cy = ingTop + r * cellH;
+                if (cy + iconSz > y + h + 6) break;
+                int cx = x + c * (cellW + 14);
+
+                string rawId = kv.Key;
+                int need = kv.Value * Math.Max(1, _popupQty);
+                int have = CountMatchingCraftIngredients(rawId, extraItems);
+
+                // Subtle recessed parchment strip behind each ingredient row
+                sb.Draw(pixel, new Rectangle(cx, cy + 1, cellW, cellH - 3), new Color(185, 132, 72) * 0.18f);
+
+                string spriteId = rawId;
+                try { spriteId = recipe.getSpriteIndexFromRawIndex(rawId); } catch { }
+                string fallbackDisplayName = null;
+                try
+                {
+                    var pdata = ItemRegistry.GetDataOrErrorItem(spriteId);
+                    if (pdata != null)
+                    {
+                        fallbackDisplayName = pdata.DisplayName;
+                        sb.Draw(pdata.GetTexture(), new Rectangle(cx + 4, cy + (cellH - iconSz) / 2, iconSz, iconSz), pdata.GetSourceRect(), Color.White);
+                    }
+                }
+                catch { }
+
+                string ingName = null;
+                try { ingName = recipe.getNameFromIndex(rawId); } catch { }
+                if (string.IsNullOrEmpty(ingName) || string.Equals(ingName, rawId, StringComparison.Ordinal))
+                    ingName = !string.IsNullOrEmpty(fallbackDisplayName) ? fallbackDisplayName : rawId;
+                if (ingName.Length > (cols == 2 ? 15 : 26))
+                    ingName = ingName.Substring(0, cols == 2 ? 14 : 25) + ".";
+
+                bool enough = have >= need;
+                Color cCol = enough ? new Color(34, 118, 42) : new Color(186, 34, 24);
+                string countStr = $"{have}/{need}";
+                float cScale = fontScale * 0.78f;
+                float textTop = cy + Math.Max(2f, (cellH - 22f * cScale) * 0.45f);
+                DrawStardewText(sb, ingName, new Vector2(cx + iconSz + 10, textTop), Game1.textColor, cScale);
+                float cntW = MeasureWidth(countStr, cScale);
+                DrawStardewText(sb, countStr, new Vector2(cx + cellW - cntW - 8, textTop), cCol, cScale);
+            }
+        }
+
+        private static float MeasureWidth(string text, float scale)
+        {
+            if (string.IsNullOrEmpty(text) || Game1.smallFont == null) return 0f;
+            try { return Game1.smallFont.MeasureString(text).X * scale; } catch { return text.Length * 12f * scale; }
+        }
+
+        private static float DrawWrappedStardewText(SpriteBatch sb, string text, int x, int y, int maxW, int maxH, Color color, float scale)
+        {
+            if (string.IsNullOrEmpty(text) || Game1.smallFont == null || maxH <= 10) return 0f;
+            string[] words = text.Split(' ');
+            string line = "";
+            float curY = y;
+            float lh = Math.Max(18f, 26f * scale);
+            for (int i = 0; i < words.Length; i++)
+            {
+                string cand = string.IsNullOrEmpty(line) ? words[i] : (line + " " + words[i]);
+                if (MeasureWidth(cand, scale) > maxW && !string.IsNullOrEmpty(line))
+                {
+                    DrawStardewText(sb, line, new Vector2(x, curY), color, scale);
+                    curY += lh;
+                    if (curY + lh > y + maxH)
+                        return curY - y;
+                    line = words[i];
+                }
+                else
+                {
+                    line = cand;
+                }
+            }
+            if (!string.IsNullOrEmpty(line) && curY + lh * 0.6f <= y + maxH)
+            {
+                DrawStardewText(sb, line, new Vector2(x, curY), color, scale);
+                curY += lh;
+            }
+            return curY - y;
         }
 
         private static void DrawStardewPixelButton(SpriteBatch sb, Rectangle r, string text, Color tint, float scale)

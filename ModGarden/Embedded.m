@@ -959,6 +959,10 @@ static SDVGardenGestureHost *gSdvGardenHost = nil;
         sdvEnsureAudioSession("did-become-active");
         [self startHapticTimer];
         [self attachToGameWindows];
+        // Re-apply shortly after activation so SDViOS AppDelegate.OnActivated never overrides respectMuteSwitch
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(250 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+            sdvEnsureAudioSession("did-become-active-settled");
+        });
     });
 }
 

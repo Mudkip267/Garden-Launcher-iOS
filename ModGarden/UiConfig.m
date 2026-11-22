@@ -279,6 +279,9 @@ static long long sdvNextRev(void) {
 @property(nonatomic, assign) NSInteger safePaddingPx; // -1 = Auto, 0..80 px
 @property(nonatomic, assign) BOOL safeDialogueAndTooltip;
 @property(nonatomic, assign) BOOL verticalToolbar;
+@property(nonatomic, assign) float toolbarSize; // 0.60..1.45
+@property(nonatomic, assign) float toolbarOpacity; // 0.20..1.00
+@property(nonatomic, assign) BOOL showToolHitLocation; // Default YES
 @property(nonatomic, assign) BOOL batterySaver30Fps;
 @property(nonatomic, assign) float pixelOpacity; // 0.25..1.00
 @property(nonatomic, assign) BOOL leftHandedMobile;
@@ -323,6 +326,9 @@ static long long sdvNextRev(void) {
     c.safePaddingPx = -1; // -1 = Auto from iOS safeAreaInsets
     c.safeDialogueAndTooltip = YES;
     c.verticalToolbar = NO;
+    c.toolbarSize = 1.00f;
+    c.toolbarOpacity = 0.90f;
+    c.showToolHitLocation = YES;
     c.batterySaver30Fps = NO;
     c.pixelOpacity = 1.00f;
     c.leftHandedMobile = NO;
@@ -397,6 +403,12 @@ static long long sdvNextRev(void) {
             c.safeDialogueAndTooltip = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
         } else if ([k isEqualToString:@"verticaltb"]) {
             c.verticalToolbar = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
+        } else if ([k isEqualToString:@"tbsize"]) {
+            c.toolbarSize = sdvClampf(v.floatValue, 0.60f, 1.45f);
+        } else if ([k isEqualToString:@"tbopacity"]) {
+            c.toolbarOpacity = sdvClampf(v.floatValue, 0.20f, 1.00f);
+        } else if ([k isEqualToString:@"toolhitbox"]) {
+            c.showToolHitLocation = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
         } else if ([k isEqualToString:@"saver30fps"]) {
             c.batterySaver30Fps = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
         } else if ([k isEqualToString:@"pixelopacity"]) {
@@ -494,11 +506,14 @@ static long long sdvNextRev(void) {
         }
     }
 
-    [NSUserDefaults.standardUserDefaults setBool:self.respectMuteSwitch forKey:@"sdv_respect_mute_v1"];
-    [NSNotificationCenter.defaultCenter postNotificationName:@"SDVAudioModeChangedNotification" object:nil];
+    BOOL prevMute = [NSUserDefaults.standardUserDefaults boolForKey:@"sdv_respect_mute_v1"];
+    if (self.respectMuteSwitch != prevMute) {
+        [NSUserDefaults.standardUserDefaults setBool:self.respectMuteSwitch forKey:@"sdv_respect_mute_v1"];
+        [NSNotificationCenter.defaultCenter postNotificationName:@"SDVAudioModeChangedNotification" object:nil];
+    }
 
     NSMutableString *s = [NSMutableString stringWithFormat:
-        @"mode=%ld\nautotool=%d\nautoattack=%d\npinchzoom=%d\ntouchhint2=%d\ntoputility=%d\nswapbuttons=%d\nmobileshopdrag=%d\nautokeyboard=%d\nsafecrafting=%d\nautosavemin=%ld\nreduceweather=%d\nuiscale=%.2f\nbuttonscale=%.2f\nemotebtn=%d\nautorepeat=%d\nrestoretool=%d\nspecbtn=%d\nautocombatmode=%d\nautohidegp=%d\nautopause=%d\nfishhaptic=%d\nsafepadding=%ld\nsafedialogue=%d\nverticaltb=%d\nsaver30fps=%d\npixelopacity=%.2f\nlefthanded=%d\njoydeadzone=%.2f\nrespectmute=%d\n",
+        @"mode=%ld\nautotool=%d\nautoattack=%d\npinchzoom=%d\ntouchhint2=%d\ntoputility=%d\nswapbuttons=%d\nmobileshopdrag=%d\nautokeyboard=%d\nsafecrafting=%d\nautosavemin=%ld\nreduceweather=%d\nuiscale=%.2f\nbuttonscale=%.2f\nemotebtn=%d\nautorepeat=%d\nrestoretool=%d\nspecbtn=%d\nautocombatmode=%d\nautohidegp=%d\nautopause=%d\nfishhaptic=%d\nsafepadding=%ld\nsafedialogue=%d\nverticaltb=%d\ntbsize=%.2f\ntbopacity=%.2f\ntoolhitbox=%d\nsaver30fps=%d\npixelopacity=%.2f\nlefthanded=%d\njoydeadzone=%.2f\nrespectmute=%d\n",
         (long)self.mode, self.autoTool ? 1 : 0, self.autoAttack ? 1 : 0,
         self.pinchZoom ? 1 : 0, self.showTouchHint ? 1 : 0,
         self.showTopUtility ? 1 : 0, self.swapRightButtons ? 1 : 0,
@@ -512,7 +527,11 @@ static long long sdvNextRev(void) {
         self.autoCombatMode ? 1 : 0, self.autoHideOnGamepad ? 1 : 0,
         self.autoPauseOnBackground ? 1 : 0, self.fishingHaptic ? 1 : 0,
         (long)self.safePaddingPx, self.safeDialogueAndTooltip ? 1 : 0,
-        self.verticalToolbar ? 1 : 0, self.batterySaver30Fps ? 1 : 0,
+        self.verticalToolbar ? 1 : 0,
+        sdvClampf(self.toolbarSize, 0.60f, 1.45f),
+        sdvClampf(self.toolbarOpacity, 0.20f, 1.00f),
+        self.showToolHitLocation ? 1 : 0,
+        self.batterySaver30Fps ? 1 : 0,
         sdvClampf(self.pixelOpacity, 0.25f, 1.00f), self.leftHandedMobile ? 1 : 0,
         sdvClampf(self.joyDeadzone, 0.05f, 0.25f), self.respectMuteSwitch ? 1 : 0];
     for (NSString *ex in extraLines) {

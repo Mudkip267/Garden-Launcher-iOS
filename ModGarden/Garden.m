@@ -264,6 +264,138 @@ static void syncBundledMobileControls(NSString *docsPath) {
     } @catch (NSException *ex) { }
 }
 
+static NSUInteger syncContentPackLocaleFallbacks(NSString *docsPath) {
+    if (!docsPath.length) return 0;
+    NSUInteger created = 0;
+    @try {
+        NSMutableArray<NSString *> *modRoots = [NSMutableArray array];
+        NSString *m1 = join(docsPath, @"Mods");
+        NSString *m2 = join(join(docsPath, @"StardewValley"), @"Mods");
+        if (dir(m1)) [modRoots addObject:m1];
+        if (dir(m2) && ![m2 isEqualToString:m1]) [modRoots addObject:m2];
+
+        NSSet<NSString *> *assetExts = [NSSet setWithArray:@[@"png", @"xnb", @"json", @"tmx", @"tbin", @"yaml"]];
+        NSSet<NSString *> *skipTop = [NSSet setWithArray:@[
+            @"sdviostouchcontrols", @"sdvmobilecontrols", @"contentpatcher",
+            @"savebackup", @"genericmodconfigmenu", @"consolecommands", @"errorhandler"
+        ]];
+
+        for (NSString *modsDir in modRoots) {
+            NSDirectoryEnumerator *packEnum = [fm() enumeratorAtPath:modsDir];
+            NSString *rel = nil;
+            NSMutableArray<NSString *> *cpPackDirs = [NSMutableArray array];
+            while ((rel = [packEnum nextObject])) {
+                NSArray<NSString *> *parts = rel.pathComponents;
+                if (!parts.count) continue;
+                NSString *top = parts.firstObject;
+                if ([top hasPrefix:@"."] || [skipTop containsObject:top.lowercaseString]) {
+                    if (parts.count == 1) [packEnum skipDescendants];
+                    continue;
+                }
+                if (parts.count > 4) continue;
+                if (![rel.lastPathComponent.lowercaseString isEqualToString:@"manifest.json"]) continue;
+                NSString *packDir = join(modsDir, rel).stringByDeletingLastPathComponent;
+                if (![fm() fileExistsAtPath:join(packDir, @"content.json")]) continue;
+                [cpPackDirs addObject:packDir];
+            }
+
+            for (NSString *packDir in cpPackDirs) { @autoreleasepool {
+                NSDictionary *mf = nil;
+                @try {
+                    id parsed = jsonAt(join(packDir, @"manifest.json"));
+                    if ([parsed isKindOfClass:NSDictionary.class]) mf = parsed;
+                } @catch (NSException *ex) { continue; }
+                if (!mf) continue;
+
+                // Must be a Content Patcher pack
+                NSDictionary *cpf = [mf[@"ContentPackFor"] isKindOfClass:NSDictionary.class] ? mf[@"ContentPackFor"] : nil;
+                NSString *cpfUid = [cpf[@"UniqueID"] isKindOfClass:NSString.class] ? cpf[@"UniqueID"] : @"";
+                if ([cpfUid caseInsensitiveCompare:@"Pathoschild.ContentPatcher"] != NSOrderedSame) continue;
+
+                // Skip Vietnamese translation packs themselves
+                NSString *uidStr = [mf[@"UniqueID"] isKindOfClass:NSString.class] ? (NSString *)mf[@"UniqueID"] : @"";
+                NSString *nameStr = [mf[@"Name"] isKindOfClass:NSString.class] ? (NSString *)mf[@"Name"] : @"";
+                NSString *uidLow = uidStr.lowercaseString;
+                NSString *nameLow = nameStr.lowercaseString;
+                if ([uidLow containsString:@"viethoa"] || [uidLow containsString:@"vietnam"] ||
+                    [nameLow containsString:@"việt hóa"] || [nameLow containsString:@"vietnamese"] ||
+                    [nameLow containsString:@"viethoa"]) continue;
+
+                // Check if content.json (or any included json inside the pack) uses {{Language}} token
+                BOOL usesLanguageToken = NO;
+                NSMutableArray<NSString *> *packFiles = [NSMutableArray array];
+                NSDirectoryEnumerator *fe = [fm() enumeratorAtPath:packDir];
+                NSString *fRel = nil;
+                while ((fRel = [fe nextObject])) {
+                    NSString *full = join(packDir, fRel);
+                    BOOL isD = NO;
+                    if (![fm() fileExistsAtPath:full isDirectory:&isD] || isD) continue;
+                    [packFiles addObject:fRel];
+                    if (!usesLanguageToken && [fRel.pathExtension.lowercaseString isEqualToString:@"json"]) {
+                        NSString *topSub = fRel.pathComponents.firstObject.lowercaseString;
+                        if ([topSub isEqualToString:@"i18n"]) continue;
+                        NSData *jd = [NSData dataWithContentsOfFile:full options:NSDataReadingMappedIfSafe error:nil];
+                        if (jd.length > 0 && jd.length <= 1024 * 1024) {
+                            NSString *js = [[NSString alloc] initWithData:jd encoding:NSUTF8StringEncoding];
+                            if (js && [js rangeOfString:@"{{language}}" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                                usesLanguageToken = YES;
+                            }
+                        }
+                    }
+                }
+                if (!usesLanguageToken) continue;
+
+                // Create 0-byte APFS hardlinks (*.en.<ext> -> *.vi.<ext>, *_en.<ext> -> *_vi.<ext>, en/ -> vi/)
+                // Never overwrites any existing Vietnamese asset!
+                for (NSString *fRel in packFiles) { @autoreleasepool {
+                    NSString *ext = fRel.pathExtension;
+                    if (!ext.length || ![assetExts containsObject:ext.lowercaseString]) continue;
+                    NSString *topSub = fRel.pathComponents.firstObject.lowercaseString;
+                    if ([topSub isEqualToString:@"i18n"]) continue;
+
+                    NSString *baseName = fRel.lastPathComponent;
+                    NSString *stem = [baseName stringByDeletingPathExtension];
+                    NSString *dirRel = [fRel stringByDeletingLastPathComponent];
+                    NSString *srcFull = join(packDir, fRel);
+                    NSString *dstRel = nil;
+
+                    if (stem.length > 3 && [stem.lowercaseString hasSuffix:@".en"]) {
+                        NSString *newBase = [NSString stringWithFormat:@"%@.vi.%@", [stem substringToIndex:stem.length - 3], ext];
+                        dstRel = dirRel.length ? join(dirRel, newBase) : newBase;
+                    } else if (stem.length > 3 && [stem.lowercaseString hasSuffix:@"_en"]) {
+                        NSString *newBase = [NSString stringWithFormat:@"%@_vi.%@", [stem substringToIndex:stem.length - 3], ext];
+                        dstRel = dirRel.length ? join(dirRel, newBase) : newBase;
+                    } else {
+                        NSArray<NSString *> *segs = fRel.pathComponents;
+                        if (segs.count >= 2) {
+                            NSMutableArray<NSString *> *mSegs = [segs mutableCopy];
+                            BOOL matchedSeg = NO;
+                            for (NSUInteger si = 0; si + 1 < mSegs.count; si++) {
+                                if ([mSegs[si].lowercaseString isEqualToString:@"en"]) {
+                                    mSegs[si] = @"vi";
+                                    matchedSeg = YES;
+                                }
+                            }
+                            if (matchedSeg) dstRel = [NSString pathWithComponents:mSegs];
+                        }
+                    }
+
+                    if (!dstRel.length || [dstRel isEqualToString:fRel]) continue;
+                    NSString *dstFull = join(packDir, dstRel);
+                    if ([fm() fileExistsAtPath:dstFull]) continue;
+
+                    [fm() createDirectoryAtPath:dstFull.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+                    if ([fm() linkItemAtPath:srcFull toPath:dstFull error:nil] ||
+                        [fm() copyItemAtPath:srcFull toPath:dstFull error:nil]) {
+                        created++;
+                    }
+                }}
+            }}
+        }
+    } @catch (NSException *ex) { }
+    return created;
+}
+
 static NSDictionary *gameDataStatus(NSString *docsPath) {
     if (!docsPath.length) {
         return @{@"hasSdvDll": @NO, @"hasContent": @NO, @"hasSmapi": @NO, @"hasSmapiInternal": @NO, @"ready": @NO, @"gameDir": @""};
@@ -290,11 +422,51 @@ static NSDictionary *gameDataStatus(NSString *docsPath) {
 
 static NSString *sanitizeFolderName(NSString *raw, NSString *fallback);
 
+static BOOL sdvLooksLikeValidCjkName(NSString *s) {
+    if (!s.length) return NO;
+    NSUInteger cjkCount = 0;
+    for (NSUInteger i = 0; i < s.length; i++) {
+        unichar ch = [s characterAtIndex:i];
+        if (ch == 0xFFFD || ch < 0x20 || (ch >= 0xE000 && ch <= 0xF8FF)) return NO;
+        if ((ch >= 0x4E00 && ch <= 0x9FFF) ||   // CJK Unified Ideographs
+            (ch >= 0x3400 && ch <= 0x4DBF) ||   // CJK Extension A
+            (ch >= 0x3040 && ch <= 0x30FF) ||   // Hiragana / Katakana
+            (ch >= 0xAC00 && ch <= 0xD7AF)) {   // Hangul Syllables
+            cjkCount++;
+        }
+    }
+    return cjkCount > 0;
+}
+
 static NSString *decodeZipEntryName(const char *bytes, unsigned len) {
     if (!bytes || len == 0) return nil;
     NSString *r = [[NSString alloc] initWithBytes:bytes length:len encoding:NSUTF8StringEncoding];
     if (r.length) return r;
-    // Fallback for Windows-packed Vietnamese / legacy ZIP archives (CP1258 -> CP1252 -> CP437 -> Latin1)
+
+    // Detect consecutive multi-byte non-ASCII runs (Chinese GB18030/Big5, Japanese ShiftJIS, Korean EUC-KR)
+    // BEFORE falling back to single-byte CP1258/CP1252 (which accept any byte and garble CJK mod folder names!).
+    unsigned highPairs = 0;
+    const unsigned char *ub = (const unsigned char *)bytes;
+    for (unsigned i = 0; i + 1 < len; i++) {
+        if (ub[i] >= 0x80 && ub[i + 1] >= 0x80) {
+            highPairs++;
+            i++;
+        }
+    }
+    if (highPairs >= 2) {
+        NSStringEncoding cjkEncs[] = {
+            CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingGB_18030_2000),
+            NSShiftJISStringEncoding,
+            CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingEUC_KR),
+            CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingBig5)
+        };
+        for (size_t k = 0; k < sizeof(cjkEncs) / sizeof(cjkEncs[0]); k++) {
+            r = [[NSString alloc] initWithBytes:bytes length:len encoding:cjkEncs[k]];
+            if (sdvLooksLikeValidCjkName(r)) return r;
+        }
+    }
+
+    // Fallback for Windows-packed Vietnamese / Western ZIP archives (CP1258 -> CP1252 -> CP437 -> Latin1)
     NSStringEncoding encs[] = {
         CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingWindowsVietnamese),
         NSWindowsCP1252StringEncoding,

@@ -771,6 +771,7 @@ static void sdvApplyAutoHideHomeIndicator(UIViewController *vc) {
 @property(nonatomic, assign) BOOL shownStartupToast;
 @property(nonatomic, assign) BOOL autoOpenedSetup;
 @property(nonatomic, strong) NSTimer *hapticTimer;
+-(BOOL)isGardenOpen;
 -(void)attachToGameWindows;
 -(void)startHapticTimer;
 -(void)stopHapticTimer;
@@ -789,6 +790,9 @@ static SDVGardenGestureHost *gSdvGardenHost = nil;
 -(void)adoptRealWindowForScene:(UIWindowScene *)ws {
     if (!ws) return;
     @try {
+        // Never steal keyWindow while Mod Garden overlay is actively presented!
+        if (gSdvGardenHost && [gSdvGardenHost isGardenOpen]) return;
+
         // 1. Check if AppDelegate already created a window (e.g. ShowMissingFilesScreen / ShowErrorScreen)
         id<UIApplicationDelegate> appDel = UIApplication.sharedApplication.delegate;
         if (appDel && [appDel respondsToSelector:@selector(window)]) {
@@ -796,6 +800,8 @@ static SDVGardenGestureHost *gSdvGardenHost = nil;
             if (dw && ![dw isKindOfClass:SDVSceneHostWindow.class] &&
                 ![dw isKindOfClass:SDVGardenOverlayWindow.class] &&
                 ![dw isKindOfClass:SDVPassThroughWindow.class]) {
+                BOOL needsAdopt = (dw.windowScene != ws || dw.hidden || self.window != dw || self.placeholderWindow != nil);
+                if (!needsAdopt) return;
                 if (dw.windowScene != ws) {
                     dw.windowScene = ws;
                     dw.frame = ws.coordinateSpace.bounds;
@@ -817,6 +823,7 @@ static SDVGardenGestureHost *gSdvGardenHost = nil;
                 [w isKindOfClass:SDVGardenOverlayWindow.class] ||
                 [w isKindOfClass:SDVPassThroughWindow.class]) continue;
             if (w.windowLevel >= UIWindowLevelAlert || w.hidden || !w.rootViewController) continue;
+            if (self.window == w && !self.placeholderWindow) return;
             self.window = w;
             if (self.placeholderWindow) {
                 self.placeholderWindow.hidden = YES;
@@ -1414,7 +1421,8 @@ __attribute__((constructor)) static void startGardenControls(void) {
             syncBundledLidgren(docs);
             NSString *smapiSyncNote = syncBundledSmapi(docs);
             syncBundledMobileControls(docs);
-            sdvBootLogFmt([NSString stringWithFormat:@"[BOOT 2] Bundled Lidgren / SMAPI (%@) / SDVMobileControls synced", smapiSyncNote ?: @"?"]);
+            NSUInteger cpFallbackLinked = syncContentPackLocaleFallbacks(docs);
+            sdvBootLogFmt([NSString stringWithFormat:@"[BOOT 2] Bundled Lidgren / SMAPI (%@) / SDVMobileControls synced (cpLocaleFallbacks=%lu)", smapiSyncNote ?: @"?", (unsigned long)cpFallbackLinked]);
             [SDVRamMonitor.shared startWithDocsPath:docs];
             sdvBootLog("[BOOT 3] SDVRamMonitor started");
         } @catch (NSException *ex) {

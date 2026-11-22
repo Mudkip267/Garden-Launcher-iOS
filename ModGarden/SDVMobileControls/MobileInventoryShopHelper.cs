@@ -1556,7 +1556,7 @@ namespace SDVMobileControls
                     }
                 }
 
-                // Draw Stardew pixel slot box + item icon right under finger (dead-center using drawInMenu's fixed +32,+32 pivot!)
+                // Draw Stardew pixel slot box + item icon right under finger (dead-center via 2D scale matrix so Z never clips!)
                 float iconScale = Math.Clamp(Math.Min(vpW, vpH) / 720f, 1.0f, 2.2f);
                 int slotSize = (int)(68f * iconScale);
                 var floatBox = new Rectangle((int)(_touchCurVp.X - slotSize * 0.5f), (int)(_touchCurVp.Y - slotSize * 0.5f), slotSize, slotSize);
@@ -1565,11 +1565,10 @@ namespace SDVMobileControls
                     sb.Draw(Game1.menuTexture, floatBox, Game1.getSourceRectForStandardTileSheet(Game1.menuTexture, 10), Color.White * 0.92f);
                 }
                 catch { }
-                Vector2 drawPos = new Vector2(_touchCurVp.X - 32f, _touchCurVp.Y - 32f);
-                try { _dragItem.drawInMenu(sb, drawPos, iconScale * 0.88f, 1f, 1f, StackDrawType.Draw, Color.White, true); } catch { }
+                DrawItemCenteredInSlot(sb, _dragItem, floatBox, StackDrawType.Draw, 1f);
             }
 
-            // 2. Draw authentic Stardew Valley Pixel Parchment Buy / Sell / Split Popup!
+            // 2. Draw authentic Stardew Valley native themed Buy / Sell / Craft / Split Popup!
             if (IsPopupOpen)
             {
                 ComputePopupLayout(vpW, vpH);
@@ -1577,18 +1576,67 @@ namespace SDVMobileControls
             }
         }
 
+        private static void DrawItemCenteredInSlot(SpriteBatch sb, ISalable salable, Rectangle slotBox, StackDrawType stackDraw, float alpha)
+        {
+            if (sb == null || salable == null || slotBox.Width <= 0 || slotBox.Height <= 0)
+                return;
+
+            var gd = sb.GraphicsDevice;
+            if (gd != null)
+            {
+                float s = Math.Max(0.25f, slotBox.Width / 64f);
+                Matrix m = Matrix.CreateScale(s, s, 1f) * Matrix.CreateTranslation(slotBox.X, slotBox.Y, 0f);
+                bool ended = false;
+                try
+                {
+                    sb.End();
+                    ended = true;
+                    sb.Begin(SpriteSortMode.Deferred, BlendState.AlphaBlend, SamplerState.PointClamp, null, null, null, m);
+                    salable.drawInMenu(sb, Vector2.Zero, 0.88f, alpha, 0.90f, stackDraw, Color.White, drawShadow: true);
+                    sb.End();
+                    sb.Begin(SpriteSortMode.Deferred, BlendState.AlphaBlend, SamplerState.PointClamp, null, null);
+                    return;
+                }
+                catch
+                {
+                    if (ended)
+                    {
+                        try { sb.Begin(SpriteSortMode.Deferred, BlendState.AlphaBlend, SamplerState.PointClamp, null, null); } catch { }
+                    }
+                }
+            }
+
+            Vector2 fallbackPos = new Vector2(slotBox.Center.X - 32f, slotBox.Center.Y - 32f);
+            float fbScale = Math.Max(0.25f, (slotBox.Width * 0.86f) / 64f);
+            try { salable.drawInMenu(sb, fallbackPos, fbScale, alpha, 0.90f, stackDraw, Color.White, drawShadow: true); } catch { }
+        }
+
         private void DrawStardewPixelPopup(SpriteBatch sb, Texture2D pixel, int vpW, int vpH)
         {
-            // Warm dark vignette behind Stardew Mobile wooden dialog box
-            sb.Draw(pixel, new Rectangle(0, 0, vpW, vpH), Color.Black * 0.56f);
+            // Warm dark vignette behind native Stardew dialog box
+            sb.Draw(pixel, new Rectangle(0, 0, vpW, vpH), Color.Black * 0.54f);
 
-            // Authentic Stardew Valley Mobile wooden 9-slice parchment dialog box!
+            // Read live ShopMenu VisualTheme when in a shop so modded UI themes (Cat Valley UI, custom shop themes) skin the popup 100% natively!
+            ShopMenu.ShopCachedTheme shopTheme = (_popupKind == PopupKind.ShopBuy || _popupKind == PopupKind.ShopSell)
+                ? (_popupOwnerMenu as ShopMenu)?.VisualTheme
+                : null;
+            Color primaryInk = shopTheme?.ItemRowTextColor ?? Game1.textColor;
+            Color subInk = new Color(
+                Math.Min(255, primaryInk.R + 18),
+                Math.Min(255, primaryInk.G + 14),
+                Math.Min(255, primaryInk.B + 10));
+
+            // 1. Native Stardew 9-slice window box (Shop VisualTheme -> Game1.menuTexture)
             bool drewBox = false;
             try
             {
-                if (Game1.menuTexture != null)
+                Texture2D winTex = shopTheme?.WindowBorderTexture ?? Game1.menuTexture;
+                Rectangle winSrc = (shopTheme?.WindowBorderTexture != null && shopTheme.WindowBorderSourceRect.Width > 0)
+                    ? shopTheme.WindowBorderSourceRect
+                    : MobileBoxSrc;
+                if (winTex != null)
                 {
-                    IClickableMenu.drawTextureBox(sb, Game1.menuTexture, MobileBoxSrc,
+                    IClickableMenu.drawTextureBox(sb, winTex, winSrc,
                         _popPanel.X, _popPanel.Y, _popPanel.Width, _popPanel.Height, Color.White, 1f, drawShadow: true);
                     drewBox = true;
                 }
@@ -1596,46 +1644,36 @@ namespace SDVMobileControls
             catch { }
             if (!drewBox)
             {
-                try { IClickableMenu.drawTextureBox(sb, _popPanel.X, _popPanel.Y, _popPanel.Width, _popPanel.Height, Color.White); }
-                catch
-                {
-                    sb.Draw(pixel, _popPanel, new Color(249, 216, 156));
-                    DrawBorder(sb, pixel, _popPanel, 4, new Color(90, 45, 12));
-                }
+                PixelUi.DrawNativeDialogBox(sb, pixel, _popPanel, 1f, drawShadow: true);
             }
 
-            // Official Stardew Valley red close 'X' button on top-right corner!
-            try
-            {
-                if (Game1.mouseCursors != null)
-                    sb.Draw(Game1.mouseCursors, _popCloseX, new Rectangle(337, 494, 12, 12), Color.White);
-            }
-            catch { }
+            // 2. Native Stardew close 'X' button on top-right corner!
+            PixelUi.DrawNativeCloseX(sb, _popCloseX, 1f);
 
             int pad = Math.Max(28, _popPanel.Width / 19);
             float fontScale = Math.Clamp(vpH / 790f, 0.78f, 1.65f);
             float iconScale = Math.Clamp(vpH / 820f, 0.90f, 1.65f);
             int slotPx = (int)(68f * iconScale);
 
-            // Stardew Valley Mobile item slot frame (tile 10) + item sprite
+            // 3. Native Stardew item slot frame (Shop VisualTheme icon bg -> Game1.menuTexture tile 10) + dead-centered item sprite
             var slotBox = new Rectangle(_popPanel.X + pad, _popPanel.Y + pad, slotPx, slotPx);
             try
             {
-                sb.Draw(Game1.menuTexture, slotBox, Game1.getSourceRectForStandardTileSheet(Game1.menuTexture, 10), Color.White);
+                if (shopTheme?.ItemIconBackgroundTexture != null && shopTheme.ItemIconBackgroundSourceRect.Width > 0)
+                    sb.Draw(shopTheme.ItemIconBackgroundTexture, slotBox, shopTheme.ItemIconBackgroundSourceRect, Color.White);
+                else if (Game1.menuTexture != null)
+                    sb.Draw(Game1.menuTexture, slotBox, Game1.getSourceRectForStandardTileSheet(Game1.menuTexture, 10), Color.White);
             }
             catch { }
 
             if (_popupSaleItem != null)
             {
-                // Item.drawInMenu ALWAYS centers sprite at location + (32f, 32f) regardless of scaleSize!
-                Vector2 iconPos = new Vector2(slotBox.Center.X - 32f, slotBox.Center.Y - 32f);
-                try { _popupSaleItem.drawInMenu(sb, iconPos, iconScale * 0.90f, 1f, 1f, StackDrawType.Hide, Color.White, true); } catch { }
+                DrawItemCenteredInSlot(sb, _popupSaleItem, slotBox, StackDrawType.Hide, 1f);
             }
 
-            // Header title & subtitle in warm Stardew wood ink
+            // Header title & subtitle using live theme / Game1.textColor
             float textX = slotBox.Right + Math.Max(14, pad / 2);
             float textY = _popPanel.Y + pad;
-            float maxTextW = Math.Max(160f, (_popPanel.Right - pad - 18) - textX);
 
             string title = _popupKind == PopupKind.Craft && _popupCraftRecipe != null
                 ? (_popupCraftRecipe.DisplayName ?? _popupCraftRecipe.name)
@@ -1643,7 +1681,7 @@ namespace SDVMobileControls
             if (_popupKind == PopupKind.Craft && _popupCraftRecipe != null && _popupCraftRecipe.numberProducedPerCraft > 1)
                 title += $" (×{_popupCraftRecipe.numberProducedPerCraft})";
 
-            DrawStardewText(sb, title, new Vector2(textX, textY), Game1.textColor, fontScale * 1.06f);
+            DrawStardewText(sb, title, new Vector2(textX, textY), primaryInk, fontScale * 1.06f);
             float lineH = Math.Max(26f, vpH / 27f);
             float curY = textY + lineH * 1.08f;
 
@@ -1677,7 +1715,7 @@ namespace SDVMobileControls
                         : $"Giá: {_popupUnitPrice:N0}{unitTag} × {_popupQty} = {(_popupUnitPrice * (long)_popupQty):N0}{unitTag}";
                     if (_popupStock != ShopMenu.infiniteStock && _popupStock > 0)
                         priceSub += $"  (Còn {_popupStock})";
-                    DrawStardewText(sb, priceSub, new Vector2(textX, curY), new Color(92, 42, 16), fontScale * 0.88f);
+                    DrawStardewText(sb, priceSub, new Vector2(textX, curY), subInk, fontScale * 0.88f);
                     curY += lineH;
 
                     if (_popupUnitPrice > 0)
@@ -1696,7 +1734,7 @@ namespace SDVMobileControls
             }
             else if (_popupKind == PopupKind.ShopSell)
             {
-                DrawStardewText(sb, $"Bán: {_popupQty}/{_popupMaxQty} · Thu: {(_popupUnitPrice * (long)_popupQty):N0}g", new Vector2(textX, curY), new Color(92, 42, 16), fontScale * 0.88f);
+                DrawStardewText(sb, $"Bán: {_popupQty}/{_popupMaxQty} · Thu: {(_popupUnitPrice * (long)_popupQty):N0}g", new Vector2(textX, curY), subInk, fontScale * 0.88f);
                 curY += lineH;
             }
             else if (_popupKind == PopupKind.Craft && _popupCraftRecipe != null)
@@ -1710,11 +1748,11 @@ namespace SDVMobileControls
             }
             else
             {
-                DrawStardewText(sb, $"Số lượng: {_popupQty} / {_popupMaxQty}", new Vector2(textX, curY), new Color(92, 42, 16), fontScale * 0.88f);
+                DrawStardewText(sb, $"Số lượng: {_popupQty} / {_popupMaxQty}", new Vector2(textX, curY), subInk, fontScale * 0.88f);
                 curY += lineH;
             }
 
-            // Energy / Health icons for edible items (authentic Stardew Mobile tooltip icons!)
+            // Energy / Health icons for edible items (authentic Stardew icons!)
             if (_popupItem is StardewValley.Object edObj && edObj.Edibility > 0)
             {
                 int en = edObj.staminaRecoveredOnConsumption();
@@ -1730,10 +1768,10 @@ namespace SDVMobileControls
                 curY += lineH;
             }
 
-            // Wooden divider below header
+            // Subtle divider matching live theme ink
             int bodyTop = Math.Max(slotBox.Bottom + Math.Max(10, pad / 3), (int)curY + 4);
             int bodyBot = (_popupMaxQty > _popupMinQty ? _popSliderTrack.Y : _popBtnConfirm.Y) - Math.Max(12, pad / 3);
-            sb.Draw(pixel, new Rectangle(_popPanel.X + pad, bodyTop, _popPanel.Width - pad * 2, Math.Max(2, vpH / 420)), new Color(138, 86, 42) * 0.45f);
+            sb.Draw(pixel, new Rectangle(_popPanel.X + pad, bodyTop, _popPanel.Width - pad * 2, Math.Max(2, vpH / 420)), primaryInk * 0.28f);
             bodyTop += Math.Max(8, pad / 4);
 
             // Body area: Ingredient list for Crafting OR Description for Shop
@@ -1747,21 +1785,25 @@ namespace SDVMobileControls
                 try { desc = (_popupSaleItem?.getDescription() ?? _popupItem?.getDescription() ?? "").Replace("\r", " ").Replace("\n", " ").Trim(); } catch { }
                 if (!string.IsNullOrEmpty(desc))
                 {
-                    DrawWrappedStardewText(sb, desc, _popPanel.X + pad, bodyTop, _popPanel.Width - pad * 2, bodyBot - bodyTop, new Color(86, 46, 22), fontScale * 0.80f);
+                    DrawWrappedStardewText(sb, desc, _popPanel.X + pad, bodyTop, _popPanel.Width - pad * 2, bodyBot - bodyTop, subInk, fontScale * 0.80f);
                 }
             }
 
-            // Pixel Wooden Slider Track + Stardew Pixel Knob + Step Buttons
+            // Native Stardew Slider Track + Knob + Step Buttons (honors Shop VisualTheme & Game1.mouseCursors!)
             if (_popupMaxQty > _popupMinQty)
             {
                 try
                 {
-                    IClickableMenu.drawTextureBox(sb, Game1.mouseCursors, new Rectangle(403, 383, 6, 6),
+                    Texture2D trTex = shopTheme?.ScrollBarBackTexture ?? Game1.mouseCursors;
+                    Rectangle trSrc = (shopTheme?.ScrollBarBackTexture != null && shopTheme.ScrollBarBackSourceRect.Width > 0)
+                        ? shopTheme.ScrollBarBackSourceRect
+                        : new Rectangle(403, 383, 6, 6);
+                    IClickableMenu.drawTextureBox(sb, trTex, trSrc,
                         _popSliderTrack.X, _popSliderTrack.Y, _popSliderTrack.Width, _popSliderTrack.Height, Color.White, 4f, drawShadow: false);
                 }
                 catch
                 {
-                    sb.Draw(pixel, _popSliderTrack, new Color(165, 110, 62));
+                    sb.Draw(pixel, _popSliderTrack, primaryInk * 0.25f);
                 }
 
                 float frac = (float)(_popupQty - _popupMinQty) / Math.Max(1, _popupMaxQty - _popupMinQty);
@@ -1772,15 +1814,19 @@ namespace SDVMobileControls
                 int ky = _popSliderTrack.Center.Y - knobH / 2;
 
                 if (kx > _popSliderTrack.X + 4)
-                    sb.Draw(pixel, new Rectangle(_popSliderTrack.X + 4, _popSliderTrack.Y + 4, kx - _popSliderTrack.X, Math.Max(4, _popSliderTrack.Height - 8)), new Color(235, 178, 52) * 0.65f);
+                    sb.Draw(pixel, new Rectangle(_popSliderTrack.X + 4, _popSliderTrack.Y + 4, kx - _popSliderTrack.X, Math.Max(4, _popSliderTrack.Height - 8)), primaryInk * 0.22f);
 
                 try
                 {
-                    sb.Draw(Game1.mouseCursors, new Rectangle(kx, ky, knobW, knobH), new Rectangle(420, 441, 10, 6), Color.White);
+                    Texture2D kbTex = shopTheme?.ScrollBarFrontTexture ?? Game1.mouseCursors;
+                    Rectangle kbSrc = (shopTheme?.ScrollBarFrontTexture != null && shopTheme.ScrollBarFrontSourceRect.Width > 0)
+                        ? shopTheme.ScrollBarFrontSourceRect
+                        : new Rectangle(420, 441, 10, 6);
+                    sb.Draw(kbTex, new Rectangle(kx, ky, knobW, knobH), kbSrc, Color.White);
                 }
                 catch
                 {
-                    sb.Draw(pixel, new Rectangle(kx, ky, knobW, knobH), new Color(120, 64, 24));
+                    sb.Draw(pixel, new Rectangle(kx, ky, knobW, knobH), primaryInk * 0.70f);
                 }
 
                 DrawStardewPixelButton(sb, _popBtnM10, "-10", Color.White, fontScale * 0.88f);
@@ -1788,39 +1834,39 @@ namespace SDVMobileControls
                 DrawStardewPixelButton(sb, _popBtnP1,  "+1",  Color.White, fontScale * 0.88f);
                 DrawStardewPixelButton(sb, _popBtnP10, "+10", Color.White, fontScale * 0.88f);
                 string maxLbl = _popupKind == PopupKind.BagSplit ? "1/2" : "MAX";
-                DrawStardewPixelButton(sb, _popBtnMax, maxLbl, new Color(255, 232, 160), fontScale * 0.88f);
+                DrawStardewPixelButton(sb, _popBtnMax, maxLbl, Color.White, fontScale * 0.88f);
             }
 
-            // Bottom Stardew Wooden Buttons (Hủy + Mua / Bán / Chế tạo / Chuyển / Tách)
-            DrawStardewPixelButton(sb, _popBtnCancel, "Hủy", new Color(245, 200, 190), fontScale * 0.96f);
+            // Bottom native Stardew Buttons (clean Color.White / ultra-light tint so Cat Valley & custom UI themes look 100% native!)
+            DrawStardewPixelButton(sb, _popBtnCancel, "Hủy", new Color(255, 238, 235), fontScale * 0.96f);
 
             string confirmLbl;
             Color confirmTint;
             if (_popupKind == PopupKind.ShopBuy)
             {
-                if (!_popupCanAfford) { confirmLbl = "Không đủ điều kiện"; confirmTint = new Color(230, 165, 160); }
-                else { confirmLbl = $"Mua ×{_popupQty}"; confirmTint = new Color(178, 242, 165); }
+                if (!_popupCanAfford) { confirmLbl = "Không đủ điều kiện"; confirmTint = new Color(245, 210, 208); }
+                else { confirmLbl = $"Mua ×{_popupQty}"; confirmTint = new Color(235, 255, 232); }
             }
             else if (_popupKind == PopupKind.ShopSell)
             {
                 confirmLbl = $"Bán ×{_popupQty}";
-                confirmTint = new Color(255, 224, 140);
+                confirmTint = new Color(255, 248, 224);
             }
             else if (_popupKind == PopupKind.Craft)
             {
                 bool cook = _popupCraftRecipe != null && _popupCraftRecipe.isCookingRecipe;
-                if (!_popupCanAfford) { confirmLbl = "Thiếu nguyên liệu"; confirmTint = new Color(230, 165, 160); }
-                else { confirmLbl = cook ? $"Nấu ×{_popupQty}" : $"Chế tạo ×{_popupQty}"; confirmTint = new Color(178, 242, 165); }
+                if (!_popupCanAfford) { confirmLbl = "Thiếu nguyên liệu"; confirmTint = new Color(245, 210, 208); }
+                else { confirmLbl = cook ? $"Nấu ×{_popupQty}" : $"Chế tạo ×{_popupQty}"; confirmTint = new Color(235, 255, 232); }
             }
             else if (_popupKind == PopupKind.ChestSplit)
             {
                 confirmLbl = $"Chuyển ×{_popupQty}";
-                confirmTint = new Color(175, 225, 255);
+                confirmTint = new Color(232, 246, 255);
             }
             else
             {
                 confirmLbl = $"Tách ×{_popupQty}";
-                confirmTint = new Color(175, 225, 255);
+                confirmTint = new Color(232, 246, 255);
             }
             DrawStardewPixelButton(sb, _popBtnConfirm, confirmLbl, confirmTint, fontScale * 0.98f);
         }
@@ -1834,7 +1880,7 @@ namespace SDVMobileControls
             if (!string.IsNullOrEmpty(desc) && h > 95)
             {
                 int maxDescH = Math.Min((int)(h * 0.36f), Math.Max(34, (int)(54f * fontScale)));
-                descH = DrawWrappedStardewText(sb, desc, x, y, w, maxDescH, new Color(86, 46, 22), fontScale * 0.76f) + 6f;
+                descH = DrawWrappedStardewText(sb, desc, x, y, w, maxDescH, Game1.textColor * 0.90f, fontScale * 0.76f) + 6f;
             }
 
             int ingTop = y + (int)descH;
@@ -1846,7 +1892,7 @@ namespace SDVMobileControls
             int rows = (count + cols - 1) / cols;
             int cellH = Math.Clamp(ingAvailH / Math.Max(1, rows), 28, Math.Max(36, (int)(44f * fontScale)));
             int cellW = cols == 2 ? (w - 14) / 2 : w;
-            int iconSz = Math.Clamp((int)(cellH * 0.80f), 22, 38);
+            int iconSz = Math.Clamp((int)(cellH * 0.76f), 20, 34);
 
             IList<Item> extraItems = GetContainerItemsList(cp?._materialContainers);
             int idx = 0;
@@ -1863,8 +1909,8 @@ namespace SDVMobileControls
                 int need = kv.Value * Math.Max(1, _popupQty);
                 int have = CountMatchingCraftIngredients(rawId, extraItems);
 
-                // Subtle recessed parchment strip behind each ingredient row
-                sb.Draw(pixel, new Rectangle(cx, cy + 1, cellW, cellH - 3), new Color(185, 132, 72) * 0.18f);
+                // Native Stardew sub-box behind each ingredient row (automatically themed by Cat Valley UI & UI mods!)
+                PixelUi.DrawNativeSubBox(sb, pixel, new Rectangle(cx, cy + 1, cellW, cellH - 3), Color.White, 0.88f);
 
                 string spriteId = rawId;
                 try { spriteId = recipe.getSpriteIndexFromRawIndex(rawId); } catch { }
@@ -1875,7 +1921,7 @@ namespace SDVMobileControls
                     if (pdata != null)
                     {
                         fallbackDisplayName = pdata.DisplayName;
-                        sb.Draw(pdata.GetTexture(), new Rectangle(cx + 4, cy + (cellH - iconSz) / 2, iconSz, iconSz), pdata.GetSourceRect(), Color.White);
+                        sb.Draw(pdata.GetTexture(), new Rectangle(cx + 8, cy + (cellH - iconSz) / 2, iconSz, iconSz), pdata.GetSourceRect(), Color.White);
                     }
                 }
                 catch { }
@@ -1892,9 +1938,9 @@ namespace SDVMobileControls
                 string countStr = $"{have}/{need}";
                 float cScale = fontScale * 0.78f;
                 float textTop = cy + Math.Max(2f, (cellH - 22f * cScale) * 0.45f);
-                DrawStardewText(sb, ingName, new Vector2(cx + iconSz + 10, textTop), Game1.textColor, cScale);
+                DrawStardewText(sb, ingName, new Vector2(cx + iconSz + 14, textTop), Game1.textColor, cScale);
                 float cntW = MeasureWidth(countStr, cScale);
-                DrawStardewText(sb, countStr, new Vector2(cx + cellW - cntW - 8, textTop), cCol, cScale);
+                DrawStardewText(sb, countStr, new Vector2(cx + cellW - cntW - 10, textTop), cCol, cScale);
             }
         }
 
@@ -2002,7 +2048,7 @@ namespace SDVMobileControls
                 }
                 if (!string.IsNullOrEmpty(desc))
                 {
-                    DrawStardewText(sb, desc, new Vector2(tx, ty), new Color(92, 48, 22), fScale * 0.78f);
+                    DrawStardewText(sb, desc, new Vector2(tx, ty), Game1.textColor * 0.88f, fScale * 0.78f);
                 }
             }
             catch { }

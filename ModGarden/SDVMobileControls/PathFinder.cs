@@ -32,11 +32,22 @@ namespace SDVMobileControls
 
                 // Exact Stardew Farmer foot hitbox sits in the BOTTOM HALF of the tile (y+32..y+64, 48x32),
                 // NOT y+10! Using y+10 false-collided with walls/doorframes/house porches directly north of walkable tiles.
+                // Pass pathfinding: true, skipCollisionEffects: true so A* exploration NEVER rustles distant grass/bushes!
                 bool riding = who != null && who.isRidingHorse();
                 var box = riding
                     ? new Microsoft.Xna.Framework.Rectangle(tx * 64 - 4, ty * 64 + 16, 72, 44)
                     : new Microsoft.Xna.Framework.Rectangle(tx * 64 + 10, ty * 64 + 34, 44, 26);
-                if (loc.isCollidingPosition(box, Game1.viewport, isFarmer: true, 0, glider: false, who))
+                if (loc.isCollidingPosition(
+                    box,
+                    Game1.viewport,
+                    isFarmer: true,
+                    damagesFarmer: 0,
+                    glider: false,
+                    character: who,
+                    pathfinding: true,
+                    projectile: false,
+                    ignoreCharacterRequirement: false,
+                    skipCollisionEffects: true))
                     return false;
 
                 return true;
@@ -47,7 +58,7 @@ namespace SDVMobileControls
             }
         }
 
-        public static List<Point> FindPath(GameLocation loc, Point start, Point goal, Farmer who, bool stopAdjacent)
+        public static List<Point> FindPath(GameLocation loc, Point start, Point goal, Farmer who, bool stopAdjacent, bool preferCardinal = false)
         {
             if (loc?.Map == null || who == null)
                 return null;
@@ -55,8 +66,29 @@ namespace SDVMobileControls
             if (start == goal)
                 return new List<Point>();
 
-            if (stopAdjacent && Math.Max(Math.Abs(start.X - goal.X), Math.Abs(start.Y - goal.Y)) <= 1)
-                return new List<Point>();
+            // Check whether at least one cardinal neighbor of the goal is walkable (or is our current start tile)
+            bool requireCardinal = false;
+            if (stopAdjacent && preferCardinal)
+            {
+                for (int i = 0; i < 4; i++)
+                {
+                    int cx = goal.X + Dx[i];
+                    int cy = goal.Y + Dy[i];
+                    if ((cx == start.X && cy == start.Y) || IsTileWalkable(loc, cx, cy, who))
+                    {
+                        requireCardinal = true;
+                        break;
+                    }
+                }
+            }
+
+            if (stopAdjacent)
+            {
+                int adx = Math.Abs(start.X - goal.X);
+                int ady = Math.Abs(start.Y - goal.Y);
+                if (requireCardinal ? (adx + ady == 1) : (Math.Max(adx, ady) <= 1))
+                    return new List<Point>();
+            }
 
             // If goal itself is blocked (e.g. chest, tree, rock, NPC), automatically aim for adjacent walkable tile
             bool targetAdjacent = stopAdjacent || !IsTileWalkable(loc, goal.X, goal.Y, who);
@@ -83,9 +115,19 @@ namespace SDVMobileControls
 
                 explored++;
 
-                bool reached = targetAdjacent
-                    ? (Math.Max(Math.Abs(cur.X - goal.X), Math.Abs(cur.Y - goal.Y)) <= 1 && cur != goal)
-                    : (cur == goal);
+                bool reached;
+                if (targetAdjacent)
+                {
+                    int cdx = Math.Abs(cur.X - goal.X);
+                    int cdy = Math.Abs(cur.Y - goal.Y);
+                    reached = requireCardinal
+                        ? (cdx + cdy == 1)
+                        : (Math.Max(cdx, cdy) <= 1 && cur != goal);
+                }
+                else
+                {
+                    reached = (cur == goal);
+                }
 
                 if (reached)
                     return Reconstruct(cameFrom, cur, start);

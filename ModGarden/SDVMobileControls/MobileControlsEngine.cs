@@ -139,6 +139,8 @@ namespace SDVMobileControls
         private int _stuckFrames;
         private int _actionPulseXFrames;
         private int _actionPulseAFrames;
+        private int _warpPushStartHudCount;
+        private object _lastPadObj;
         private string _lastLocationName;
         private MobileControlMode _lastModeSeen = MobileControlMode.VirtualGamepad;
         private bool _wasInMenu;
@@ -522,6 +524,41 @@ namespace SDVMobileControls
             _editTouchId = -1;
         }
 
+        public void TrackPadReference(object pad)
+        {
+            if (pad != null)
+            {
+                _lastPadObj = pad;
+                EnsureBridge(pad);
+            }
+        }
+
+        public bool IsFishingCastButtonHeld()
+        {
+            if (!Context.IsWorldReady || Game1.player == null ||
+                Game1.activeClickableMenu != null || Game1.eventUp || Game1.dialogueUp || Game1.paused ||
+                Game1.currentMinigame != null || _editMode || _saveMenuOpen || _guiHidden)
+                return false;
+
+            if (IsMobileModeActive)
+            {
+                if (_toolPressed || _tapChargingTool)
+                    return true;
+                if (_gamepadHideHud && _hasPhysicalGamePadState && _lastPhysicalGamePadState.Buttons.X == ButtonState.Pressed)
+                    return true;
+                return false;
+            }
+
+            // VirtualGamepad mode (handled directly by SDViOSTouchControls.TouchVirtualPad)
+            if (_lastPadObj != null)
+            {
+                var br = EnsureBridge(_lastPadObj);
+                if (br != null && br.GetButtonX(_lastPadObj))
+                    return true;
+            }
+            return false;
+        }
+
         public void ResetGameplayState()
         {
             _joyTouchId = -1;
@@ -530,6 +567,10 @@ namespace SDVMobileControls
             _interactTouchId = -1;
             _toolPressed = false;
             _interactPressed = false;
+            _actionPulseXFrames = 0;
+            _actionPulseAFrames = 0;
+            _holdSweepCooldown = 0;
+            _warpPushStartHudCount = 0;
             _pinching = false;
             _pinchIdA = -1;
             _pinchIdB = -1;
@@ -824,9 +865,11 @@ namespace SDVMobileControls
             // 4. Safe Area Notch/Dynamic Island padding for DayTimeMoneyBox (live bidirectional!)
             ApplySafeAreaToDayTimeMoneyBox();
 
-            // 5. Optional Battery Saver 30 FPS render cap (preserves 100% 60Hz logic speed; auto-suspends for BobberBar/minigames/fades!)
+            // 5. Optional Battery Saver 30 FPS render cap (preserves 100% 60Hz logic speed; auto-suspends for Fishing cast bar/BobberBar/minigames/fades!)
+            bool fishingCastAnim = Context.IsWorldReady && Game1.player?.CurrentTool is FishingRod frCast && (frCast.isTimingCast || frCast.isCasting);
             if (_cfg.BatterySaver30Fps &&
                 !_editMode && !_saveMenuOpen &&
+                !fishingCastAnim &&
                 Game1.currentMinigame == null &&
                 !(Game1.activeClickableMenu is BobberBar) &&
                 !Game1.fadeToBlack)
@@ -2993,7 +3036,13 @@ namespace SDVMobileControls
             }
 
             // --- 3. A* Tap-to-Move Path Follower + Door/Warp Exit Push ---
-            if (Game1.fadeToBlack)
+            if (Game1.fadeToBlack || Game1.dialogueUp || Game1.activeClickableMenu != null || Game1.eventUp)
+            {
+                _warpPushFrames = 0;
+                _actionPulseAFrames = 0;
+                _actionPulseXFrames = 0;
+            }
+            if (_warpPushFrames > 0 && Game1.hudMessages != null && Game1.hudMessages.Count > _warpPushStartHudCount)
                 _warpPushFrames = 0;
 
             if (stickVec == Vector2.Zero && !_toolPressed && !_interactPressed && !sawSlingshot)
@@ -3231,6 +3280,14 @@ namespace SDVMobileControls
                 Point aimRaw = new Point((int)_slingshotRawPos.X, (int)_slingshotRawPos.Y);
                 EnsureBridge(pad)?.ApplyInputWithMouse(pad, stickVec, true, false, false, aimRaw, true, false, _rawW, _rawH);
             }
+            else if (fireX && Game1.player?.CurrentTool is FishingRod timingRod && timingRod.isTimingCast)
+            {
+                // Keep MouseState.LeftButton == Pressed alongside ButtonX while charging cast bar so FishingRod.tickUpdate
+                // NEVER prematurely triggers startCasting() on iOS!
+                Point holdPos = new Point(Math.Max(1, _rawW / 2), Math.Max(1, _rawH / 2));
+                EnsureBridge(pad)?.ApplyInputWithMouse(pad, Vector2.Zero, true, false, false, holdPos, true, false, _rawW, _rawH);
+                Game1.lastCursorMotionWasMouse = false;
+            }
             else
             {
                 ApplyToPad(pad, stickVec, fireX, fireA, false);
@@ -3274,7 +3331,7 @@ namespace SDVMobileControls
 
             if (ready)
             {
-                _actionPulseAFrames = 2;
+                _actionPulseAFrames = 1;
                 _holdSweepCooldown = 8;
             }
         }
@@ -3923,13 +3980,13 @@ namespace SDVMobileControls
                 if (who.isRidingHorse())
                 {
                     ClearPath();
-                    _actionPulseAFrames = 3;
+                    _actionPulseAFrames = 1;
                     return;
                 }
                 if (IsSelfUsableObject(who.ActiveObject))
                 {
                     ClearPath();
-                    _actionPulseAFrames = 3;
+                    _actionPulseAFrames = 1;
                     return;
                 }
             }
@@ -3945,13 +4002,18 @@ namespace SDVMobileControls
                     {
                         intent.Kind = TileActionKind.Interact;
                         intent.StopAdjacent = true;
+                        intent.PreferCardinal = true;
                     }
                 }
                 catch { }
             }
 
-            // Detect Door / Exit / Map-Edge Warps (FarmHouse, Shops, Coops, Barns, Mines, Map Exits!)
-            // Allows tapping the door rug OR dark doorway edge to walk cleanly out the door!
+            Point actionTile = intent.HasResolvedTile ? intent.ResolvedTile : tappedTile;
+            int actionCheb = Math.Max(Math.Abs(playerTile.X - actionTile.X), Math.Abs(playerTile.Y - actionTile.Y));
+            int actionManh = Math.Abs(playerTile.X - actionTile.X) + Math.Abs(playerTile.Y - actionTile.Y);
+
+            // Detect Exit / Map-Edge Warps (FarmHouse exit rug, Shops exit, Coops/Barns exit, Mines, Map Exits!)
+            // Building entry doors (Farmhouse, Coop, Barn, Shed, Town houses) are handled via Action/Building.doAction above!
             bool tappedWarp = false;
             Point warpGoal = tappedTile;
             if (intent.Kind == TileActionKind.None && TryFindNearbyWarp(loc, tappedTile, out Point foundWarp))
@@ -3961,10 +4023,13 @@ namespace SDVMobileControls
                 intent.StopAdjacent = false;
             }
 
-            if (!tappedWarp && intent.Kind != TileActionKind.None && cheb <= 1)
+            bool closeEnoughNow = intent.PreferCardinal
+                ? (actionManh == 1)
+                : (actionCheb <= 1);
+            if (!tappedWarp && intent.Kind != TileActionKind.None && closeEnoughNow)
             {
                 ClearPath();
-                TriggerTileIntent(who, tappedTile, intent);
+                TriggerTileIntent(who, actionTile, intent);
                 return;
             }
 
@@ -3974,12 +4039,12 @@ namespace SDVMobileControls
             {
                 ClearPath();
                 who.faceGeneralDirection(new Vector2(tappedTile.X * 64f + 32f, tappedTile.Y * 64f + 32f));
-                _actionPulseAFrames = 3;
+                _actionPulseAFrames = 1;
                 return;
             }
 
-            Point pathGoal = tappedWarp ? FindWarpApproachTile(loc, warpGoal, playerTile, who) : tappedTile;
-            List<Point> path = PathFinder.FindPath(loc, playerTile, pathGoal, who, intent.StopAdjacent);
+            Point pathGoal = tappedWarp ? FindWarpApproachTile(loc, warpGoal, playerTile, who) : actionTile;
+            List<Point> path = PathFinder.FindPath(loc, playerTile, pathGoal, who, intent.StopAdjacent, intent.PreferCardinal);
             if (path == null)
             {
                 // Even if A* couldn't path directly to an out-of-bounds door edge, if player is right beside the warp, push through!
@@ -3987,7 +4052,8 @@ namespace SDVMobileControls
                 {
                     ClearPath();
                     _pendingWarpTile = warpGoal;
-                    _warpPushFrames = 48;
+                    _warpPushFrames = 28;
+                    _warpPushStartHudCount = Game1.hudMessages?.Count ?? 0;
                 }
                 return;
             }
@@ -3998,19 +4064,20 @@ namespace SDVMobileControls
                 {
                     ClearPath();
                     _pendingWarpTile = warpGoal;
-                    _warpPushFrames = 48;
+                    _warpPushFrames = 28;
+                    _warpPushStartHudCount = Game1.hudMessages?.Count ?? 0;
                     return;
                 }
                 if (intent.Kind != TileActionKind.None)
                 {
-                    TriggerTileIntent(who, tappedTile, intent);
+                    TriggerTileIntent(who, actionTile, intent);
                     return;
                 }
             }
 
             _path = path;
             _pathIdx = 0;
-            _targetTile = tappedWarp ? warpGoal : pathGoal;
+            _targetTile = tappedWarp ? warpGoal : actionTile;
             _hasTargetTile = true;
             _pendingIntent = intent;
             _hasPendingWarp = tappedWarp;
@@ -4155,30 +4222,6 @@ namespace SDVMobileControls
                     }
                 }
 
-                // Also match outdoor Farm Building doors (Coop, Barn, Shed, Cabin, Slime Hutch, Greenhouse)
-                // which GameLocation.isCollidingWithDoors handles via Building.getPointForHumanDoor()!
-                if (!found && loc.buildings != null)
-                {
-                    for (int i = 0; i < loc.buildings.Count; i++)
-                    {
-                        var b = loc.buildings[i];
-                        if (b == null || !b.HasIndoors()) continue;
-                        Point dp = b.getPointForHumanDoor();
-                        if (dp.X < 0 || dp.Y < 0) continue;
-                        int dx = Math.Abs(dp.X - tappedTile.X);
-                        int dy = Math.Abs(dp.Y - tappedTile.Y);
-                        bool match = (dx == 0 && dy == 0) || (tapOutOrBlocked && Math.Max(dx, dy) <= 1);
-                        if (!match) continue;
-                        int dSq = dx * dx + dy * dy;
-                        if (dSq < bestDistSq)
-                        {
-                            bestDistSq = dSq;
-                            warpTile = dp;
-                            found = true;
-                        }
-                    }
-                }
-
                 return found;
             }
             catch
@@ -4222,7 +4265,8 @@ namespace SDVMobileControls
                     if (hadWarp && Math.Max(Math.Abs(who.TilePoint.X - warpT.X), Math.Abs(who.TilePoint.Y - warpT.Y)) <= 2)
                     {
                         _pendingWarpTile = warpT;
-                        _warpPushFrames = 42;
+                        _warpPushFrames = 26;
+                        _warpPushStartHudCount = Game1.hudMessages?.Count ?? 0;
                     }
                     return Vector2.Zero;
                 }
@@ -4274,7 +4318,8 @@ namespace SDVMobileControls
             {
                 // Walk straight into the Warp tile so GameLocation.isCollidingWithWarp exits doors reliably!
                 _pendingWarpTile = warpTile;
-                _warpPushFrames = 48;
+                _warpPushFrames = 28;
+                _warpPushStartHudCount = Game1.hudMessages?.Count ?? 0;
                 return;
             }
 
@@ -4308,7 +4353,7 @@ namespace SDVMobileControls
 
             if (intent.Kind == TileActionKind.UseTool)
             {
-                _actionPulseXFrames = 3;
+                _actionPulseXFrames = 2;
                 if (_cfg.AutoRepeat && intent.Repeatable)
                 {
                     _repeatActive = true;
@@ -4318,7 +4363,26 @@ namespace SDVMobileControls
             }
             else if (intent.Kind == TileActionKind.Interact)
             {
-                _actionPulseAFrames = 3;
+                // Directly invoke loc.checkAction ONCE (identical to PC right-click!) so Mailboxes, Building doors
+                // (Farmhouse/Coop/Barn/Shed), Town shops/LockedDoorWarp, TV, Calendar, and Shipping Bins trigger
+                // cleanly ONCE without ever missing on diagonals or spamming 3x locked-door/eat dialogues!
+                bool handled = false;
+                if (Game1.currentLocation != null &&
+                    Game1.activeClickableMenu == null &&
+                    !Game1.dialogueUp && !Game1.eventUp && !Game1.fadeToBlack)
+                {
+                    try
+                    {
+                        handled = Game1.currentLocation.checkAction(
+                            new xTile.Dimensions.Location(tile.X, tile.Y),
+                            Game1.viewport,
+                            who);
+                    }
+                    catch { }
+                }
+
+                if (!handled)
+                    _actionPulseAFrames = 1;
             }
         }
 
@@ -4513,34 +4577,59 @@ namespace SDVMobileControls
             _bridge?.DrawCenteredString(sb, _pixel, text, r, ink, fontSize);
         }
 
+        private static void DrawCenteredGameText(SpriteBatch sb, Texture2D pixel, PadBridge bridge, string text, Rectangle r, Color color, float scale, int fallbackFs)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            try
+            {
+                if (Game1.smallFont != null)
+                {
+                    Vector2 sz = Game1.smallFont.MeasureString(text) * scale;
+                    if (sz.X > r.Width - 10 && sz.X > 1f)
+                    {
+                        float fit = (r.Width - 10f) / sz.X;
+                        scale *= fit;
+                        sz *= fit;
+                    }
+                    Vector2 pos = new Vector2(r.X + (r.Width - sz.X) * 0.5f, r.Y + (r.Height - sz.Y) * 0.5f + 1f);
+                    Utility.drawTextWithShadow(sb, text, Game1.smallFont, pos, color, scale);
+                    return;
+                }
+            }
+            catch { }
+            bridge?.DrawCenteredString(sb, pixel, text, r, color, fallbackFs);
+        }
+
         private void DrawSaveMenuModal(SpriteBatch sb)
         {
             int px = Math.Max(2, (int)Math.Round(_vpH / 320f));
-            sb.Draw(_pixel, new Rectangle(0, 0, _vpW, _vpH), Color.Black * 0.56f);
+            sb.Draw(_pixel, new Rectangle(0, 0, _vpW, _vpH), Color.Black * 0.54f);
 
-            // Outer Stardew wood + warm parchment dialog panel
-            DrawStardewPixelBox(sb, _savePanelRect, new Color(248, 223, 176), new Color(74, 37, 17), new Color(176, 108, 48), px * 2);
+            // Native Stardew 9-slice dialog panel (Game1.menuTexture — automatically skinned by Cat Valley UI & UI mods!)
+            PixelUi.DrawNativeDialogBox(sb, _pixel, _savePanelRect, 1f, drawShadow: true);
 
+            float fBase = Math.Clamp(_vpH / 820f, 0.72f, 1.45f);
             int titleFs = Math.Max(2, _vpH / 230);
             int btnFs = Math.Max(1, _vpH / 290);
             int rowFs = Math.Max(1, _vpH / 320);
+            Color ink = Game1.textColor;
 
             var slots = _saveSlots.GetSlotsForCurrentSave();
-            string title = $"SAVE MENU ({slots.Count})";
+            string title = $"QUẢN LÝ LƯU NHANH ({slots.Count})";
             var hdrRect = new Rectangle(_savePanelRect.X + px * 8, _savePanelRect.Y + px * 4, _savePanelRect.Width - _saveCloseRect.Width - px * 18, _saveCloseRect.Height);
-            _bridge?.DrawCenteredString(sb, _pixel, title, hdrRect, new Color(74, 37, 17), titleFs);
+            DrawCenteredGameText(sb, _pixel, _bridge, title, hdrRect, ink, fBase * 1.02f, titleFs);
 
-            DrawStardewPixelButton(sb, _saveCloseRect, "X", new Color(204, 62, 48), new Color(240, 118, 102), new Color(138, 30, 22), Color.White, titleFs, px);
+            PixelUi.DrawNativeCloseX(sb, _saveCloseRect, 1f);
 
-            // Recessed slot list container
-            DrawStardewPixelBox(sb, _saveListRect, new Color(230, 194, 134), new Color(115, 65, 29), new Color(248, 226, 184), px);
+            // Native Stardew recessed list container (Game1.mouseCursors)
+            PixelUi.DrawNativeSubBox(sb, _pixel, _saveListRect, Color.White, 0.92f);
 
             if (slots.Count == 0)
             {
                 var empty1 = new Rectangle(_saveListRect.X + px * 4, _saveListRect.Y + _saveListRect.Height / 3, _saveListRect.Width - px * 8, _saveListRect.Height / 5);
                 var empty2 = new Rectangle(_saveListRect.X + px * 4, empty1.Bottom + px * 2, _saveListRect.Width - px * 8, _saveListRect.Height / 5);
-                _bridge?.DrawCenteredString(sb, _pixel, "CHUA CO BAN LUU NAO", empty1, new Color(115, 65, 29), btnFs);
-                _bridge?.DrawCenteredString(sb, _pixel, "BAM '+ LUU MOI' DE TAO MOC THOI GIAN", empty2, new Color(142, 88, 44), rowFs);
+                DrawCenteredGameText(sb, _pixel, _bridge, "Chưa có bản lưu nhanh nào", empty1, ink, fBase * 0.90f, btnFs);
+                DrawCenteredGameText(sb, _pixel, _bridge, "Bấm '+ Lưu mới' để tạo mốc thời gian", empty2, ink * 0.82f, fBase * 0.78f, rowFs);
             }
             else
             {
@@ -4552,33 +4641,42 @@ namespace SDVMobileControls
                     Rectangle rowRect = GetSaveSlotRowRect(r);
                     bool sel = (idx == _saveSelectedIdx);
 
-                    Color rowBg = sel ? new Color(252, 214, 108) : new Color(248, 232, 198);
-                    Color rowOut = sel ? new Color(196, 106, 20) : new Color(138, 86, 42);
-                    Color rowIn = sel ? new Color(255, 240, 178) : new Color(255, 246, 224);
-                    DrawStardewPixelBox(sb, rowRect, rowBg, rowOut, rowIn, px);
+                    PixelUi.DrawNativeSubBox(sb, _pixel, rowRect, sel ? new Color(255, 240, 188) : Color.White, sel ? 1f : 0.90f);
 
-                    int pad = px * 3;
-                    int halfH = Math.Max(12, (rowRect.Height - pad * 2) / 2);
+                    int pad = px * 4;
+                    int halfH = Math.Max(14, (rowRect.Height - pad * 2) / 2);
                     var topLine = new Rectangle(rowRect.X + pad, rowRect.Y + pad, rowRect.Width - pad * 2, halfH);
                     var subLine = new Rectangle(rowRect.X + pad, topLine.Bottom, rowRect.Width - pad * 2, rowRect.Height - pad * 2 - halfH);
 
                     string prefix = slot.IsAutoSave ? "" : $"#{slots.Count - idx} ";
-                    _bridge?.DrawCenteredString(sb, _pixel, prefix + slot.FormatHeaderLine(), topLine, new Color(58, 30, 12), rowFs);
-                    _bridge?.DrawCenteredString(sb, _pixel, slot.FormatDetailLine(), subLine, new Color(116, 70, 32), Math.Max(1, rowFs));
+                    DrawCenteredGameText(sb, _pixel, _bridge, prefix + slot.FormatHeaderLine(), topLine, ink, fBase * 0.80f, rowFs);
+                    DrawCenteredGameText(sb, _pixel, _bridge, slot.FormatDetailLine(), subLine, ink * 0.84f, fBase * 0.72f, Math.Max(1, rowFs));
                 }
             }
 
-            // Up/Down scroll buttons when > 4 slots
+            // Native Stardew Up/Down scroll buttons (Game1.mouseCursors arrows!)
             bool canUp = _saveScrollIdx > 0;
             bool canDn = _saveScrollIdx + SaveVisibleRows < slots.Count;
-            DrawStardewPixelButton(sb, _saveUpBtnRect, "^", canUp ? new Color(196, 134, 68) : new Color(166, 140, 104), new Color(230, 178, 114), new Color(128, 78, 34), Color.White, btnFs, px);
-            DrawStardewPixelButton(sb, _saveDnBtnRect, "v", canDn ? new Color(196, 134, 68) : new Color(166, 140, 104), new Color(230, 178, 114), new Color(128, 78, 34), Color.White, btnFs, px);
+            PixelUi.DrawNativeButton(sb, _pixel, _bridge, _saveUpBtnRect, null, Color.White * (canUp ? 1f : 0.50f), fBase * 0.86f, _vpH, drawShadow: false);
+            PixelUi.DrawNativeButton(sb, _pixel, _bridge, _saveDnBtnRect, null, Color.White * (canDn ? 1f : 0.50f), fBase * 0.86f, _vpH, drawShadow: false);
+            try
+            {
+                if (Game1.mouseCursors != null)
+                {
+                    int arrSz = Math.Max(18, Math.Min(_saveUpBtnRect.Width, _saveUpBtnRect.Height) / 2);
+                    var upR = new Rectangle(_saveUpBtnRect.Center.X - arrSz / 2, _saveUpBtnRect.Center.Y - arrSz / 2, arrSz, arrSz);
+                    var dnR = new Rectangle(_saveDnBtnRect.Center.X - arrSz / 2, _saveDnBtnRect.Center.Y - arrSz / 2, arrSz, arrSz);
+                    sb.Draw(Game1.mouseCursors, upR, new Rectangle(421, 459, 11, 12), Color.White * (canUp ? 1f : 0.45f));
+                    sb.Draw(Game1.mouseCursors, dnR, new Rectangle(421, 472, 11, 12), Color.White * (canDn ? 1f : 0.45f));
+                }
+            }
+            catch { }
 
-            // Bottom action buttons: + LUU MOI | TAI BAN NAY | XOA
+            // Native Stardew bottom action buttons (+ Lưu mới | Tải bản này | Xóa)
             bool hasSel = (_saveSelectedIdx >= 0 && _saveSelectedIdx < slots.Count);
-            DrawStardewPixelButton(sb, _saveNewBtnRect, "+ LUU MOI", new Color(56, 150, 67), new Color(102, 198, 112), new Color(32, 98, 40), Color.White, btnFs, px);
-            DrawStardewPixelButton(sb, _saveLoadBtnRect, "TAI BAN NAY", hasSel ? new Color(210, 133, 30) : new Color(148, 132, 108), hasSel ? new Color(246, 182, 82) : new Color(172, 158, 136), hasSel ? new Color(140, 82, 14) : new Color(108, 94, 74), Color.White, btnFs, px);
-            DrawStardewPixelButton(sb, _saveDelBtnRect, "XOA", hasSel ? new Color(200, 56, 44) : new Color(148, 132, 108), hasSel ? new Color(236, 112, 98) : new Color(172, 158, 136), hasSel ? new Color(132, 28, 22) : new Color(108, 94, 74), Color.White, btnFs, px);
+            PixelUi.DrawNativeButton(sb, _pixel, _bridge, _saveNewBtnRect, "+ Lưu mới", new Color(234, 255, 232), fBase * 0.90f, _vpH);
+            PixelUi.DrawNativeButton(sb, _pixel, _bridge, _saveLoadBtnRect, "Tải bản này", hasSel ? new Color(255, 246, 218) : (Color.White * 0.55f), fBase * 0.90f, _vpH);
+            PixelUi.DrawNativeButton(sb, _pixel, _bridge, _saveDelBtnRect, "Xóa", hasSel ? new Color(255, 232, 228) : (Color.White * 0.55f), fBase * 0.90f, _vpH);
         }
 
         // =========================================================================
@@ -4736,18 +4834,17 @@ namespace SDVMobileControls
 
         private void DrawToastBanner(SpriteBatch sb, bool isRamWarn)
         {
-            int px = Math.Max(2, (int)Math.Round(_vpH / 320f));
             int tw = isRamWarn
                 ? Math.Clamp((int)(_vpW * 0.68f), 340, _vpW - 32)
-                : Math.Clamp((int)(_vpW * 0.42f), 260, _vpW - 40);
-            int th = Math.Max(36, (int)(_vpH * 0.068f));
+                : Math.Clamp((int)(_vpW * 0.44f), 260, _vpW - 40);
+            int th = Math.Max(40, (int)(_vpH * 0.072f));
             var toastR = new Rectangle((_vpW - tw) / 2, _vpH - th - Math.Max(18, _vpH / 26), tw, th);
-            Color boxFill = isRamWarn ? new Color(92, 18, 16) * 0.95f : new Color(46, 30, 16) * 0.94f;
-            Color boxOut = isRamWarn ? new Color(255, 96, 76) : new Color(246, 198, 86);
-            Color boxIn = isRamWarn ? new Color(255, 208, 92) : new Color(138, 86, 42);
-            DrawStardewPixelBox(sb, toastR, boxFill, boxOut, boxIn, px);
+            Color tint = isRamWarn ? new Color(255, 206, 198) : Color.White;
+            PixelUi.DrawNativeDialogBox(sb, _pixel, toastR, 0.96f, drawShadow: true, tintOverride: tint);
+            float fScale = Math.Clamp(_vpH / 900f, 0.72f, 1.30f);
             int fs = Math.Max(1, _vpH / 300);
-            _bridge?.DrawCenteredString(sb, _pixel, _saveToastText, toastR, new Color(255, 240, 190), fs);
+            Color txtCol = isRamWarn ? new Color(156, 22, 18) : Game1.textColor;
+            DrawCenteredGameText(sb, _pixel, _bridge, _saveToastText, toastR, txtCol, fScale, fs);
         }
 
         private void DrawCustomKeyButtons(SpriteBatch sb)
@@ -4842,17 +4939,16 @@ namespace SDVMobileControls
                 PixelUi.DrawPixelTileTarget(sb, _pixel, _topBarGroupRect, tbBorder, 0.06f);
             }
 
-            // Top-center Stardew-Pixel Edit Layout toolbar (+PHIM / XOA / RESET / HUY / LUU)
-            int px = PixelUi.Step(_vpH);
-            DrawStardewPixelBox(sb, _editToolbarRect, new Color(56, 36, 20) * 0.94f, new Color(28, 16, 8), new Color(176, 116, 54), px);
+            // Top-center native Stardew Edit Layout toolbar (+PHIM / XOA / RESET / HUY / LUU)
+            PixelUi.DrawNativeDialogBox(sb, _pixel, _editToolbarRect, 0.96f, drawShadow: true);
 
-            int fs = Math.Max(2, _vpH / 280);
-            DrawToolbarActionButton(sb, _editAddKeyBtnRect, "+PHIM", new Color(138, 86, 176), fs);
+            float tbScale = Math.Clamp(_vpH / 920f, 0.70f, 1.25f);
+            PixelUi.DrawNativeButton(sb, _pixel, _bridge, _editAddKeyBtnRect, "+Phím", new Color(244, 232, 255), tbScale, _vpH, drawShadow: false);
             bool canDel = (_editSelected == EditTarget.CustomKey && _editSelectedCustomId > 0);
-            DrawToolbarActionButton(sb, _editDelKeyBtnRect, "XOA", canDel ? new Color(196, 60, 48) : new Color(92, 76, 62), fs);
-            DrawToolbarActionButton(sb, _editResetBtnRect, "RESET", new Color(132, 108, 82), fs);
-            DrawToolbarActionButton(sb, _editCancelBtnRect, "HUY", new Color(196, 126, 40), fs);
-            DrawToolbarActionButton(sb, _editSaveBtnRect, "LUU", new Color(66, 154, 74), fs);
+            PixelUi.DrawNativeButton(sb, _pixel, _bridge, _editDelKeyBtnRect, "Xóa", canDel ? new Color(255, 228, 224) : (Color.White * 0.55f), tbScale, _vpH, drawShadow: false);
+            PixelUi.DrawNativeButton(sb, _pixel, _bridge, _editResetBtnRect, "Reset", Color.White, tbScale, _vpH, drawShadow: false);
+            PixelUi.DrawNativeButton(sb, _pixel, _bridge, _editCancelBtnRect, "Hủy", new Color(255, 244, 220), tbScale, _vpH, drawShadow: false);
+            PixelUi.DrawNativeButton(sb, _pixel, _bridge, _editSaveBtnRect, "Lưu", new Color(232, 255, 230), tbScale, _vpH, drawShadow: false);
 
             // In-Game PC Key Picker Modal
             if (_keyPickerOpen)
@@ -4861,21 +4957,21 @@ namespace SDVMobileControls
 
         private void DrawKeyPickerModal(SpriteBatch sb)
         {
-            sb.Draw(_pixel, new Rectangle(0, 0, _vpW, _vpH), Color.Black * 0.56f);
-            int px = PixelUi.Step(_vpH);
-            DrawStardewPixelBox(sb, _pickerPanelRect, new Color(246, 224, 176), new Color(74, 37, 17), new Color(176, 108, 48), px * 2);
+            sb.Draw(_pixel, new Rectangle(0, 0, _vpW, _vpH), Color.Black * 0.54f);
+            PixelUi.DrawNativeDialogBox(sb, _pixel, _pickerPanelRect, 1f, drawShadow: true);
 
+            float fBase = Math.Clamp(_vpH / 840f, 0.72f, 1.35f);
             int titleFs = Math.Max(2, _vpH / 250);
-            var hdrRect = new Rectangle(_pickerPanelRect.X + 16, _pickerPanelRect.Y + 8, _pickerPanelRect.Width - 120, Math.Max(36, _vpH / 16));
-            _bridge?.DrawCenteredString(sb, _pixel, "CHON PHIM PC DE THEM", hdrRect, new Color(74, 37, 17), titleFs);
-            DrawStardewPixelButton(sb, _pickerCloseRect, "X", new Color(204, 62, 48), new Color(240, 118, 102), new Color(138, 30, 22), Color.White, titleFs, px);
+            var hdrRect = new Rectangle(_pickerPanelRect.X + 18, _pickerPanelRect.Y + 10, _pickerPanelRect.Width - 120, Math.Max(36, _vpH / 16));
+            DrawCenteredGameText(sb, _pixel, _bridge, "Chọn phím PC để thêm", hdrRect, Game1.textColor, fBase * 0.98f, titleFs);
+            PixelUi.DrawNativeCloseX(sb, _pickerCloseRect, 1f);
 
             int cellFs = Math.Max(1, _vpH / 300);
             for (int k = 0; k < PcKeyCatalog.Length; k++)
             {
                 Rectangle cell = GetKeyPickerCellRect(k);
                 PixelUi.DrawPixelPill(sb, _pixel, _bridge, cell, PcKeyCatalog[k].Label,
-                    (k < 12) ? PixelRole.Tool : PixelRole.CustomKey, false, _vpH, cellFs, 0.96f);
+                    (k < 12) ? PixelRole.Tool : PixelRole.CustomKey, false, _vpH, cellFs, 0.98f);
             }
         }
 

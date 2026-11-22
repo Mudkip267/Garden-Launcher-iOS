@@ -23,6 +23,9 @@ namespace SDVMobileControls
         public int PreferredToolSlot; // -1 = keep current tool
         public bool StopAdjacent;
         public bool Repeatable;       // Auto-repeat 1-tap chop/mine/fight until broken or defeated
+        public bool PreferCardinal;   // Walk squarely onto a cardinal tile (N/S/E/W) for Mailboxes, Doors, Buildings
+        public bool HasResolvedTile;  // True when tapping a tall sprite above its base tile (e.g. floating Mailbox letter!)
+        public Point ResolvedTile;
     }
 
     internal static class AutoToolAndCombat
@@ -349,15 +352,103 @@ namespace SDVMobileControls
             }
             catch { }
 
-            // 8. Building / Action tile (Doors, Mailboxes, TV, Bed, Calendar, Shipping Bin, Shop Counters)
+            // 8. Building / Action tile (Mailboxes + floating letter envelope, Farm Buildings, Doors, TV, Bed, Calendar, Shipping Bin, Shop Counters)
             try
             {
+                // 8a. Farm main mailbox (Stardew 1.6 stores Farmhouse & Cabins as Buildings — Mailbox is NOT in map "Action" property!)
+                // Also match 1 tile ABOVE the mailbox so tapping the bobbing white letter envelope opens the mail!
+                if (loc is Farm farm)
+                {
+                    Point mainMb = farm.GetMainMailboxPosition();
+                    if (mainMb.X >= 0 && mainMb.Y >= 0 &&
+                        ((tile.X == mainMb.X && tile.Y == mainMb.Y) || (tile.X == mainMb.X && tile.Y == mainMb.Y - 1)))
+                    {
+                        intent.Kind = TileActionKind.Interact;
+                        intent.StopAdjacent = true;
+                        intent.PreferCardinal = true;
+                        intent.HasResolvedTile = true;
+                        intent.ResolvedTile = mainMb;
+                        return intent;
+                    }
+                }
+
+                // 8b. All Stardew 1.6 Buildings (Farmhouse, Cabin, Coop, Barn, Shed, Greenhouse, Mailbox, ShippingBin, PetBowl, FishPond, Mill, Silo, Well, Obelisks, GoldClock, JunimoHut, animal doors)
+                if (loc.buildings != null)
+                {
+                    for (int i = 0; i < loc.buildings.Count; i++)
+                    {
+                        var b = loc.buildings[i];
+                        if (b == null) continue;
+
+                        Point bMb = b.getMailboxPosition();
+                        if (bMb.X >= 0 && bMb.Y >= 0 &&
+                            ((tile.X == bMb.X && tile.Y == bMb.Y) || (tile.X == bMb.X && tile.Y == bMb.Y - 1)))
+                        {
+                            intent.Kind = TileActionKind.Interact;
+                            intent.StopAdjacent = true;
+                            intent.PreferCardinal = true;
+                            intent.HasResolvedTile = true;
+                            intent.ResolvedTile = bMb;
+                            return intent;
+                        }
+
+                        // Building human doors (Farmhouse, Cabin, Coop, Barn, Shed, Greenhouse, Slime Hutch) are entered
+                        // via Building.doAction (loc.checkAction), NOT walk-in loc.warps! Match both door tile AND 1 tile above (tall door sprite).
+                        if (b.HasIndoors())
+                        {
+                            Point humanDoor = b.getPointForHumanDoor();
+                            if (humanDoor.X >= 0 && humanDoor.Y >= 0 &&
+                                ((tile.X == humanDoor.X && tile.Y == humanDoor.Y) ||
+                                 (tile.X == humanDoor.X && tile.Y == humanDoor.Y - 1)))
+                            {
+                                intent.Kind = TileActionKind.Interact;
+                                intent.StopAdjacent = true;
+                                intent.PreferCardinal = true;
+                                intent.HasResolvedTile = true;
+                                intent.ResolvedTile = humanDoor;
+                                return intent;
+                            }
+                        }
+
+                        if (b.isActionableTile(tile.X, tile.Y, who))
+                        {
+                            intent.Kind = TileActionKind.Interact;
+                            intent.StopAdjacent = true;
+                            intent.PreferCardinal = true;
+                            return intent;
+                        }
+                    }
+                }
+
                 string actionProp = loc.doesTileHaveProperty(tile.X, tile.Y, "Action", "Buildings");
                 if (!string.IsNullOrEmpty(actionProp))
                 {
                     intent.Kind = TileActionKind.Interact;
                     intent.StopAdjacent = true;
+                    intent.PreferCardinal = true;
                     return intent;
+                }
+
+                // Tapping the upper half of a 2-tile-tall Town/Shop/House door (or Mailbox):
+                // resolve cleanly to the bottom Action tile (tile.X, tile.Y + 1) when tapped tile itself is blocked wall/doorframe!
+                if (!PathFinder.IsTileWalkable(loc, tile.X, tile.Y, who))
+                {
+                    string belowAction = loc.doesTileHaveProperty(tile.X, tile.Y + 1, "Action", "Buildings");
+                    if (!string.IsNullOrEmpty(belowAction) &&
+                        (belowAction.StartsWith("LockedDoorWarp", StringComparison.OrdinalIgnoreCase) ||
+                         belowAction.StartsWith("Door", StringComparison.OrdinalIgnoreCase) ||
+                         belowAction.StartsWith("Warp", StringComparison.OrdinalIgnoreCase) ||
+                         belowAction.StartsWith("Enter", StringComparison.OrdinalIgnoreCase) ||
+                         belowAction.StartsWith("Mailbox", StringComparison.OrdinalIgnoreCase) ||
+                         belowAction.StartsWith("Mine", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        intent.Kind = TileActionKind.Interact;
+                        intent.StopAdjacent = true;
+                        intent.PreferCardinal = true;
+                        intent.HasResolvedTile = true;
+                        intent.ResolvedTile = new Point(tile.X, tile.Y + 1);
+                        return intent;
+                    }
                 }
             }
             catch { }

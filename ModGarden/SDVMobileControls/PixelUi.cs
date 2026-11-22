@@ -1,6 +1,8 @@
 using System;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
+using StardewValley;
+using StardewValley.Menus;
 
 namespace SDVMobileControls
 {
@@ -78,9 +80,14 @@ namespace SDVMobileControls
             _pxJoyTicks.SetData(ticks);
         }
 
+        private static readonly Rectangle NativeDialogBoxSrc = new Rectangle(0, 256, 60, 60);
+        private static readonly Rectangle NativeSubBoxSrc = new Rectangle(384, 396, 15, 15);
+        private static readonly Rectangle NativeButtonSrc = new Rectangle(432, 439, 9, 9);
+        private static readonly Rectangle NativeCloseXSrc = new Rectangle(337, 494, 12, 12);
+
         /// <summary>
-        /// Draws a notched-corner Stardew 16-bit pixel pill button with subtle translucent wood tint
-        /// and 1-step top/left highlight bevel + bottom/right shade.
+        /// Draws a native Stardew Valley 9-slice UI button (Game1.mouseCursors) so external UI/UX mods
+        /// (like Cat Valley UI) automatically skin all custom controls, pills, and popups!
         /// </summary>
         public static void DrawPixelPill(
             SpriteBatch sb,
@@ -97,54 +104,177 @@ namespace SDVMobileControls
             if (sb == null || pixel == null || r.Width < 8 || r.Height < 8)
                 return;
 
-            alphaScale = Math.Clamp(alphaScale * GlobalOpacity, 0.12f, 1.0f);
+            alphaScale = Math.Clamp(alphaScale * GlobalOpacity, 0.14f, 1.0f);
             int px = Step(vpH);
             if (r.Width < px * 6 || r.Height < px * 6)
                 px = Math.Max(1, Math.Min(r.Width, r.Height) / 6);
 
-            GetRolePalette(role, pressed, out Color fill, out Color outer, out Color hi, out Color lo, out Color ink);
-            fill *= alphaScale;
-            outer *= alphaScale;
-            hi *= alphaScale;
-            lo *= alphaScale;
-            ink *= Math.Clamp(alphaScale + 0.12f, 0.25f, 1.0f);
-
-            // Slight 1-pixel press depression feel via swapped bevel
-            if (pressed)
+            bool drewNative = false;
+            try
             {
-                Color tmp = hi;
-                hi = lo;
-                lo = tmp;
+                if (Game1.mouseCursors != null)
+                {
+                    Color tint = GetNativeRoleTint(role, pressed);
+                    float boxScale = Math.Clamp(Math.Min(r.Width, r.Height) / 14f, 1.6f, 3.4f);
+                    IClickableMenu.drawTextureBox(
+                        sb,
+                        Game1.mouseCursors,
+                        NativeButtonSrc,
+                        r.X,
+                        r.Y,
+                        r.Width,
+                        r.Height,
+                        tint * alphaScale,
+                        boxScale,
+                        drawShadow: false);
+                    drewNative = true;
+                }
+            }
+            catch { }
+
+            if (!drewNative)
+            {
+                GetRolePalette(role, pressed, out Color fill, out Color outer, out Color hi, out Color lo, out _);
+                fill *= alphaScale;
+                outer *= alphaScale;
+                hi *= alphaScale;
+                lo *= alphaScale;
+                if (pressed) { Color tmp = hi; hi = lo; lo = tmp; }
+
+                sb.Draw(pixel, new Rectangle(r.X + px, r.Y + px, r.Width - px * 2, r.Height - px * 2), fill);
+                sb.Draw(pixel, new Rectangle(r.X + px, r.Y, r.Width - px * 2, px), outer);
+                sb.Draw(pixel, new Rectangle(r.X + px, r.Bottom - px, r.Width - px * 2, px), outer);
+                sb.Draw(pixel, new Rectangle(r.X, r.Y + px, px, r.Height - px * 2), outer);
+                sb.Draw(pixel, new Rectangle(r.Right - px, r.Y + px, px, r.Height - px * 2), outer);
+                if (r.Width > px * 5 && r.Height > px * 5)
+                {
+                    sb.Draw(pixel, new Rectangle(r.X + px * 2, r.Y + px, r.Width - px * 4, px), hi);
+                    sb.Draw(pixel, new Rectangle(r.X + px, r.Y + px * 2, px, r.Height - px * 4), hi);
+                    sb.Draw(pixel, new Rectangle(r.X + px * 2, r.Bottom - px * 2, r.Width - px * 4, px), lo);
+                    sb.Draw(pixel, new Rectangle(r.Right - px * 2, r.Y + px * 2, px, r.Height - px * 4), lo);
+                }
             }
 
-            // 1. Notched pixel fill (cuts 4 corners by px for crisp pixel-art bevel)
-            sb.Draw(pixel, new Rectangle(r.X + px, r.Y + px, r.Width - px * 2, r.Height - px * 2), fill);
-
-            // 2. Crisp notched outer dark wood outline
-            sb.Draw(pixel, new Rectangle(r.X + px, r.Y, r.Width - px * 2, px), outer);            // Top
-            sb.Draw(pixel, new Rectangle(r.X + px, r.Bottom - px, r.Width - px * 2, px), outer);   // Bottom
-            sb.Draw(pixel, new Rectangle(r.X, r.Y + px, px, r.Height - px * 2), outer);            // Left
-            sb.Draw(pixel, new Rectangle(r.Right - px, r.Y + px, px, r.Height - px * 2), outer);   // Right
-
-            // 3. Subtle 1-step pixel highlight (top & left) and shadow (bottom & right)
-            if (r.Width > px * 5 && r.Height > px * 5)
-            {
-                sb.Draw(pixel, new Rectangle(r.X + px * 2, r.Y + px, r.Width - px * 4, px), hi);
-                sb.Draw(pixel, new Rectangle(r.X + px, r.Y + px * 2, px, r.Height - px * 4), hi);
-                sb.Draw(pixel, new Rectangle(r.X + px * 2, r.Bottom - px * 2, r.Width - px * 4, px), lo);
-                sb.Draw(pixel, new Rectangle(r.Right - px * 2, r.Y + px * 2, px, r.Height - px * 4), lo);
-            }
-
-            // 4. Label text (subtle 1px dark drop-shadow for readability without visual clutter)
             if (!string.IsNullOrEmpty(label) && bridge != null)
             {
                 int fs = fontSizeOverride > 0 ? fontSizeOverride : Math.Max(1, vpH / 320);
                 int dy = pressed ? Math.Max(1, px / 2) : 0;
-                var shadowR = new Rectangle(r.X + px / 2, r.Y + dy + Math.Max(1, px / 2), r.Width, r.Height);
+                Color ink = drewNative
+                    ? (Game1.textColor * Math.Clamp(alphaScale + 0.14f, 0.35f, 1.0f))
+                    : (new Color(248, 238, 214) * Math.Clamp(alphaScale + 0.12f, 0.25f, 1.0f));
+                Color shCol = drewNative
+                    ? (new Color(255, 250, 238) * (0.36f * alphaScale))
+                    : (new Color(18, 10, 6) * (0.58f * alphaScale));
+                var shadowR = new Rectangle(r.X + Math.Max(1, px / 2), r.Y + dy + Math.Max(1, px / 2), r.Width, r.Height);
                 var textR = new Rectangle(r.X, r.Y + dy, r.Width, r.Height);
-                bridge.DrawCenteredString(sb, pixel, label, shadowR, new Color(18, 10, 6) * (0.58f * alphaScale), fs);
+                bridge.DrawCenteredString(sb, pixel, label, shadowR, shCol, fs);
                 bridge.DrawCenteredString(sb, pixel, label, textR, ink, fs);
             }
+        }
+
+        private static Color GetNativeRoleTint(PixelRole role, bool pressed)
+        {
+            if (pressed)
+                return new Color(255, 236, 186);
+            switch (role)
+            {
+                case PixelRole.Active:    return new Color(255, 240, 192);
+                case PixelRole.Tool:      return new Color(255, 244, 218);
+                case PixelRole.Action:    return new Color(224, 250, 224);
+                case PixelRole.Special:   return new Color(255, 224, 216);
+                case PixelRole.CustomKey: return new Color(242, 232, 255);
+                case PixelRole.Warn:      return new Color(255, 214, 204);
+                default:                  return Color.White;
+            }
+        }
+
+        public static void DrawNativeDialogBox(SpriteBatch sb, Texture2D pixel, Rectangle r, float alpha = 1f, bool drawShadow = true, Color? tintOverride = null)
+        {
+            if (sb == null || r.Width < 16 || r.Height < 16) return;
+            Color col = (tintOverride ?? Color.White) * Math.Clamp(alpha, 0.05f, 1f);
+            try
+            {
+                if (Game1.menuTexture != null)
+                {
+                    float s = Math.Clamp(Math.Min(r.Width, r.Height) / 240f, 0.72f, 1.0f);
+                    IClickableMenu.drawTextureBox(sb, Game1.menuTexture, NativeDialogBoxSrc, r.X, r.Y, r.Width, r.Height, col, s, drawShadow);
+                    return;
+                }
+            }
+            catch { }
+            DrawParchmentBoxFallback(sb, pixel, r, 2, alpha);
+        }
+
+        public static void DrawNativeSubBox(SpriteBatch sb, Texture2D pixel, Rectangle r, Color tint, float alpha = 1f)
+        {
+            if (sb == null || r.Width < 12 || r.Height < 12) return;
+            Color col = tint * Math.Clamp(alpha, 0.05f, 1f);
+            try
+            {
+                if (Game1.mouseCursors != null)
+                {
+                    float s = Math.Clamp(Math.Min(r.Width, r.Height) / 30f, 2.0f, 4.0f);
+                    IClickableMenu.drawTextureBox(sb, Game1.mouseCursors, NativeSubBoxSrc, r.X, r.Y, r.Width, r.Height, col, s, drawShadow: false);
+                    return;
+                }
+            }
+            catch { }
+            if (pixel != null) sb.Draw(pixel, r, col * 0.25f);
+        }
+
+        public static void DrawNativeButton(SpriteBatch sb, Texture2D pixel, PadBridge bridge, Rectangle r, string text, Color tint, float fontScale, int vpH, bool drawShadow = true)
+        {
+            if (sb == null || r.Width < 10 || r.Height < 10) return;
+            bool drewBox = false;
+            try
+            {
+                if (Game1.mouseCursors != null)
+                {
+                    float s = Math.Clamp(Math.Min(r.Width, r.Height) / 14f, 2.0f, 4.0f);
+                    IClickableMenu.drawTextureBox(sb, Game1.mouseCursors, NativeButtonSrc, r.X, r.Y, r.Width, r.Height, tint, s, drawShadow);
+                    drewBox = true;
+                }
+            }
+            catch { }
+
+            if (!drewBox && pixel != null)
+                DrawParchmentBoxFallback(sb, pixel, r, Step(vpH), 0.95f);
+
+            if (string.IsNullOrEmpty(text))
+                return;
+
+            try
+            {
+                if (Game1.smallFont != null)
+                {
+                    Vector2 sz = Game1.smallFont.MeasureString(text) * fontScale;
+                    if (sz.X > r.Width - 12 && sz.X > 1f)
+                    {
+                        float fit = (r.Width - 12f) / sz.X;
+                        fontScale *= fit;
+                        sz *= fit;
+                    }
+                    Vector2 pos = new Vector2(r.X + (r.Width - sz.X) * 0.5f, r.Y + (r.Height - sz.Y) * 0.5f + 1f);
+                    Utility.drawTextWithShadow(sb, text, Game1.smallFont, pos, Game1.textColor, fontScale);
+                    return;
+                }
+            }
+            catch { }
+
+            bridge?.DrawCenteredString(sb, pixel, text, r, Game1.textColor, Math.Max(1, vpH / 300));
+        }
+
+        public static void DrawNativeCloseX(SpriteBatch sb, Rectangle r, float alpha = 1f)
+        {
+            if (sb == null || r.Width < 8 || r.Height < 8) return;
+            try
+            {
+                if (Game1.mouseCursors != null)
+                {
+                    sb.Draw(Game1.mouseCursors, r, NativeCloseXSrc, Color.White * Math.Clamp(alpha, 0.1f, 1f));
+                }
+            }
+            catch { }
         }
 
         /// <summary>
@@ -236,9 +366,28 @@ namespace SDVMobileControls
         }
 
         /// <summary>
-        /// Draws a crisp notched Stardew parchment box (for Fixed Tooltip, Vertical Toolbar, Safe Hints).
+        /// Draws a native Stardew dialog/parchment box using Game1.menuTexture (automatically themed by UI mods like Cat Valley UI!).
         /// </summary>
         public static void DrawParchmentBox(SpriteBatch sb, Texture2D pixel, Rectangle r, int px, float alpha = 0.94f)
+        {
+            if (sb == null || r.Width < 12 || r.Height < 12)
+                return;
+
+            try
+            {
+                if (Game1.menuTexture != null)
+                {
+                    float s = Math.Clamp(Math.Min(r.Width, r.Height) / 140f, 0.65f, 1.0f);
+                    IClickableMenu.drawTextureBox(sb, Game1.menuTexture, NativeDialogBoxSrc, r.X, r.Y, r.Width, r.Height, Color.White * Math.Clamp(alpha, 0.05f, 1f), s, drawShadow: false);
+                    return;
+                }
+            }
+            catch { }
+
+            DrawParchmentBoxFallback(sb, pixel, r, px, alpha);
+        }
+
+        private static void DrawParchmentBoxFallback(SpriteBatch sb, Texture2D pixel, Rectangle r, int px, float alpha)
         {
             if (sb == null || pixel == null || r.Width < px * 6 || r.Height < px * 6)
                 return;
@@ -250,20 +399,17 @@ namespace SDVMobileControls
 
             sb.Draw(pixel, new Rectangle(r.X + px, r.Y + px, r.Width - px * 2, r.Height - px * 2), bg);
 
-            // Notched outer dark brown wood
             sb.Draw(pixel, new Rectangle(r.X + px, r.Y, r.Width - px * 2, px), woodOuter);
             sb.Draw(pixel, new Rectangle(r.X + px, r.Bottom - px, r.Width - px * 2, px), woodOuter);
             sb.Draw(pixel, new Rectangle(r.X, r.Y + px, px, r.Height - px * 2), woodOuter);
             sb.Draw(pixel, new Rectangle(r.Right - px, r.Y + px, px, r.Height - px * 2), woodOuter);
 
-            // Inner warm chestnut border
             var inner = new Rectangle(r.X + px, r.Y + px, r.Width - px * 2, r.Height - px * 2);
             sb.Draw(pixel, new Rectangle(inner.X, inner.Y, inner.Width, px), woodMid);
             sb.Draw(pixel, new Rectangle(inner.X, inner.Bottom - px, inner.Width, px), woodMid);
             sb.Draw(pixel, new Rectangle(inner.X, inner.Y, px, inner.Height), woodMid);
             sb.Draw(pixel, new Rectangle(inner.Right - px, inner.Y, px, inner.Height), woodMid);
 
-            // Subtle parchment inner top highlight
             if (r.Width > px * 6 && r.Height > px * 6)
                 sb.Draw(pixel, new Rectangle(r.X + px * 2, r.Y + px * 2, r.Width - px * 4, px), innerHi);
         }

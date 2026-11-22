@@ -2492,6 +2492,7 @@ static NSArray<UTType *> *sdvAllArchivePickerTypes(void) {
     syncBundledLidgren(_root.path);
     syncBundledSmapi(_root.path);
     syncBundledMobileControls(_root.path);
+    syncContentPackLocaleFallbacks(_root.path);
     NSDictionary *st = gameDataStatus(_root.path);
     if ([st[@"ready"] boolValue]) {
         [self refresh];
@@ -2697,6 +2698,7 @@ static NSArray<UTType *> *sdvAllArchivePickerTypes(void) {
         [self access:YES block:^(NSURL *r) {
             NSDictionary *p = plan(r.path, self->_stage, self->_prefs, self->_translations);
             written = installBatch(r, self->_stage, p[@"map"], p[@"obsoleteDisabled"], batchLabel);
+            syncContentPackLocaleFallbacks(r.path);
             self->_plan = nil;
             [self->_stagedFiles removeAllObjects];
             self->_nextPkgIdx = 0;

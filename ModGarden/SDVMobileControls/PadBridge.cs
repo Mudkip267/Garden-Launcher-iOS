@@ -19,6 +19,7 @@ namespace SDVMobileControls
         private readonly MethodInfo _getIsKeyPickerOpen;
 
         private readonly MethodInfo _setLeftStick;
+        private readonly MethodInfo _getButtonX;
         private readonly MethodInfo _setButtonX;
         private readonly MethodInfo _setButtonA;
         private readonly MethodInfo _setButtonB;
@@ -84,6 +85,7 @@ namespace SDVMobileControls
             _getIsKeyPickerOpen = padType.GetMethod("get_IsKeyPickerOpen", any);
 
             _setLeftStick = padType.GetMethod("set_LeftStick", any);
+            _getButtonX = padType.GetMethod("get_ButtonX", any);
             _setButtonX = padType.GetMethod("set_ButtonX", any);
             _setButtonA = padType.GetMethod("set_ButtonA", any);
             _setButtonB = padType.GetMethod("set_ButtonB", any);
@@ -333,6 +335,7 @@ namespace SDVMobileControls
             try { _triggerVirtualKeyboard?.Invoke(pad, null); } catch { }
         }
 
+        public bool GetButtonX(object pad) => GetBool(_getButtonX, pad);
         public bool GetSingleItemMode(object pad) => GetBool(_getSingleItem, pad);
         public bool GetHalfStackMode(object pad) => GetBool(_getHalfStack, pad);
         public bool GetQuickTransferMode(object pad) => GetBool(_getQuickTransfer, pad);

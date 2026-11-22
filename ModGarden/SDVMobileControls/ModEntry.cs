@@ -10,6 +10,7 @@ using Microsoft.Xna.Framework.Input;
 using StardewModdingAPI;
 using StardewModdingAPI.Events;
 using StardewValley;
+using StardewValley.Tools;
 
 namespace SDVMobileControls
 {
@@ -24,6 +25,10 @@ namespace SDVMobileControls
         private static int _audioDiagTicks;
         private static bool _audioDiagRanLaunch;
         private static bool _audioDiagRanWorld;
+        private static bool _audioDiagWroteThisSession;
+        private static bool _fishingGuardInstalled;
+        private static long _fishingHoldStartMs;
+        private static FishingRod _fishingHoldRod;
 
         public override void Entry(IModHelper helper)
         {
@@ -33,6 +38,7 @@ namespace SDVMobileControls
             RamOptimizer = new MapRamOptimizer(helper, Monitor);
 
             BindAllLoadedTouchVirtualPads("Entry");
+            InstallFishingCastGuard("Entry");
 
             helper.Events.GameLoop.GameLaunched += OnGameLaunched;
             helper.Events.GameLoop.UpdateTicked += OnUpdateTicked;
@@ -45,6 +51,7 @@ namespace SDVMobileControls
         private void OnGameLaunched(object sender, GameLaunchedEventArgs e)
         {
             BindAllLoadedTouchVirtualPads("GameLaunched");
+            InstallFishingCastGuard("GameLaunched");
             try { RamOptimizer?.OnGameLaunched(); } catch { }
         }
 
@@ -208,7 +215,17 @@ namespace SDVMobileControls
                 string docs = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
                 string errDir = Path.Combine(docs, "ErrorLogs");
                 Directory.CreateDirectory(errDir);
-                File.AppendAllText(Path.Combine(errDir, "audio-diag.log"), $"[{DateTime.Now:HH:mm:ss}] {line}\n");
+                string diagPath = Path.Combine(errDir, "audio-diag.log");
+                string entryLine = $"[{DateTime.Now:HH:mm:ss}] {line}\n";
+                if (!_audioDiagWroteThisSession)
+                {
+                    _audioDiagWroteThisSession = true;
+                    File.WriteAllText(diagPath, entryLine);
+                }
+                else
+                {
+                    File.AppendAllText(diagPath, entryLine);
+                }
             }
             catch { }
         }
@@ -283,6 +300,105 @@ namespace SDVMobileControls
             catch { }
         }
 
+        private static void InstallFishingCastGuard(string phase)
+        {
+            if (_fishingGuardInstalled)
+                return;
+
+            try
+            {
+                Type harmonyType = null;
+                Type harmonyMethodType = null;
+                foreach (Assembly asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    try
+                    {
+                        if (harmonyType == null)
+                            harmonyType = asm.GetType("HarmonyLib.Harmony", throwOnError: false);
+                        if (harmonyMethodType == null)
+                            harmonyMethodType = asm.GetType("HarmonyLib.HarmonyMethod", throwOnError: false);
+                        if (harmonyType != null && harmonyMethodType != null)
+                            break;
+                    }
+                    catch { }
+                }
+
+                if (harmonyType == null || harmonyMethodType == null)
+                    return;
+
+                MethodInfo orig = typeof(FishingRod).GetMethod("startCasting", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                MethodInfo pref = typeof(ModEntry).GetMethod(nameof(PrefixFishingRodStartCasting), BindingFlags.Static | BindingFlags.NonPublic);
+                if (orig == null || pref == null)
+                    return;
+
+                object harmony = Activator.CreateInstance(harmonyType, new object[] { "GardenLauncher.MobileControls.FishingGuard" });
+                object hmPref = Activator.CreateInstance(harmonyMethodType, new object[] { pref });
+
+                MethodInfo patchMethod = null;
+                foreach (MethodInfo mi in harmonyType.GetMethods(BindingFlags.Instance | BindingFlags.Public))
+                {
+                    if (mi.Name != "Patch") continue;
+                    var ps = mi.GetParameters();
+                    if (ps.Length >= 2 && ps[0].ParameterType == typeof(MethodBase) && ps[1].ParameterType == harmonyMethodType)
+                    {
+                        patchMethod = mi;
+                        break;
+                    }
+                }
+                if (patchMethod == null)
+                    return;
+
+                var parms = patchMethod.GetParameters();
+                object[] invokeArgs = new object[parms.Length];
+                invokeArgs[0] = orig;
+                invokeArgs[1] = hmPref;
+                patchMethod.Invoke(harmony, invokeArgs);
+
+                _fishingGuardInstalled = true;
+                _monitor?.Log($"[{phase}] Installed FishingRod.startCasting charge-hold guard (works in ALL control modes).", LogLevel.Info);
+            }
+            catch (Exception ex)
+            {
+                _monitor?.Log($"[{phase}] FishingRod guard skipped: {ex.Message}", LogLevel.Trace);
+            }
+        }
+
+        private static bool PrefixFishingRodStartCasting(FishingRod __instance)
+        {
+            if (__instance == null || !__instance.isTimingCast)
+            {
+                _fishingHoldRod = null;
+                _fishingHoldStartMs = 0;
+                return true;
+            }
+
+            if (__instance.lastUser == null || !__instance.lastUser.IsLocalPlayer || Engine == null)
+                return true;
+
+            if (!Engine.IsFishingCastButtonHeld())
+            {
+                _fishingHoldRod = null;
+                _fishingHoldStartMs = 0;
+                return true;
+            }
+
+            long nowMs = Environment.TickCount64;
+            if (!ReferenceEquals(_fishingHoldRod, __instance) || _fishingHoldStartMs <= 0)
+            {
+                _fishingHoldRod = __instance;
+                _fishingHoldStartMs = nowMs;
+            }
+            else if (nowMs - _fishingHoldStartMs > 15000)
+            {
+                // Safety failsafe if touch state was somehow lost for >15 seconds
+                _fishingHoldRod = null;
+                _fishingHoldStartMs = 0;
+                return true;
+            }
+
+            return false;
+        }
+
         private static bool OnMobileUpdate(object pad, GameTime gameTime)
         {
             if (Engine == null)
@@ -290,6 +406,7 @@ namespace SDVMobileControls
 
             try
             {
+                Engine.TrackPadReference(pad);
                 if (Engine.ShouldInterceptGameplay(pad))
                 {
                     Engine.UpdateGameplay(pad, gameTime);

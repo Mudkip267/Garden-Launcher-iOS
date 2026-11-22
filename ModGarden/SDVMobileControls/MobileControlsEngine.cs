@@ -159,6 +159,7 @@ namespace SDVMobileControls
         private bool _menuTapRightClicked;
         private int _holdSweepCooldown;
         private int _lastAppliedSafeRightPad = -999;
+        private int _worldReadyTicks;
 
         // Hover-first safe crafting, Community Center bundle & safe 2-tap Dialogue state
         private CraftingPage _craftHoverMenu;
@@ -634,10 +635,19 @@ namespace SDVMobileControls
             _cfg.PollReload();
             ApplyLiveUiScaleAndWeather();
 
-            // 1. Auto-Pause when user pulls Notification/Control Center or switches app (singleplayer only!)
+            if (Context.IsWorldReady)
+            {
+                if (_worldReadyTicks < 300) _worldReadyTicks++;
+            }
+            else
+            {
+                _worldReadyTicks = 0;
+            }
+
+            // 1. Auto-Pause when user pulls Notification/Control Center or switches app (singleplayer only, skips first 3s after world load!)
             if (_cfg.AutoPauseOnBackground && _cfg.ConsumePauseFlag())
             {
-                if (Context.IsWorldReady && !Context.IsMultiplayer &&
+                if (_worldReadyTicks >= 180 && Context.IsWorldReady && !Context.IsMultiplayer &&
                     Game1.activeClickableMenu == null && !Game1.paused && !Game1.eventUp &&
                     Game1.currentMinigame == null && !_editMode && !_saveMenuOpen)
                 {
@@ -1012,29 +1022,7 @@ namespace SDVMobileControls
                 _dlgHoveredIdx = -1;
             }
 
-            // Native EmoteMenu radial wheel: uses raw viewport coordinates (internally calls ModifyCoordinateFromUIScale!)
-            if (activeMenu is EmoteMenu em)
-            {
-                em.gamepadMode = false;
-                for (int i = 0; i < touches.Count; i++)
-                {
-                    TouchLocation tl = touches[i];
-                    Vector2 vp = MapRawToViewport(tl.Position);
-                    if (tl.State == TouchLocationState.Pressed || tl.State == TouchLocationState.Moved)
-                    {
-                        try { em.performHoverAction((int)vp.X, (int)vp.Y); } catch { }
-                    }
-                    else if (tl.State == TouchLocationState.Released)
-                    {
-                        try { em.performHoverAction((int)vp.X, (int)vp.Y); } catch { }
-                        try { em.receiveLeftClick((int)vp.X, (int)vp.Y, true); } catch { }
-                    }
-                }
-                ApplyToPad(pad, Vector2.Zero, false, false, false);
-                return true;
-            }
-
-            // Always consume lingering tap release from BAG/MAP/QST or HUD Quest button
+            // Always consume lingering tap release from BAG/MAP/QST/Emote or HUD Quest button FIRST!
             if (_ctxTouchId >= 0)
             {
                 bool sawLingeringTap = false;
@@ -1053,6 +1041,28 @@ namespace SDVMobileControls
                     return true;
                 }
                 _ctxTouchId = -1;
+            }
+
+            // Native EmoteMenu radial wheel: AFTER lingering tap filter, and uses UI coordinates (ViewportToUi -> ModifyCoordinateFromUIScale)!
+            if (activeMenu is EmoteMenu em)
+            {
+                em.gamepadMode = false;
+                for (int i = 0; i < touches.Count; i++)
+                {
+                    TouchLocation tl = touches[i];
+                    Point ui = ViewportToUi(MapRawToViewport(tl.Position));
+                    if (tl.State == TouchLocationState.Pressed || tl.State == TouchLocationState.Moved)
+                    {
+                        try { em.performHoverAction(ui.X, ui.Y); } catch { }
+                    }
+                    else if (tl.State == TouchLocationState.Released)
+                    {
+                        try { em.performHoverAction(ui.X, ui.Y); } catch { }
+                        try { em.receiveLeftClick(ui.X, ui.Y, true); } catch { }
+                    }
+                }
+                ApplyToPad(pad, Vector2.Zero, false, false, false);
+                return true;
             }
 
             // If Mobile Buy/Sell/Split Popup is open OR dragging an item, give it top priority!
@@ -2000,10 +2010,23 @@ namespace SDVMobileControls
                 // New touch pressed
                 if (tl.State == TouchLocationState.Pressed)
                 {
-                    // Direct Touch Drag-to-Aim when holding a Slingshot (outside Joystick zone)
+                    // 0ms instant Fishing Hook/Reel when bobber is in water in Tap-to-Move / Hybrid mode!
+                    if (useTap && Game1.player?.CurrentTool is FishingRod curRod && (curRod.isFishing || curRod.isNibbling))
+                    {
+                        ClearPath();
+                        _actionPulseXFrames = 3;
+                        _toolbarTouchId = tl.Id;
+                        _toolbarTappedSlot = -1;
+                        _toolbarSwiped = true;
+                        sawToolbar = true;
+                        continue;
+                    }
+
+                    // Direct Touch Drag-to-Aim when holding a Slingshot (outside Joystick zone — respects Left-Handed flip!)
+                    bool joyHalf = _cfg.LeftHandedMobile ? (vp.X > _vpW * 0.56f) : (vp.X < _vpW * 0.44f);
                     bool inJoyZoneCheck = useJoy && (IsInvisibleBarMode
                         ? _invJoyRect.Contains(vpPt)
-                        : (Vector2.Distance(vp, _visJoyCenter) <= _visJoyRadius * 1.65f || vp.X < _vpW * 0.44f));
+                        : (Vector2.Distance(vp, _visJoyCenter) <= _visJoyRadius * 1.65f || joyHalf));
 
                     if (holdingSlingshot && _slingshotTouchId < 0 && !inJoyZoneCheck)
                     {
@@ -2557,6 +2580,9 @@ namespace SDVMobileControls
                 return;
             }
 
+            bool mirrorX = _cfg.LeftHandedMobile;
+            float moveDx = mirrorX ? -dx : dx;
+
             if (IsInvisibleBarMode)
             {
                 bool swap = _cfg.SwapRightButtons;
@@ -2568,12 +2594,15 @@ namespace SDVMobileControls
                 {
                     if (resize)
                     {
-                        _cfg.InvJoyW = Math.Clamp(_cfg.InvJoyW + dx, 0.14f, Math.Min(0.75f, 0.99f - _cfg.InvJoyX));
+                        float oldW = _cfg.InvJoyW;
+                        float maxW = mirrorX ? Math.Min(0.75f, _cfg.InvJoyX + _cfg.InvJoyW) : Math.Min(0.75f, 0.99f - _cfg.InvJoyX);
+                        _cfg.InvJoyW = Math.Clamp(oldW + dx, 0.14f, maxW);
+                        if (mirrorX) _cfg.InvJoyX = Math.Clamp(_cfg.InvJoyX - (_cfg.InvJoyW - oldW), 0.0f, 0.99f - _cfg.InvJoyW);
                         _cfg.InvJoyH = Math.Clamp(_cfg.InvJoyH + dy, 0.20f, Math.Min(0.95f, 0.99f - _cfg.InvJoyY));
                     }
                     else
                     {
-                        _cfg.InvJoyX = Math.Clamp(_cfg.InvJoyX + dx, 0.0f, 0.99f - _cfg.InvJoyW);
+                        _cfg.InvJoyX = Math.Clamp(_cfg.InvJoyX + moveDx, 0.0f, 0.99f - _cfg.InvJoyW);
                         _cfg.InvJoyY = Math.Clamp(_cfg.InvJoyY + dy, 0.0f, 0.99f - _cfg.InvJoyH);
                     }
                 }
@@ -2581,12 +2610,15 @@ namespace SDVMobileControls
                 {
                     if (resize)
                     {
-                        _cfg.InvToolW = Math.Clamp(_cfg.InvToolW + dx, 0.06f, Math.Min(0.45f, 0.99f - _cfg.InvToolX));
+                        float oldW = _cfg.InvToolW;
+                        float maxW = mirrorX ? Math.Min(0.45f, _cfg.InvToolX + _cfg.InvToolW) : Math.Min(0.45f, 0.99f - _cfg.InvToolX);
+                        _cfg.InvToolW = Math.Clamp(oldW + dx, 0.06f, maxW);
+                        if (mirrorX) _cfg.InvToolX = Math.Clamp(_cfg.InvToolX - (_cfg.InvToolW - oldW), 0.01f, 0.99f - _cfg.InvToolW);
                         _cfg.InvToolH = Math.Clamp(_cfg.InvToolH + dy, 0.14f, Math.Min(0.95f, 0.99f - _cfg.InvToolY));
                     }
                     else
                     {
-                        _cfg.InvToolX = Math.Clamp(_cfg.InvToolX + dx, 0.01f, 0.99f - _cfg.InvToolW);
+                        _cfg.InvToolX = Math.Clamp(_cfg.InvToolX + moveDx, 0.01f, 0.99f - _cfg.InvToolW);
                         _cfg.InvToolY = Math.Clamp(_cfg.InvToolY + dy, 0.01f, 0.99f - _cfg.InvToolH);
                     }
                 }
@@ -2594,12 +2626,15 @@ namespace SDVMobileControls
                 {
                     if (resize)
                     {
-                        _cfg.InvActW = Math.Clamp(_cfg.InvActW + dx, 0.06f, Math.Min(0.45f, 0.99f - _cfg.InvActX));
+                        float oldW = _cfg.InvActW;
+                        float maxW = mirrorX ? Math.Min(0.45f, _cfg.InvActX + _cfg.InvActW) : Math.Min(0.45f, 0.99f - _cfg.InvActX);
+                        _cfg.InvActW = Math.Clamp(oldW + dx, 0.06f, maxW);
+                        if (mirrorX) _cfg.InvActX = Math.Clamp(_cfg.InvActX - (_cfg.InvActW - oldW), 0.01f, 0.99f - _cfg.InvActW);
                         _cfg.InvActH = Math.Clamp(_cfg.InvActH + dy, 0.14f, Math.Min(0.95f, 0.99f - _cfg.InvActY));
                     }
                     else
                     {
-                        _cfg.InvActX = Math.Clamp(_cfg.InvActX + dx, 0.01f, 0.99f - _cfg.InvActW);
+                        _cfg.InvActX = Math.Clamp(_cfg.InvActX + moveDx, 0.01f, 0.99f - _cfg.InvActW);
                         _cfg.InvActY = Math.Clamp(_cfg.InvActY + dy, 0.01f, 0.99f - _cfg.InvActH);
                     }
                 }
@@ -2615,17 +2650,17 @@ namespace SDVMobileControls
                 if (logical == EditTarget.Joy)
                 {
                     if (resize) _cfg.VisJoyR = Math.Clamp(_cfg.VisJoyR + dr, 0.07f, 0.22f);
-                    else { _cfg.VisJoyX = Math.Clamp(_cfg.VisJoyX + dx, 0.06f, 0.94f); _cfg.VisJoyY = Math.Clamp(_cfg.VisJoyY + dy, 0.10f, 0.92f); }
+                    else { _cfg.VisJoyX = Math.Clamp(_cfg.VisJoyX + moveDx, 0.06f, 0.94f); _cfg.VisJoyY = Math.Clamp(_cfg.VisJoyY + dy, 0.10f, 0.92f); }
                 }
                 else if (logical == EditTarget.Tool)
                 {
                     if (resize) _cfg.VisToolR = Math.Clamp(_cfg.VisToolR + dr, 0.045f, 0.16f);
-                    else { _cfg.VisToolX = Math.Clamp(_cfg.VisToolX + dx, 0.06f, 0.94f); _cfg.VisToolY = Math.Clamp(_cfg.VisToolY + dy, 0.10f, 0.92f); }
+                    else { _cfg.VisToolX = Math.Clamp(_cfg.VisToolX + moveDx, 0.06f, 0.94f); _cfg.VisToolY = Math.Clamp(_cfg.VisToolY + dy, 0.10f, 0.92f); }
                 }
                 else if (logical == EditTarget.Act)
                 {
                     if (resize) _cfg.VisActR = Math.Clamp(_cfg.VisActR + dr, 0.045f, 0.16f);
-                    else { _cfg.VisActX = Math.Clamp(_cfg.VisActX + dx, 0.06f, 0.94f); _cfg.VisActY = Math.Clamp(_cfg.VisActY + dy, 0.10f, 0.92f); }
+                    else { _cfg.VisActX = Math.Clamp(_cfg.VisActX + moveDx, 0.06f, 0.94f); _cfg.VisActY = Math.Clamp(_cfg.VisActY + dy, 0.10f, 0.92f); }
                 }
             }
         }
@@ -2811,16 +2846,23 @@ namespace SDVMobileControls
             Point playerTile = who.TilePoint;
             int cheb = Math.Max(Math.Abs(playerTile.X - tappedTile.X), Math.Abs(playerTile.Y - tappedTile.Y));
 
-            // Tap directly on farmer (cheb == 0): Dismount Horse OR Eat/Drink/Use held Food/Coffee/Bomb/Staircase/Warp Totem!
+            // Tap directly on farmer (cheb == 0):
+            // - If currently A* walking -> cleanly stop walking (never accidentally eat food!)
+            // - If standing still -> Dismount Horse OR Eat/Drink/Trigger usable item (Food, Coffee, Bomb, Staircase, Totem)
             if (cheb == 0)
             {
+                if (_path != null && _path.Count > 0)
+                {
+                    ClearPath();
+                    return;
+                }
                 if (who.isRidingHorse())
                 {
                     ClearPath();
                     _actionPulseAFrames = 3;
                     return;
                 }
-                if (who.ActiveObject != null)
+                if (IsSelfUsableObject(who.ActiveObject))
                 {
                     ClearPath();
                     _actionPulseAFrames = 3;
@@ -2864,6 +2906,21 @@ namespace SDVMobileControls
             _pendingIntent = intent;
             _lastPlayerPos = who.Position;
             _stuckFrames = 0;
+        }
+
+        private static bool IsSelfUsableObject(StardewValley.Object obj)
+        {
+            if (obj == null) return false;
+            if (obj.Edibility > -300) return true; // Any edible food or drink (Coffee, Salad, Cheese, Elixir, etc.)
+            string name = obj.Name ?? "";
+            if (name.IndexOf("Totem", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                name.IndexOf("Bomb", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                name.IndexOf("Staircase", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                name.IndexOf("Tent", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                name.IndexOf("Book", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                name.IndexOf("Ticket", StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+            return obj.isPlaceable();
         }
 
         private Vector2 StepPathFollower()
@@ -3632,17 +3689,33 @@ namespace SDVMobileControls
             if (_cfg.SwapRightButtons) { _visToolRect = visAct; _visActRect = visTool; }
             else { _visToolRect = visTool; _visActRect = visAct; }
 
-            // 3. Collapsible Top Utility Bar (respects Dynamic Island / Notch Safe Area!)
+            // 3. Collapsible Top Utility Bar (respects Dynamic Island / Notch Safe Area & auto-fits narrow screens clear of Clock!)
             _safeLeftPx = ComputeSafeLeftPx();
             _safeRightPx = ComputeSafeRightPx();
             int leftX = Math.Max(_safeLeftPx + 8, (int)(_cfg.TopBarX * _vpW));
             int topY = (int)(_cfg.TopBarY * _vpH);
             int pillH = (int)Math.Clamp(unit * 0.056f, 28f, unit * 0.08f);
+
+            // Auto-fit Top Bar width so it NEVER collides with DayTimeMoneyBox on 16:9 / 4:3 screens
+            int maxTopBarRight = _vpW - _safeRightPx - Math.Max(220, (int)(_vpW * 0.22f));
+            if (!_topBarCollapsed && maxTopBarRight > leftX + 200)
+            {
+                float estUnits = 1.85f * 4f + 2.15f * 2f + 1.10f + (_cfg.ShowEmoteButton ? 1.25f : 0f) + (_cfg.AutoCombatMode ? 1.85f : 0f);
+                int estSlots = 7 + (_cfg.ShowEmoteButton ? 1 : 0) + (_cfg.AutoCombatMode ? 1 : 0);
+                float estW = estUnits * pillH + (estSlots - 1) * Math.Max(6, pillH / 5);
+                float availW = maxTopBarRight - leftX;
+                if (estW > availW)
+                {
+                    float ratio = availW / Math.Max(1f, estW);
+                    pillH = Math.Max(24, (int)(pillH * ratio));
+                }
+            }
+
             int pillW = (int)(pillH * 1.85f);
             int modsW = (int)(pillH * 2.15f);
             int colW = (int)(pillH * 1.10f);
             int emoteW = (int)(pillH * 1.25f);
-            int pillGap = Math.Max(6, pillH / 5);
+            int pillGap = Math.Max(4, pillH / 5);
 
             int cx = leftX;
             _btnBagRect = new Rectangle(cx, topY, pillW, pillH);
@@ -3689,8 +3762,8 @@ namespace SDVMobileControls
             _btnRotateRect = new Rectangle(_vpW - rotW - rightEdgePad, (int)(_vpH * 0.34f), rotW, rotH);
             _btnSpecRect = new Rectangle(_vpW - rotW - rightEdgePad, (int)(_vpH * 0.34f), rotW, rotH);
 
-            // 1-Tap Left-Handed Mirror Layout (Joystick on Right, Action Buttons on Left)
-            if (_cfg.LeftHandedMobile && !_editMode)
+            // 1-Tap Left-Handed Mirror Layout (WYSIWYG in both Gameplay AND Edit Layout!)
+            if (_cfg.LeftHandedMobile)
             {
                 Rectangle MirrorX(Rectangle r) => new Rectangle(_vpW - r.Right, r.Y, r.Width, r.Height);
                 _invJoyRect = MirrorX(_invJoyRect);
@@ -3703,14 +3776,36 @@ namespace SDVMobileControls
                 _btnSpecRect = MirrorX(_btnSpecRect);
             }
 
-            // Auto-clear left-edge VerticalToolbar so invisible joystick never overlaps toolbar scroll strip!
+            // Auto-clear left-edge VerticalToolbar so NEITHER right-handed Joystick NOR left-handed Action Buttons overlap it!
             if (_cfg.VerticalToolbar && !_editMode)
             {
                 int minX = _verticalToolbar.Bounds.Right + 6;
-                if (_invJoyRect.X < minX && _invJoyRect.Right > minX + 60)
+                if (!_cfg.LeftHandedMobile)
                 {
-                    int delta = minX - _invJoyRect.X;
-                    _invJoyRect = new Rectangle(minX, _invJoyRect.Y, Math.Max(60, _invJoyRect.Width - delta), _invJoyRect.Height);
+                    if (_invJoyRect.X < minX && _invJoyRect.Right > minX + 60)
+                    {
+                        int delta = minX - _invJoyRect.X;
+                        _invJoyRect = new Rectangle(minX, _invJoyRect.Y, Math.Max(60, _invJoyRect.Width - delta), _invJoyRect.Height);
+                    }
+                }
+                else
+                {
+                    int leftMostInv = Math.Min(_invToolRect.X, _invActRect.X);
+                    if (leftMostInv < minX)
+                    {
+                        int shift = minX - leftMostInv;
+                        _invToolRect = new Rectangle(_invToolRect.X + shift, _invToolRect.Y, _invToolRect.Width, _invToolRect.Height);
+                        _invActRect = new Rectangle(_invActRect.X + shift, _invActRect.Y, _invActRect.Width, _invActRect.Height);
+                    }
+                    int leftMostVis = Math.Min(_visToolRect.X, _visActRect.X);
+                    if (leftMostVis < minX)
+                    {
+                        int shift = minX - leftMostVis;
+                        _visToolRect = new Rectangle(_visToolRect.X + shift, _visToolRect.Y, _visToolRect.Width, _visToolRect.Height);
+                        _visActRect = new Rectangle(_visActRect.X + shift, _visActRect.Y, _visActRect.Width, _visActRect.Height);
+                    }
+                    if (_btnRotateRect.X < minX) _btnRotateRect = new Rectangle(minX, _btnRotateRect.Y, _btnRotateRect.Width, _btnRotateRect.Height);
+                    if (_btnSpecRect.X < minX) _btnSpecRect = new Rectangle(minX, _btnSpecRect.Y, _btnSpecRect.Width, _btnSpecRect.Height);
                 }
             }
 

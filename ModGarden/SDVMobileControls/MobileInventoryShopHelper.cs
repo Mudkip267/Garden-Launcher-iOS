@@ -1532,12 +1532,13 @@ namespace SDVMobileControls
                 try { desc = (item.getDescription() ?? "").Replace("\r", " ").Replace("\n", " ").Trim(); } catch { }
                 if (desc.Length > 68) desc = desc.Substring(0, 65) + "...";
 
-                int bw = Math.Clamp((int)(vpW * 0.36f), 260, Math.Min(540, vpW - 40));
+                int bw = Math.Clamp((int)(vpW * 0.44f), 280, Math.Min(600, vpW - 40));
                 int lineH = Math.Max(18, (int)(26f * fScale));
                 int lines = 1 + (string.IsNullOrEmpty(stats) ? 0 : 1) + (string.IsNullOrEmpty(desc) ? 0 : 1);
                 int bh = lines * lineH + px * 8;
-                int bx = vpW - bw - Math.Max(18, (int)(vpW * 0.045f));
-                int by = Math.Max(12, (int)(vpH * 0.022f));
+                // Center along the bottom edge so it NEVER covers the top-right Close 'X' button, Context Bar, or DROP/Trash Can!
+                int bx = (vpW - bw) / 2;
+                int by = vpH - bh - Math.Max(12, vpH / 42);
                 var box = new Rectangle(bx, by, bw, bh);
 
                 PixelUi.DrawParchmentBox(sb, pixel, box, px, 0.94f);

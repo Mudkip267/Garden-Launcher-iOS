@@ -169,8 +169,9 @@ namespace SDVMobileControls
         private int _worldReadyTicks;
         private int _unstickHoldTicks;
 
-        // Hide GUI mode (1-tap HIDE -> clean screenshot/viewing; double-tap anywhere -> restore GUI!)
+        // Hide GUI mode (1-tap HIDE -> clean full-screen photo mode hiding HUD & buttons; double-tap -> restore!)
         private bool _guiHidden;
+        private bool _preHideDisplayHud = true;
         private Rectangle _btnHideGuiRect;
         private Rectangle _btnChatRect;
         private Rectangle _btnSkipEventRect;
@@ -231,11 +232,23 @@ namespace SDVMobileControls
         private int _autoToolPrevSlot = -1;
         private int _autoToolRestoreTimer;
 
-        // Auto-Combat Mode (Mines/Volcano) + Bluetooth GamePad auto-hide + Haptic + SafeArea + 30fps saver
+        // Auto-Combat Mode (Mines/Volcano) + Bluetooth GamePad auto-hide + Haptic + SafeArea + 30fps saver + UI Scale restore
         private bool _inCombatAutoSwitched;
-        private MobileControlMode _preCombatMode = MobileControlMode.TapToMove;
+        private string _combatManualOverrideLoc;
         private bool _gamepadHideHud;
         private int _gamepadPollCounter;
+        private GamePadState _lastPhysicalGamePadState;
+        private bool _hasPhysicalGamePadState;
+        private static readonly System.Reflection.MethodInfo GamePadPlatformGetStateMethod =
+            typeof(GamePad).GetMethod("PlatformGetState",
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public,
+                null,
+                new[] { typeof(int), typeof(GamePadDeadZone), typeof(GamePadDeadZone) },
+                null);
+        private static readonly object[] GamePadPlatformArgs =
+            new object[] { 0, GamePadDeadZone.IndependentAxes, GamePadDeadZone.IndependentAxes };
+        private bool _appliedUiScaleOverride;
+        private float _origDesiredUiScale = 1.0f;
         private bool _wasFishNibbling;
         private int _safeLeftPx;
         private int _safeRightPx;
@@ -337,12 +350,34 @@ namespace SDVMobileControls
             _saveToastUntil = nowSec + 3.0;
         }
 
-        public MobileControlMode CurrentMode => _cfg.Mode;
+        public MobileControlMode CurrentMode => EffectiveMode;
         public bool IsMobileModeActive => _cfg.Mode != MobileControlMode.VirtualGamepad;
 
+        private MobileControlMode EffectiveMode =>
+            (_inCombatAutoSwitched && _cfg.AutoCombatMode && _cfg.Mode == MobileControlMode.TapToMove)
+                ? MobileControlMode.InvisibleJoystick2Btn
+                : _cfg.Mode;
+
         private bool IsInvisibleBarMode =>
-            _cfg.Mode == MobileControlMode.InvisibleJoystick2Btn ||
-            _cfg.Mode == MobileControlMode.TapAndJoystick;
+            EffectiveMode == MobileControlMode.InvisibleJoystick2Btn ||
+            EffectiveMode == MobileControlMode.TapAndJoystick;
+
+        private void SetGuiHidden(bool hide)
+        {
+            if (_guiHidden == hide)
+                return;
+            if (hide)
+            {
+                _preHideDisplayHud = Game1.displayHUD;
+                _guiHidden = true;
+                Game1.displayHUD = false;
+            }
+            else
+            {
+                _guiHidden = false;
+                Game1.displayHUD = _preHideDisplayHud;
+            }
+        }
 
         private PadBridge EnsureBridge(object pad)
         {
@@ -720,7 +755,7 @@ namespace SDVMobileControls
             if (!_cfg.ShowSpecButton || Game1.player?.CurrentTool is not MeleeWeapon mw || mw.isScythe())
                 return null;
 
-            bool combatCtx = (_cfg.Mode == MobileControlMode.TapToMove || _cfg.Mode == MobileControlMode.TapAndJoystick) ||
+            bool combatCtx = (EffectiveMode == MobileControlMode.TapToMove || EffectiveMode == MobileControlMode.TapAndJoystick) ||
                              Game1.currentLocation is MineShaft ||
                              Game1.currentLocation is VolcanoDungeon ||
                              AutoToolAndCombat.FindMonsterNear(Game1.currentLocation, Game1.player.GetBoundingBox().Center.ToVector2(), 360f) != null;
@@ -751,7 +786,9 @@ namespace SDVMobileControls
             }
 
             // 1. Auto-Pause when user pulls Notification/Control Center or switches app (singleplayer only, skips first 3s after world load!)
-            if (_cfg.AutoPauseOnBackground && _cfg.ConsumePauseFlag())
+            // ALWAYS consume the flag even when disabled so turning AutoPause back ON later never triggers a stale pause!
+            bool hasPauseFlag = _cfg.ConsumePauseFlag();
+            if (_cfg.AutoPauseOnBackground && hasPauseFlag)
             {
                 if (_worldReadyTicks >= 180 && Context.IsWorldReady && !Context.IsMultiplayer &&
                     Game1.activeClickableMenu == null && !Game1.paused && !Game1.eventUp &&
@@ -767,12 +804,20 @@ namespace SDVMobileControls
                 _cfg.TriggerFishBiteHaptic();
             _wasFishNibbling = nibblingNow;
 
-            // 3. Vertical Scrollable Toolbar visibility sync (also hides PC Toolbar while HIDE GUI is active; resets cleanly on Return to Title!)
+            // 3. Vertical Scrollable Toolbar visibility sync & HIDE GUI cleanup on Menu / Cutscene / Return to Title!
             if (Context.IsWorldReady)
+            {
+                if (_guiHidden && (Game1.activeClickableMenu != null || Game1.eventUp || Game1.currentMinigame != null))
+                    SetGuiHidden(false);
                 _verticalToolbar.SyncHorizontalToolbarVisibility(IsMobileModeActive && (_cfg.VerticalToolbar || _guiHidden));
+            }
             else
             {
-                _guiHidden = false;
+                SetGuiHidden(false);
+                _inCombatAutoSwitched = false;
+                _combatManualOverrideLoc = null;
+                _gamepadHideHud = false;
+                _hasPhysicalGamePadState = false;
                 _verticalToolbar.ClearCachedToolbar();
             }
 
@@ -839,7 +884,8 @@ namespace SDVMobileControls
 
         private void CycleControlMode(double nowSec)
         {
-            MobileControlMode next = _cfg.Mode switch
+            MobileControlMode cur = EffectiveMode;
+            MobileControlMode next = cur switch
             {
                 MobileControlMode.InvisibleJoystick2Btn => MobileControlMode.VisibleJoystick2Btn,
                 MobileControlMode.VisibleJoystick2Btn => MobileControlMode.TapToMove,
@@ -848,6 +894,7 @@ namespace SDVMobileControls
             };
             _cfg.Mode = next;
             _inCombatAutoSwitched = false;
+            _combatManualOverrideLoc = Game1.currentLocation?.NameOrUniqueName;
             _cfg.Save();
             string name = next switch
             {
@@ -864,23 +911,52 @@ namespace SDVMobileControls
         {
             if (!_cfg.AutoCombatMode)
             {
-                _inCombatAutoSwitched = false;
+                if (_inCombatAutoSwitched)
+                {
+                    _inCombatAutoSwitched = false;
+                    ShowSaveToast("CHE DO CU", nowSec);
+                }
+                _combatManualOverrideLoc = null;
                 return;
             }
+            string curLoc = Game1.currentLocation?.NameOrUniqueName;
             bool isDungeon = Game1.currentLocation is MineShaft || Game1.currentLocation is VolcanoDungeon;
-            if (isDungeon && !_inCombatAutoSwitched && _cfg.Mode == MobileControlMode.TapToMove)
+            if (!isDungeon)
             {
-                _preCombatMode = _cfg.Mode;
-                _cfg.Mode = MobileControlMode.InvisibleJoystick2Btn;
+                _combatManualOverrideLoc = null;
+                if (_inCombatAutoSwitched)
+                {
+                    _inCombatAutoSwitched = false;
+                    ShowSaveToast("RA NGOAI: CHE DO CU", nowSec);
+                }
+                return;
+            }
+
+            // Inside MineShaft / VolcanoDungeon: keep runtime Joystick override active (immune to _cfg.Reload()!)
+            if (!_inCombatAutoSwitched && _cfg.Mode == MobileControlMode.TapToMove &&
+                !string.Equals(_combatManualOverrideLoc, curLoc, StringComparison.Ordinal))
+            {
                 _inCombatAutoSwitched = true;
                 ShowSaveToast("VAO MO: TU DONG JOYSTICK", nowSec);
             }
-            else if (!isDungeon && _inCombatAutoSwitched)
+        }
+
+        private bool TryReadPhysicalGamePad(out GamePadState gs)
+        {
+            gs = default;
+            if (GamePadPlatformGetStateMethod == null)
+                return false;
+            try
             {
-                _cfg.Mode = _preCombatMode;
-                _inCombatAutoSwitched = false;
-                ShowSaveToast("RA NGOAI: CHE DO CU", nowSec);
+                object res = GamePadPlatformGetStateMethod.Invoke(null, GamePadPlatformArgs);
+                if (res is GamePadState state && state.IsConnected)
+                {
+                    gs = state;
+                    return true;
+                }
             }
+            catch { }
+            return false;
         }
 
         private void PollGamepadAutoHide(int touchCount)
@@ -888,38 +964,41 @@ namespace SDVMobileControls
             if (!_cfg.AutoHideOnGamepad)
             {
                 _gamepadHideHud = false;
+                _hasPhysicalGamePadState = false;
                 return;
             }
             if (touchCount > 0)
             {
                 _gamepadHideHud = false;
+                _hasPhysicalGamePadState = false;
                 return;
             }
-            if (++_gamepadPollCounter < 10)
+            // Poll every frame while physical controller is actively driving gameplay; every 10 frames while idle
+            if (!_gamepadHideHud && ++_gamepadPollCounter < 10)
                 return;
             _gamepadPollCounter = 0;
-            try
+
+            if (!TryReadPhysicalGamePad(out GamePadState gs))
             {
-                var caps = GamePad.GetCapabilities(PlayerIndex.One);
-                if (!caps.IsConnected)
-                {
-                    _gamepadHideHud = false;
-                    return;
-                }
-                var gs = GamePad.GetState(PlayerIndex.One);
-                bool used =
-                    gs.ThumbSticks.Left.LengthSquared() > 0.08f ||
-                    gs.ThumbSticks.Right.LengthSquared() > 0.08f ||
-                    gs.Triggers.Left > 0.2f || gs.Triggers.Right > 0.2f ||
-                    gs.Buttons.A == ButtonState.Pressed || gs.Buttons.B == ButtonState.Pressed ||
-                    gs.Buttons.X == ButtonState.Pressed || gs.Buttons.Y == ButtonState.Pressed ||
-                    gs.Buttons.LeftShoulder == ButtonState.Pressed || gs.Buttons.RightShoulder == ButtonState.Pressed ||
-                    gs.DPad.Up == ButtonState.Pressed || gs.DPad.Down == ButtonState.Pressed ||
-                    gs.DPad.Left == ButtonState.Pressed || gs.DPad.Right == ButtonState.Pressed;
-                if (used)
-                    _gamepadHideHud = true;
+                _gamepadHideHud = false;
+                _hasPhysicalGamePadState = false;
+                return;
             }
-            catch { }
+
+            _lastPhysicalGamePadState = gs;
+            _hasPhysicalGamePadState = true;
+            bool used =
+                gs.ThumbSticks.Left.LengthSquared() > 0.08f ||
+                gs.ThumbSticks.Right.LengthSquared() > 0.08f ||
+                gs.Triggers.Left > 0.2f || gs.Triggers.Right > 0.2f ||
+                gs.Buttons.A == ButtonState.Pressed || gs.Buttons.B == ButtonState.Pressed ||
+                gs.Buttons.X == ButtonState.Pressed || gs.Buttons.Y == ButtonState.Pressed ||
+                gs.Buttons.LeftShoulder == ButtonState.Pressed || gs.Buttons.RightShoulder == ButtonState.Pressed ||
+                gs.Buttons.Start == ButtonState.Pressed ||
+                gs.DPad.Up == ButtonState.Pressed || gs.DPad.Down == ButtonState.Pressed ||
+                gs.DPad.Left == ButtonState.Pressed || gs.DPad.Right == ButtonState.Pressed;
+            if (used)
+                _gamepadHideHud = true;
         }
 
         private static bool IsEscOnlyMenu(IClickableMenu menu)
@@ -935,8 +1014,22 @@ namespace SDVMobileControls
         {
             if (Game1.options != null)
             {
-                if (_cfg.UiScaleOverride >= 0.75f && Math.Abs(Game1.options.desiredUIScale - _cfg.UiScaleOverride) > 0.01f)
-                    Game1.options.desiredUIScale = _cfg.UiScaleOverride;
+                if (_cfg.UiScaleOverride >= 0.75f)
+                {
+                    if (!_appliedUiScaleOverride)
+                    {
+                        _origDesiredUiScale = Game1.options.desiredUIScale > 0.1f ? Game1.options.desiredUIScale : 1.0f;
+                        _appliedUiScaleOverride = true;
+                    }
+                    if (Math.Abs(Game1.options.desiredUIScale - _cfg.UiScaleOverride) > 0.01f)
+                        Game1.options.desiredUIScale = _cfg.UiScaleOverride;
+                }
+                else if (_appliedUiScaleOverride)
+                {
+                    _appliedUiScaleOverride = false;
+                    if (Math.Abs(Game1.options.desiredUIScale - _origDesiredUiScale) > 0.01f)
+                        Game1.options.desiredUIScale = _origDesiredUiScale;
+                }
                 if (IsMobileModeActive && Game1.options.alwaysShowToolHitLocation != _cfg.ShowToolHitLocation)
                     Game1.options.alwaysShowToolHitLocation = _cfg.ShowToolHitLocation;
             }
@@ -2191,10 +2284,10 @@ namespace SDVMobileControls
             _cfg.PollReload();
             ApplyLiveUiScaleAndWeather();
             _invShop.Reset();
-            if (_wasInMenu || _cfg.Mode != _lastModeSeen)
+            if (_wasInMenu || EffectiveMode != _lastModeSeen)
             {
                 _wasInMenu = false;
-                _lastModeSeen = _cfg.Mode;
+                _lastModeSeen = EffectiveMode;
                 ResetGameplayState();
             }
             var br = EnsureBridge(pad);
@@ -2257,8 +2350,8 @@ namespace SDVMobileControls
             {
                 _lastLocationName = curLocName;
                 ClearPath();
-                UpdateAutoCombatMode(nowSec);
             }
+            UpdateAutoCombatMode(nowSec);
 
             if (_toolRippleAlpha > 0f) _toolRippleAlpha = Math.Max(0f, _toolRippleAlpha - 0.12f);
             if (_interactRippleAlpha > 0f) _interactRippleAlpha = Math.Max(0f, _interactRippleAlpha - 0.12f);
@@ -2267,7 +2360,33 @@ namespace SDVMobileControls
             TouchCollection touches = TouchPanel.GetState();
             PollGamepadAutoHide(touches.Count);
 
-            // ---- Clean Hide GUI Mode: ALL touch buttons hidden; Double-Tap anywhere restores GUI! ----
+            // Physical Bluetooth Controller active (PS5/Xbox/Backbone) with no screen touch:
+            // hide touch overlay AND forward real GCController sticks/buttons cleanly into Stardew!
+            if (_gamepadHideHud && _hasPhysicalGamePadState && touches.Count == 0 && !_guiHidden)
+            {
+                var gs = _lastPhysicalGamePadState;
+                // Convert MonoGame cartesian Y (+up/-down) into TouchVirtualPad screen Y (-up/+down)
+                Vector2 gpStick = new Vector2(gs.ThumbSticks.Left.X, -gs.ThumbSticks.Left.Y);
+                if (gs.DPad.Left == ButtonState.Pressed) gpStick.X = -1f;
+                else if (gs.DPad.Right == ButtonState.Pressed) gpStick.X = 1f;
+                if (gs.DPad.Up == ButtonState.Pressed) gpStick.Y = -1f;
+                else if (gs.DPad.Down == ButtonState.Pressed) gpStick.Y = 1f;
+                if (gpStick.LengthSquared() > 1f) gpStick.Normalize();
+
+                br?.ApplyPhysicalGamePad(
+                    pad,
+                    gpStick,
+                    btnX: gs.Buttons.X == ButtonState.Pressed,
+                    btnA: gs.Buttons.A == ButtonState.Pressed,
+                    btnB: gs.Buttons.B == ButtonState.Pressed,
+                    btnY: gs.Buttons.Y == ButtonState.Pressed,
+                    btnLT: gs.Buttons.LeftShoulder == ButtonState.Pressed || gs.Triggers.Left > 0.35f,
+                    btnRT: gs.Buttons.RightShoulder == ButtonState.Pressed || gs.Triggers.Right > 0.35f,
+                    btnMenu: gs.Buttons.Start == ButtonState.Pressed);
+                return;
+            }
+
+            // ---- Clean Hide GUI Mode: ALL touch buttons & HUD hidden; Double-Tap anywhere restores GUI! ----
             if (_guiHidden)
             {
                 ClearCustomButtonTouches();
@@ -2293,7 +2412,7 @@ namespace SDVMobileControls
                         {
                             if ((nowSec - _lastHideTapSec) <= 0.38 && Vector2.Distance(hvp, _lastHideTapVp) <= 130f)
                             {
-                                _guiHidden = false;
+                                SetGuiHidden(false);
                                 _lastHideTapSec = -10.0;
                                 try { Game1.playSound("smallSelect"); } catch { }
                                 ShowSaveToast("DA HIEN LAI GUI", nowSec);
@@ -2322,13 +2441,14 @@ namespace SDVMobileControls
             else
                 ClearCustomButtonTouches();
 
-            bool useJoy = _cfg.Mode == MobileControlMode.InvisibleJoystick2Btn ||
-                          _cfg.Mode == MobileControlMode.VisibleJoystick2Btn ||
-                          _cfg.Mode == MobileControlMode.TapAndJoystick;
+            MobileControlMode effMode = EffectiveMode;
+            bool useJoy = effMode == MobileControlMode.InvisibleJoystick2Btn ||
+                          effMode == MobileControlMode.VisibleJoystick2Btn ||
+                          effMode == MobileControlMode.TapAndJoystick;
             bool use2Btn = useJoy;
-            bool useTap = _cfg.Mode == MobileControlMode.TapToMove ||
-                          _cfg.Mode == MobileControlMode.TapAndJoystick;
-            bool isHybrid = _cfg.Mode == MobileControlMode.TapAndJoystick;
+            bool useTap = effMode == MobileControlMode.TapToMove ||
+                          effMode == MobileControlMode.TapAndJoystick;
+            bool isHybrid = effMode == MobileControlMode.TapAndJoystick;
 
             // --- 1. Handle 2-Finger Pinch-to-Zoom ---
             if (_cfg.PinchZoom && HandlePinchZoom(touches, nowSec))
@@ -2471,7 +2591,7 @@ namespace SDVMobileControls
                         }
                         if (!_btnHideGuiRect.IsEmpty && _btnHideGuiRect.Contains(vpPt))
                         {
-                            _guiHidden = true;
+                            SetGuiHidden(true);
                             _lastHideTapSec = -10.0;
                             _hideTapTouchId = -1;
                             ResetGameplayState();
@@ -3672,7 +3792,7 @@ namespace SDVMobileControls
                 return false;
             }
 
-            if (_joyTouchId >= 0 && _joyActivated && _cfg.Mode != MobileControlMode.TapToMove)
+            if (_joyTouchId >= 0 && _joyActivated && EffectiveMode != MobileControlMode.TapToMove)
             {
                 Vector2 other = (idA == _joyTouchId) ? posB : posA;
                 Point opt = new Point((int)other.X, (int)other.Y);
@@ -4549,7 +4669,7 @@ namespace SDVMobileControls
             }
 
             // 3. Mode-specific Pixel-Art Overlay (subtle & low-opacity idle -> zero distraction!)
-            if (_cfg.Mode == MobileControlMode.VisibleJoystick2Btn)
+            if (EffectiveMode == MobileControlMode.VisibleJoystick2Btn)
             {
                 bool joyAct = (_joyTouchId >= 0 && _joyActivated);
                 Vector2 jCenter = joyAct ? _joyOrigin : _visJoyCenter;

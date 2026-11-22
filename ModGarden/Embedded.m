@@ -7,6 +7,7 @@
 #import <unistd.h>
 #import <string.h>
 #import <sys/sysctl.h>
+#import <sys/stat.h>
 #import "main.m"
 
 // Self-contained compiler-rt helper for @available(...) when linking directly with LLVM ld64.lld
@@ -624,6 +625,9 @@ static void sdvApplyAutoHideHomeIndicator(UIViewController *vc) {
     CFTimeInterval _lastFpsStamp;
     NSInteger _frames;
     NSInteger _fps;
+    NSString *_mobileCfgPath;
+    time_t _lastCfgMtime;
+    BOOL _eco30Fps;
 }
 
 -(UIView *)badgeView { return _badge; }
@@ -680,6 +684,10 @@ static void sdvApplyAutoHideHomeIndicator(UIViewController *vc) {
 
     _fps = 60;
     _lastFpsStamp = CACurrentMediaTime();
+    NSString *docsDir = [fm() URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject.path;
+    _mobileCfgPath = docsDir.length ? [docsDir stringByAppendingPathComponent:@"sdv_mobile_ctrl.cfg"] : nil;
+    _lastCfgMtime = 0;
+    _eco30Fps = NO;
     _link = [CADisplayLink displayLinkWithTarget:self selector:@selector(onFrame:)];
     [_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
     [self refreshLabel];
@@ -720,13 +728,30 @@ static void sdvApplyAutoHideHomeIndicator(UIViewController *vc) {
     }
 }
 
+-(void)syncEco30FpsFlag {
+    if (!_mobileCfgPath.length) return;
+    struct stat st;
+    if (stat(_mobileCfgPath.fileSystemRepresentation, &st) != 0) return;
+    if (st.st_mtime == _lastCfgMtime) return;
+    _lastCfgMtime = st.st_mtime;
+    NSString *raw = [NSString stringWithContentsOfFile:_mobileCfgPath encoding:NSUTF8StringEncoding error:nil];
+    _eco30Fps = [raw containsString:@"saver30fps=1"];
+}
+
 -(void)refreshLabel {
+    [self syncEco30FpsFlag];
     SDVRamSnapshot s = [SDVRamMonitor.shared sample];
     UIColor *ledCol = (s.usagePct >= 90.0) ? kTintRed : ((s.usagePct >= 85.0) ? kTintOrange : kTintGreen);
     _led.backgroundColor = ledCol;
     _lbl.textColor = (s.usagePct >= 90.0) ? rgb(0xFF8A80) : ((s.usagePct >= 85.0) ? rgb(0xFFD180) : UIColor.whiteColor);
-    _lbl.text = [NSString stringWithFormat:@"RAM %@ · Dư %@ · %ldFPS",
-        sdvFmtMemCompact(s.usedBytes), sdvFmtMemCompact(s.availBytes), (long)_fps];
+    if (_eco30Fps) {
+        NSInteger dispFps = (_fps >= 40) ? (_fps / 2) : _fps;
+        _lbl.text = [NSString stringWithFormat:@"RAM %@ · Dư %@ · %ldFPS Eco",
+            sdvFmtMemCompact(s.usedBytes), sdvFmtMemCompact(s.availBytes), (long)dispFps];
+    } else {
+        _lbl.text = [NSString stringWithFormat:@"RAM %@ · Dư %@ · %ldFPS",
+            sdvFmtMemCompact(s.usedBytes), sdvFmtMemCompact(s.availBytes), (long)_fps];
+    }
 }
 @end
 

@@ -424,6 +424,22 @@ namespace SDVMobileControls
             ApplyInputWithMouse(pad, stick, btnX, btnA, btnMenu, null, false);
         }
 
+        public void ApplyPhysicalGamePad(object pad, Vector2 stick, bool btnX, bool btnA, bool btnB, bool btnY, bool btnLT, bool btnRT, bool btnMenu)
+        {
+            if (pad == null) return;
+            _arg1[0] = stick;
+            _setLeftStick?.Invoke(pad, _arg1);
+            _setButtonX?.Invoke(pad, btnX ? _argBoolTrue : _argBoolFalse);
+            _setButtonA?.Invoke(pad, btnA ? _argBoolTrue : _argBoolFalse);
+            _setButtonB?.Invoke(pad, btnB ? _argBoolTrue : _argBoolFalse);
+            _setButtonY?.Invoke(pad, btnY ? _argBoolTrue : _argBoolFalse);
+            _setButtonLT?.Invoke(pad, btnLT ? _argBoolTrue : _argBoolFalse);
+            _setButtonRT?.Invoke(pad, btnRT ? _argBoolTrue : _argBoolFalse);
+            _setButtonMenu?.Invoke(pad, btnMenu ? _argBoolTrue : _argBoolFalse);
+            _resetSimulatedMouse?.Invoke(pad, null);
+            _forwardInputToGame?.Invoke(pad, null);
+        }
+
         public void ApplyInputWithMouse(object pad, Vector2 stick, bool btnX, bool btnA, bool btnMenu, Point? mousePos, bool mouseLeftDown, bool mouseRightDown = false, int rawW = 0, int rawH = 0)
         {
             if (pad == null) return;

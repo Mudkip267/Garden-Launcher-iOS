@@ -439,8 +439,16 @@ namespace SDVMobileControls
 
         public static int FindToolSlot<T>(Farmer who) where T : Tool
         {
-            int limit = Math.Min(12, who.Items.Count);
-            for (int i = 0; i < limit; i++)
+            if (who?.Items == null) return -1;
+            int total = Math.Min(Math.Max(12, who.MaxItems), who.Items.Count);
+            int row1 = Math.Min(12, total);
+            // Prefer hotbar row 1 (slots 0..11) first, then scan rows 2-3 (12..35) for 36-slot Vertical Toolbar / deep backpack!
+            for (int i = 0; i < row1; i++)
+            {
+                if (who.Items[i] is T)
+                    return i;
+            }
+            for (int i = row1; i < total; i++)
             {
                 if (who.Items[i] is T)
                     return i;
@@ -450,9 +458,10 @@ namespace SDVMobileControls
 
         public static int FindScytheOrWeaponSlot(Farmer who)
         {
-            int limit = Math.Min(12, who.Items.Count);
+            if (who?.Items == null) return -1;
+            int total = Math.Min(Math.Max(12, who.MaxItems), who.Items.Count);
             int fallbackWeapon = -1;
-            for (int i = 0; i < limit; i++)
+            for (int i = 0; i < total; i++)
             {
                 if (who.Items[i] is MeleeWeapon mw)
                 {
@@ -467,10 +476,11 @@ namespace SDVMobileControls
 
         public static int FindBestWeaponSlot(Farmer who)
         {
-            int limit = Math.Min(12, who.Items.Count);
+            if (who?.Items == null) return -1;
+            int total = Math.Min(Math.Max(12, who.MaxItems), who.Items.Count);
             int bestSlot = -1;
             int bestScore = -1;
-            for (int i = 0; i < limit; i++)
+            for (int i = 0; i < total; i++)
             {
                 if (who.Items[i] is MeleeWeapon mw && !mw.isScythe())
                 {

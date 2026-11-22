@@ -168,8 +168,8 @@ static void sdvEnsureAudioSession(const char *reason) {
     }
 }
 
-// ---- Home Indicator Lock & Auto-Hide (requires deliberate swipe-up instead of waking on bottom taps!) ----
-static BOOL sdvAlwaysHideHomeIndicator(id self, SEL _cmd) { (void)self; (void)_cmd; return YES; }
+// ---- Home Indicator Deferral (keeps Home Bar dimmed, prevents waking bright on taps, requires 2 swipes to exit!) ----
+static BOOL sdvPreferDimmedDeferredHomeIndicator(id self, SEL _cmd) { (void)self; (void)_cmd; return NO; }
 static UIRectEdge sdvDeferAllSystemEdges(id self, SEL _cmd) { (void)self; (void)_cmd; return UIRectEdgeAll; }
 
 static void sdvApplyAutoHideHomeIndicator(UIViewController *vc) {
@@ -185,7 +185,7 @@ static void sdvApplyAutoHideHomeIndicator(UIViewController *vc) {
             dispatch_once(&onceToken, ^{ patched = [NSMutableSet set]; });
             if (![patched containsObject:cn]) {
                 [patched addObject:cn];
-                class_replaceMethod(cls, @selector(prefersHomeIndicatorAutoHidden), (IMP)sdvAlwaysHideHomeIndicator, "B@:");
+                class_replaceMethod(cls, @selector(prefersHomeIndicatorAutoHidden), (IMP)sdvPreferDimmedDeferredHomeIndicator, "B@:");
                 class_replaceMethod(cls, @selector(preferredScreenEdgesDeferringSystemGestures), (IMP)sdvDeferAllSystemEdges, "Q@:");
             }
         }
@@ -203,7 +203,7 @@ static void sdvApplyAutoHideHomeIndicator(UIViewController *vc) {
     self.view.backgroundColor = [UIColor colorWithRed:0.06 green:0.07 blue:0.10 alpha:1.0];
 }
 -(BOOL)prefersStatusBarHidden { return YES; }
--(BOOL)prefersHomeIndicatorAutoHidden { return YES; }
+-(BOOL)prefersHomeIndicatorAutoHidden { return NO; }
 -(UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }
 -(UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
 @end
@@ -261,7 +261,7 @@ static void sdvApplyAutoHideHomeIndicator(UIViewController *vc) {
 
 -(UIView *)capsuleView { return _capsuleShadow; }
 -(BOOL)prefersStatusBarHidden { return YES; }
--(BOOL)prefersHomeIndicatorAutoHidden { return YES; }
+-(BOOL)prefersHomeIndicatorAutoHidden { return NO; }
 -(UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }
 -(UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
 
@@ -607,8 +607,8 @@ static void sdvApplyAutoHideHomeIndicator(UIViewController *vc) {
 
 -(UIView *)badgeView { return _badge; }
 -(BOOL)prefersStatusBarHidden { return YES; }
--(BOOL)prefersHomeIndicatorAutoHidden { return YES; }
--(UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeNone; }
+-(BOOL)prefersHomeIndicatorAutoHidden { return NO; }
+-(UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }
 -(UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
 
 -(void)dealloc {

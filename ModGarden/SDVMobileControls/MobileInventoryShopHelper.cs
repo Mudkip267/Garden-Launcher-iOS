@@ -524,6 +524,29 @@ namespace SDVMobileControls
             {
                 ResetTouch();
 
+                // If user has a Tap-Selected slot in Backpack and taps DROP button below Trash Can -> drop onto ground (great for Co-op!)
+                if (!isChestMenu && _selectedBagSlot >= 0 && _selectedBagInv != null && trashCan != null)
+                {
+                    Rectangle dropUi = ComputeDropBtnUiRect(trashCan);
+                    if (dropUi.Contains(uiPt))
+                    {
+                        Item selItem = GetItemAt(_selectedBagInv, _selectedBagSlot);
+                        if (selItem != null && selItem.canBeDropped() && Game1.player != null)
+                        {
+                            SetItemAt(_selectedBagInv, _selectedBagSlot, null);
+                            try { Game1.createItemDebris(selItem, Game1.player.getStandingPosition(), Game1.player.FacingDirection); } catch { }
+                            try { Game1.playSound("throwDownITem"); } catch { }
+                        }
+                        else
+                        {
+                            try { Game1.playSound("cancel"); } catch { }
+                        }
+                        ClearSelection();
+                        _popConsumeTouchId = tl.Id;
+                        return true;
+                    }
+                }
+
                 // If user has a Tap-Selected slot in Backpack and taps Trash Can -> trash cleanly!
                 if (!isChestMenu && _selectedBagSlot >= 0 && _selectedBagInv != null &&
                     trashCan != null && trashCan.containsPoint(uiPt.X, uiPt.Y))
@@ -757,6 +780,18 @@ namespace SDVMobileControls
             }
 
             return true;
+        }
+
+        private static Rectangle ComputeDropBtnUiRect(ClickableTextureComponent trashCan)
+        {
+            if (trashCan == null) return Rectangle.Empty;
+            int w = Math.Max(trashCan.bounds.Width + 28, 92);
+            int h = 44;
+            int x = trashCan.bounds.Center.X - w / 2;
+            int y = trashCan.bounds.Bottom + 10;
+            if (Game1.uiViewport.Height > 0 && y + h > Game1.uiViewport.Height - 12)
+                y = Math.Max(8, trashCan.bounds.Y - h - 10);
+            return new Rectangle(x, y, w, h);
         }
 
         private static bool HasAnyAttachment(Tool tool)
@@ -1141,14 +1176,23 @@ namespace SDVMobileControls
         {
             if (sb == null || pixel == null) return;
 
-            // 0. Draw golden pixel highlight on Tap-Selected Backpack slot
-            if (_selectedBagSlot >= 0 && _selectedBagInv != null && activeMenu is GameMenu gm && gm.GetCurrentPage() is InventoryPage)
+            // 0. Draw golden pixel highlight on Tap-Selected Backpack slot + DROP button below Trash Can
+            if (_selectedBagSlot >= 0 && _selectedBagInv != null && activeMenu is GameMenu gm && gm.GetCurrentPage() is InventoryPage invP)
             {
                 if (_selectedBagInv.inventory != null && _selectedBagSlot < _selectedBagInv.inventory.Count)
                 {
                     Rectangle selVp = UiRectToVp(_selectedBagInv.inventory[_selectedBagSlot].bounds, uiToVp);
                     sb.Draw(pixel, selVp, new Color(255, 215, 70) * 0.22f);
                     DrawBorder(sb, pixel, selVp, Math.Max(3, vpH / 260), new Color(255, 200, 40));
+
+                    Item selItem = GetItemAt(_selectedBagInv, _selectedBagSlot);
+                    if (selItem != null && selItem.canBeDropped() && invP.trashCan != null)
+                    {
+                        Rectangle dropVp = UiRectToVp(ComputeDropBtnUiRect(invP.trashCan), uiToVp);
+                        sb.Draw(pixel, dropVp, new Color(186, 102, 28) * 0.92f);
+                        DrawBorder(sb, pixel, dropVp, Math.Max(2, vpH / 340), new Color(255, 224, 148));
+                        bridge?.DrawCenteredString(sb, pixel, "DROP", dropVp, Color.White, Math.Max(1, vpH / 300));
+                    }
                 }
             }
 

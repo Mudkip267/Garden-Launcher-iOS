@@ -323,7 +323,7 @@ static NSString *sdvProbeLocalNetwork(void) {
 }
 
 -(BOOL)prefersStatusBarHidden { return YES; }
--(BOOL)prefersHomeIndicatorAutoHidden { return YES; }
+-(BOOL)prefersHomeIndicatorAutoHidden { return NO; }
 -(UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }
 
 #ifdef GARDEN_IN_GAME
@@ -1031,6 +1031,12 @@ static NSString *sdvProbeLocalNetwork(void) {
         [asRow addArrangedSubview:asSeg];
         [mcRows addObject:asRow];
 
+        [mcRows addObject:[self mkSettingsSwitchRow:@"Giảm hạt thời tiết thừa (giữ mượt FPS lúc mưa/bão)" icon:@"cloud.rain.fill" color:kTintTeal on:_mobileCfg.reduceWeather tag:39]];
+        NSString *uiScTxt = (_mobileCfg.uiScaleOverride >= 0.73f)
+            ? [NSString stringWithFormat:@"%d%%", (int)roundf(_mobileCfg.uiScaleOverride * 100)]
+            : @"Mặc định";
+        float uiScVal = (_mobileCfg.uiScaleOverride >= 0.73f) ? _mobileCfg.uiScaleOverride : 0.70f;
+        [mcRows addObject:[self mkSliderRow:@"Cỡ chữ & Menu PC / Mod (UI Scale)" min:0.70f max:1.50f val:uiScVal valText:uiScTxt tag:18]];
         [mcRows addObject:[self mkSliderRow:@"Kích thước nút / vùng chạm" min:0.75f max:1.45f val:_mobileCfg.buttonScale valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_mobileCfg.buttonScale * 100)] tag:17]];
     }
     [_pane addArrangedSubview:mkGroupedRows(mcRows, 48)];
@@ -1347,7 +1353,10 @@ static NSString *sdvProbeLocalNetwork(void) {
         @14: [NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.joyOpacity * 100)],
         @15: [NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.modalScale * 100)],
         @16: [NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.drawerScale * 100)],
-        @17: [NSString stringWithFormat:@"%d%%", (int)roundf((_mobileCfg ? _mobileCfg.buttonScale : 1.0f) * 100)]
+        @17: [NSString stringWithFormat:@"%d%%", (int)roundf((_mobileCfg ? _mobileCfg.buttonScale : 1.0f) * 100)],
+        @18: (_mobileCfg && _mobileCfg.uiScaleOverride >= 0.73f)
+            ? [NSString stringWithFormat:@"%d%%", (int)roundf(_mobileCfg.uiScaleOverride * 100)]
+            : @"Mặc định"
     };
     for (NSNumber *k in txt) {
         UILabel *l = _sliderLabels[k];
@@ -1391,6 +1400,18 @@ static NSString *sdvProbeLocalNetwork(void) {
                 }
             }
             return;
+        case 18:
+            if (!_mobileCfg) _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
+            _mobileCfg.uiScaleOverride = (sl.value < 0.73f) ? 0.0f : sdvClampf(q, 0.75f, 1.50f);
+            [self syncLiveLabels];
+            {
+                NSTimeInterval nowM = NSDate.date.timeIntervalSinceReferenceDate;
+                if (nowM - _lastLiveSave > 0.10) {
+                    _lastLiveSave = nowM;
+                    [_mobileCfg saveToDocuments:_root.path];
+                }
+            }
+            return;
     }
     [self syncLiveLabels];
     NSTimeInterval now = NSDate.date.timeIntervalSinceReferenceDate;
@@ -1401,7 +1422,7 @@ static NSString *sdvProbeLocalNetwork(void) {
 }
 
 -(void)sliderEnded:(UISlider *)sl {
-    if (sl.tag == 17) {
+    if (sl.tag == 17 || sl.tag == 18) {
         [_mobileCfg saveToDocuments:_root.path];
         return;
     }
@@ -1516,7 +1537,7 @@ static NSString *sdvProbeLocalNetwork(void) {
         [self renderAll:NO];
         return;
     }
-    if (sw.tag >= 30 && sw.tag <= 38) {
+    if (sw.tag >= 30 && sw.tag <= 39) {
         _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
         switch (sw.tag) {
             case 30: _mobileCfg.autoTool = sw.isOn; break;
@@ -1528,6 +1549,7 @@ static NSString *sdvProbeLocalNetwork(void) {
             case 36: _mobileCfg.mobileShopAndDrag = sw.isOn; break;
             case 37: _mobileCfg.autoKeyboard = sw.isOn; break;
             case 38: _mobileCfg.safeCrafting = sw.isOn; break;
+            case 39: _mobileCfg.reduceWeather = sw.isOn; break;
         }
         [_mobileCfg saveToDocuments:_root.path];
         [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];

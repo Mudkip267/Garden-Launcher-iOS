@@ -153,9 +153,12 @@ namespace SDVMobileControls
         private bool _menuTapImmediateDrag;
         private bool _menuTapCameraPan;
 
-        // Hover-first safe crafting state
+        // Hover-first safe crafting & Community Center bundle state
         private CraftingPage _craftHoverMenu;
         private ClickableTextureComponent _craftHoveredBtn;
+        private JunimoNoteMenu _junimoHoverMenu;
+        private ClickableComponent _junimoHoveredSlot;
+        private int _weatherTickCounter;
 
         // Auto iOS keyboard on TextBox focus
         private IKeyboardSubscriber _lastKbSubscriber;
@@ -574,7 +577,119 @@ namespace SDVMobileControls
 
         private static bool IsEscOnlyMenu(IClickableMenu menu)
         {
-            return (menu is QuestLog) || (menu is CarpenterMenu cm && cm.onFarm);
+            if (menu == null) return false;
+            if (menu is DialogueBox || menu is LetterViewerMenu || menu is BobberBar || menu is TitleMenu)
+                return false;
+            // Show top-left ESC pill on ALL PC/Mod menus (GMCM, CJB, Lookup Anything, Forge, Tailoring, Museum, Carpenter, QuestLog, etc.)!
+            return true;
+        }
+
+        private void ApplyLiveUiScaleAndWeather()
+        {
+            if (_cfg.UiScaleOverride >= 0.75f && Game1.options != null)
+            {
+                if (Math.Abs(Game1.options.desiredUIScale - _cfg.UiScaleOverride) > 0.01f)
+                    Game1.options.desiredUIScale = _cfg.UiScaleOverride;
+            }
+
+            if (_cfg.ReduceWeather && ++_weatherTickCounter >= 30)
+            {
+                _weatherTickCounter = 0;
+                try
+                {
+                    var dw = Game1.debrisWeather;
+                    if (dw != null && dw.Count > 24)
+                        dw.RemoveRange(24, dw.Count - 24);
+                }
+                catch { }
+            }
+        }
+
+        private static bool TryAutoPlaceForgeOrTailor(IClickableMenu activeMenu, Point ui)
+        {
+            if (activeMenu is ForgeMenu fm && fm.inventory != null && fm.inventory.isWithinBounds(ui.X, ui.Y) && fm.heldItem == null)
+            {
+                try
+                {
+                    fm.receiveLeftClick(ui.X, ui.Y, true);
+                    if (fm.heldItem != null)
+                    {
+                        if (fm.leftIngredientSpot != null && fm.leftIngredientSpot.item == null)
+                            fm.receiveLeftClick(fm.leftIngredientSpot.bounds.Center.X, fm.leftIngredientSpot.bounds.Center.Y, true);
+                        if (fm.heldItem != null && fm.rightIngredientSpot != null && fm.rightIngredientSpot.item == null)
+                            fm.receiveLeftClick(fm.rightIngredientSpot.bounds.Center.X, fm.rightIngredientSpot.bounds.Center.Y, true);
+                        if (fm.heldItem != null)
+                            fm.receiveLeftClick(ui.X, ui.Y, true); // Return cleanly to original slot so cursor never sticks!
+                    }
+                    return true;
+                }
+                catch { }
+            }
+            if (activeMenu is TailoringMenu tm && tm.inventory != null && tm.inventory.isWithinBounds(ui.X, ui.Y) && tm.heldItem == null)
+            {
+                try
+                {
+                    tm.receiveLeftClick(ui.X, ui.Y, true);
+                    if (tm.heldItem != null)
+                    {
+                        if (tm.leftIngredientSpot != null && tm.leftIngredientSpot.item == null)
+                            tm.receiveLeftClick(tm.leftIngredientSpot.bounds.Center.X, tm.leftIngredientSpot.bounds.Center.Y, true);
+                        if (tm.heldItem != null && tm.rightIngredientSpot != null && tm.rightIngredientSpot.item == null)
+                            tm.receiveLeftClick(tm.rightIngredientSpot.bounds.Center.X, tm.rightIngredientSpot.bounds.Center.Y, true);
+                        if (tm.heldItem != null)
+                            tm.receiveLeftClick(ui.X, ui.Y, true);
+                    }
+                    return true;
+                }
+                catch { }
+            }
+            return false;
+        }
+
+        private static ClickableComponent FindJunimoBundleSlotAt(JunimoNoteMenu jnm, Point ui)
+        {
+            if (jnm == null || !jnm.specificBundlePage || jnm.inventory?.inventory == null)
+                return null;
+            for (int i = 0; i < jnm.inventory.inventory.Count; i++)
+            {
+                var cc = jnm.inventory.inventory[i];
+                if (cc != null && cc.containsPoint(ui.X, ui.Y))
+                {
+                    Item it = (i < jnm.inventory.actualInventory.Count) ? jnm.inventory.actualInventory[i] : null;
+                    if (it != null && jnm.HighlightObjects(it))
+                        return cc;
+                }
+            }
+            return null;
+        }
+
+        private bool TryDirectAdjacentTileTap(Vector2 vp)
+        {
+            Farmer who = Game1.player;
+            GameLocation loc = Game1.currentLocation;
+            if (who == null || loc == null) return false;
+
+            Vector2 worldPos = ViewportToWorld(vp);
+            Point tappedTile = new Point((int)Math.Floor(worldPos.X / 64f), (int)Math.Floor(worldPos.Y / 64f));
+            Point playerTile = who.TilePoint;
+            int cheb = Math.Max(Math.Abs(playerTile.X - tappedTile.X), Math.Abs(playerTile.Y - tappedTile.Y));
+            if (cheb > 1) return false;
+
+            TileIntent intent = AutoToolAndCombat.InspectTile(loc, tappedTile, who, _cfg.AutoTool);
+            if (intent.Kind != TileActionKind.None)
+            {
+                TriggerTileIntent(who, tappedTile, intent);
+                return true;
+            }
+
+            // Empty adjacent/diagonal tile: face exact tile and trigger Interact/Place or UseTool!
+            Vector2 targetCenter = new Vector2(tappedTile.X * 64f + 32f, tappedTile.Y * 64f + 32f);
+            who.faceGeneralDirection(targetCenter);
+            if (who.ActiveObject != null)
+                _actionPulseAFrames = 2;
+            else
+                _actionPulseXFrames = 2;
+            return true;
         }
 
         private static bool IsImmediateDragMenu(IClickableMenu menu, Point uiPt)
@@ -603,6 +718,7 @@ namespace SDVMobileControls
         public bool UpdateInMenu(object pad, GameTime gameTime)
         {
             _cfg.PollReload();
+            ApplyLiveUiScaleAndWeather();
             _editMode = false;
             _keyPickerOpen = false;
             _saveMenuOpen = false;
@@ -661,6 +777,11 @@ namespace SDVMobileControls
             {
                 _craftHoverMenu = null;
                 _craftHoveredBtn = null;
+            }
+            if (!ReferenceEquals(_junimoHoverMenu, activeMenu as JunimoNoteMenu))
+            {
+                _junimoHoverMenu = null;
+                _junimoHoveredSlot = null;
             }
 
             // Always consume lingering tap release from BAG/MAP/QST or HUD Quest button
@@ -738,12 +859,23 @@ namespace SDVMobileControls
                             if (_ctxKeyRect.Contains(pt)) { br?.TriggerVirtualKeyboard(pad); _ctxTouchId = tl.Id; sawCtx = true; continue; }
                             if (_ctxEscRect.Contains(pt)) { _invShop.Reset(); try { Game1.exitActiveMenu(); } catch { } _ctxTouchId = tl.Id; sawCtx = true; continue; }
                         }
-                        else if (showKeyOnly && _ctxX1Rect.Contains(pt))
+                        else if (showKeyOnly)
                         {
-                            br?.TriggerVirtualKeyboard(pad);
-                            _ctxTouchId = tl.Id;
-                            sawCtx = true;
-                            continue;
+                            if (_ctxX1Rect.Contains(pt))
+                            {
+                                br?.TriggerVirtualKeyboard(pad);
+                                _ctxTouchId = tl.Id;
+                                sawCtx = true;
+                                continue;
+                            }
+                            if (_ctxHalfRect.Contains(pt) && activeMenu.readyToClose())
+                            {
+                                try { Game1.playSound("bigDeSelect"); } catch { }
+                                try { Game1.exitActiveMenu(); } catch { }
+                                _ctxTouchId = tl.Id;
+                                sawCtx = true;
+                                continue;
+                            }
                         }
                         else if (showEscOnly && _ctxQuestEscRect.Contains(pt))
                         {
@@ -873,6 +1005,9 @@ namespace SDVMobileControls
                     {
                         CraftingPage cp = _cfg.SafeCrafting ? GetActiveCraftingPage(activeMenu) : null;
                         ClickableTextureComponent hitRecipe = cp != null ? FindCraftingRecipeAt(cp, ui) : null;
+                        JunimoNoteMenu jnm = _cfg.SafeCrafting ? (activeMenu as JunimoNoteMenu) : null;
+                        ClickableComponent hitJunimo = jnm != null ? FindJunimoBundleSlotAt(jnm, ui) : null;
+
                         if (cp != null && hitRecipe != null)
                         {
                             if (!ReferenceEquals(hitRecipe, _craftHoveredBtn) || !ReferenceEquals(cp, _craftHoverMenu))
@@ -895,10 +1030,38 @@ namespace SDVMobileControls
                                 }
                             }
                         }
+                        else if (jnm != null && hitJunimo != null)
+                        {
+                            if (!ReferenceEquals(hitJunimo, _junimoHoveredSlot) || !ReferenceEquals(jnm, _junimoHoverMenu))
+                            {
+                                // 1st tap on Community Center bundle item: preview before depositing!
+                                _junimoHoverMenu = jnm;
+                                _junimoHoveredSlot = hitJunimo;
+                                try { jnm.performHoverAction(ui.X, ui.Y); } catch { }
+                                try { Game1.playSound("smallSelect"); } catch { }
+                            }
+                            else
+                            {
+                                _junimoHoverMenu = null;
+                                _junimoHoveredSlot = null;
+                                try { jnm.performHoverAction(ui.X, ui.Y); } catch { }
+                                try { jnm.receiveLeftClick(ui.X, ui.Y, true); } catch { }
+                                try { jnm.releaseLeftClick(ui.X, ui.Y); } catch { }
+                            }
+                        }
+                        else if (TryAutoPlaceForgeOrTailor(activeMenu, ui))
+                        {
+                            _craftHoverMenu = null;
+                            _craftHoveredBtn = null;
+                            _junimoHoverMenu = null;
+                            _junimoHoveredSlot = null;
+                        }
                         else
                         {
                             _craftHoverMenu = null;
                             _craftHoveredBtn = null;
+                            _junimoHoverMenu = null;
+                            _junimoHoveredSlot = null;
                             try { activeMenu.performHoverAction(ui.X, ui.Y); } catch { }
                             try { activeMenu.receiveLeftClick(ui.X, ui.Y, true); } catch { }
                             try { activeMenu.releaseLeftClick(ui.X, ui.Y); } catch { }
@@ -1010,7 +1173,8 @@ namespace SDVMobileControls
             bool allowCustomKeys = AllowCustomKeysInCurrentMenu() && _cfg.CustomKeys.Count > 0;
             bool showInvShop = _cfg.MobileShopAndDrag && (_invShop.IsPopupOpen || _invShop.IsDraggingItem || _invShop.HasSelectedSlot);
             bool showCraftHint = _cfg.SafeCrafting && _craftHoveredBtn != null && ReferenceEquals(_craftHoverMenu, GetActiveCraftingPage(Game1.activeClickableMenu));
-            if (!showInvCtx && !showKeyOnly && !showEscOnly && !allowCustomKeys && !showInvShop && !showCraftHint)
+            bool showJunimoHint = _cfg.SafeCrafting && _junimoHoveredSlot != null && ReferenceEquals(_junimoHoverMenu, Game1.activeClickableMenu as JunimoNoteMenu);
+            if (!showInvCtx && !showKeyOnly && !showEscOnly && !allowCustomKeys && !showInvShop && !showCraftHint && !showJunimoHint)
                 return;
 
             EnsureTextures(sb.GraphicsDevice);
@@ -1029,26 +1193,29 @@ namespace SDVMobileControls
             else if (showKeyOnly)
             {
                 DrawMinimalPill(sb, _ctxX1Rect, "KEY", false);
+                if (Game1.activeClickableMenu.readyToClose())
+                    DrawMinimalPill(sb, _ctxHalfRect, "ESC", false);
             }
             else if (showEscOnly)
             {
                 DrawMinimalPill(sb, _ctxQuestEscRect, "ESC", false);
             }
 
-            if (showCraftHint)
+            if (showCraftHint || showJunimoHint)
             {
-                Rectangle rb = _craftHoveredBtn.bounds;
+                Rectangle rb = showCraftHint ? _craftHoveredBtn.bounds : _junimoHoveredSlot.bounds;
+                string hTxt = showCraftHint ? "CHAM LAN NUA DE CHE TAO" : "CHAM LAN NUA DE BO VAO GOI";
                 Vector2 tl = UiToViewport(new Point(rb.X, rb.Y));
                 Vector2 brPt = UiToViewport(new Point(rb.Right, rb.Bottom));
                 var vr = new Rectangle((int)tl.X, (int)tl.Y, Math.Max(16, (int)(brPt.X - tl.X)), Math.Max(16, (int)(brPt.Y - tl.Y)));
                 DrawRectOutline(sb, vr, Math.Max(2, _vpH / 280), new Color(255, 214, 64));
 
-                int bw = Math.Clamp((int)(_vpW * 0.34f), 220, _vpW - 40);
+                int bw = Math.Clamp((int)(_vpW * 0.36f), 230, _vpW - 40);
                 int bh = Math.Max(30, (int)(_vpH * 0.056f));
                 var hintR = new Rectangle((_vpW - bw) / 2, _vpH - bh - Math.Max(14, _vpH / 34), bw, bh);
                 sb.Draw(_pixel, hintR, new Color(42, 28, 14) * 0.90f);
                 DrawRectOutline(sb, hintR, Math.Max(2, _vpH / 360), new Color(255, 214, 64));
-                br?.DrawCenteredString(sb, _pixel, "CHAM LAN NUA DE CHE TAO", hintR, new Color(255, 238, 175), Math.Max(1, _vpH / 320));
+                br?.DrawCenteredString(sb, _pixel, hTxt, hintR, new Color(255, 238, 175), Math.Max(1, _vpH / 320));
             }
 
             if (allowCustomKeys)
@@ -1061,6 +1228,7 @@ namespace SDVMobileControls
         public void UpdateGameplay(object pad, GameTime gameTime)
         {
             _cfg.PollReload();
+            ApplyLiveUiScaleAndWeather();
             _invShop.Reset();
             var br = EnsureBridge(pad);
             if (!_loggedFirstIntercept)
@@ -1484,6 +1652,13 @@ namespace SDVMobileControls
                         _holdWalking = false;
                         _tapChargingTool = false;
                         sawTap = true;
+                        continue;
+                    }
+
+                    // In Invisible / 2-Button mode: tapping an adjacent/diagonal tile right next to the player
+                    // outside Joystick & USE/ACT zones lets you interact with diagonal chests/machines/wall decor!
+                    if (!useTap && TryDirectAdjacentTileTap(vp))
+                    {
                         continue;
                     }
                 }

@@ -63,6 +63,7 @@ namespace SDVMobileControls
         private FieldInfo _fMgLoadedAssets;
         private FieldInfo _fMgDisposableAssets;
         private FieldInfo _fTileSheetTextures;
+        private FieldInfo _fNpcPortrait;
         private FieldInfo[] _game1StaticTexFields;
 
         public MapRamOptimizer(IModHelper helper, IMonitor monitor)
@@ -228,6 +229,7 @@ namespace SDVMobileControls
 
                 Type xnaDispType = typeof(xTile.Display.XnaDisplayDevice);
                 _fTileSheetTextures = xnaDispType.GetField("m_tileSheetTextures", any);
+                _fNpcPortrait = typeof(NPC).GetField("portrait", any);
 
                 var texFields = new List<FieldInfo>();
                 foreach (FieldInfo fi in typeof(Game1).GetFields(stat))
@@ -352,7 +354,40 @@ namespace SDVMobileControls
                     catch { }
                 }
 
-                // Protect non-map textures in ALL GameContentManagers (in case a texture is shared under a non-Maps key)
+                // Protect portraits of NPCs in the current location or with custom overridden portraits
+                bool prunePortraits = (_fNpcPortrait != null && Game1.activeClickableMenu == null && !Game1.dialogueUp);
+                if (prunePortraits)
+                {
+                    try
+                    {
+                        if (Game1.currentLocation?.characters != null)
+                        {
+                            for (int i = 0; i < Game1.currentLocation.characters.Count; i++)
+                            {
+                                NPC ch = Game1.currentLocation.characters[i];
+                                if (ch != null && _fNpcPortrait.GetValue(ch) is Texture2D pt)
+                                    protectedTex.Add(pt);
+                            }
+                        }
+                        if (Game1.locations != null)
+                        {
+                            for (int l = 0; l < Game1.locations.Count; l++)
+                            {
+                                var loc = Game1.locations[l];
+                                if (loc?.characters == null) continue;
+                                for (int c = 0; c < loc.characters.Count; c++)
+                                {
+                                    NPC ch = loc.characters[c];
+                                    if (ch != null && (ch.portraitOverridden || !ch.IsVillager) && _fNpcPortrait.GetValue(ch) is Texture2D pt)
+                                        protectedTex.Add(pt);
+                                }
+                            }
+                        }
+                    }
+                    catch { prunePortraits = false; }
+                }
+
+                // Protect non-evictable textures in ALL GameContentManagers (in case a texture is shared under a protected key)
                 foreach (object gm in gameManagers)
                 {
                     var dict = GetCacheDict(gm);
@@ -362,13 +397,13 @@ namespace SDVMobileControls
                         if (kv.Value is Texture2D tex && !tex.IsDisposed)
                         {
                             string norm = NormalizeAssetKey(kv.Key);
-                            if (!IsEvictableMapTilesheetKey(norm, activeKeys, activeBasenames))
+                            if (!IsEvictableAssetKey(norm, activeKeys, activeBasenames, prunePortraits))
                                 protectedTex.Add(tex);
                         }
                     }
                 }
 
-                // 2. Find candidate off-screen map tilesheets across all GameContentManagers
+                // 2. Find candidate off-screen map tilesheets & off-screen villager portraits across all GameContentManagers
                 var candidates = new List<(object mgr, string rawKey, string normKey, Texture2D tex, long seq)>();
                 var candidateByTex = new HashSet<Texture2D>(ReferenceComparer.Instance);
 
@@ -384,7 +419,7 @@ namespace SDVMobileControls
                             continue;
 
                         string norm = NormalizeAssetKey(kv.Key);
-                        if (!IsEvictableMapTilesheetKey(norm, activeKeys, activeBasenames))
+                        if (!IsEvictableAssetKey(norm, activeKeys, activeBasenames, prunePortraits))
                             continue;
 
                         _lastUsedSeq.TryGetValue(norm, out long seq);
@@ -533,6 +568,34 @@ namespace SDVMobileControls
                         }
                     }
 
+                    // Null off-screen villager npc.portrait references BEFORE disposing so NPC.get_Portrait() reloads cleanly via ChooseAppearance!
+                    if (_fNpcPortrait != null)
+                    {
+                        try
+                        {
+                            if (Game1.locations != null)
+                            {
+                                for (int l = 0; l < Game1.locations.Count; l++)
+                                {
+                                    var loc = Game1.locations[l];
+                                    if (loc?.characters == null) continue;
+                                    for (int c = 0; c < loc.characters.Count; c++)
+                                    {
+                                        NPC ch = loc.characters[c];
+                                        if (ch != null && _fNpcPortrait.GetValue(ch) is Texture2D pt && toDispose.Contains(pt))
+                                        {
+                                            if (ch.IsVillager && !ch.portraitOverridden)
+                                                _fNpcPortrait.SetValue(ch, null);
+                                            else
+                                                toDispose.Remove(pt); // Safety guard: never dispose an un-reloadable portrait!
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+
                     // Clean VanillaContentManager.loadedAssets / disposableAssets if present
                     PurgeFromMonoGameContentManager(_fVanillaContentMgr?.GetValue(coordinator), toDispose);
 
@@ -675,12 +738,21 @@ namespace SDVMobileControls
             return false;
         }
 
-        private bool IsEvictableMapTilesheetKey(string normKey, HashSet<string> activeKeys, HashSet<string> activeBasenames)
+        private bool IsEvictableAssetKey(string normKey, HashSet<string> activeKeys, HashSet<string> activeBasenames, bool prunePortraits)
         {
             if (string.IsNullOrEmpty(normKey))
                 return false;
 
-            // Never touch Audio / Sound / UI / Fonts / Sprites / Buildings / TerrainFeatures / Characters / Portraits
+            // Safe off-screen HD/villager Portraits/* eviction (NPC.get_Portrait reloads cleanly on demand!)
+            if (prunePortraits && normKey.StartsWith("portraits/", StringComparison.OrdinalIgnoreCase))
+            {
+                if (normKey.IndexOf("shop", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    normKey.IndexOf("answering", StringComparison.OrdinalIgnoreCase) >= 0)
+                    return false;
+                return true;
+            }
+
+            // Never touch Audio / Sound / UI / Fonts / Sprites / Buildings / TerrainFeatures / Characters
             if (normKey.StartsWith("loosesprites/", StringComparison.OrdinalIgnoreCase) ||
                 normKey.StartsWith("fonts/", StringComparison.OrdinalIgnoreCase) ||
                 normKey.StartsWith("tilesheets/", StringComparison.OrdinalIgnoreCase) ||

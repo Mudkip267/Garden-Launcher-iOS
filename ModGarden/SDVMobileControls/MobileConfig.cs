@@ -37,8 +37,10 @@ namespace SDVMobileControls
         public bool SwapRightButtons { get; set; } = false;
         public bool MobileShopAndDrag { get; set; } = true; // Mobile Shop quantity slider + Drag-and-Drop + Chest 1-tap transfer
         public bool AutoKeyboard { get; set; } = true;      // Auto-open iOS keyboard when tapping any TextBox
-        public bool SafeCrafting { get; set; } = true;      // Hover-first 2-tap safe crafting/cooking
+        public bool SafeCrafting { get; set; } = true;      // Hover-first 2-tap safe crafting/cooking/bundles
         public int AutoSaveMinutes { get; set; } = 0;       // 0 = OFF (default, zero stutter), 3 / 5 / 10 minutes periodic AutoSave slot
+        public bool ReduceWeather { get; set; } = true;     // Cap excessive rain/wind debris particles for smoother FPS
+        public float UiScaleOverride { get; set; } = 0.0f;  // 0 = game default, or 0.75..1.50 live UI scale for PC mod menus
         public float ButtonScale { get; set; } = 1.0f;
 
         // Normalized layout (0..1 of viewport) for Invisible Mode: Left Joystick Rect + 2 Right Vertical Rectangular Bars
@@ -279,6 +281,11 @@ namespace SDVMobileControls
                             if (int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out int am) && (am == 0 || am == 3 || am == 5 || am == 10))
                                 AutoSaveMinutes = am;
                             break;
+                        case "reduceweather": ReduceWeather = ParseBool(v, true); break;
+                        case "uiscale":
+                            float us = ParseFloat(v, 0.0f, 0.0f, 1.50f);
+                            UiScaleOverride = (us >= 0.70f) ? Math.Clamp(us, 0.75f, 1.50f) : 0.0f;
+                            break;
                         case "buttonscale": ButtonScale = ParseFloat(v, 1.0f, 0.75f, 1.45f); break;
 
                         case "inv_joy_x": InvJoyX = ParseFloat(v, InvJoyX, 0.0f, 0.90f); break;
@@ -367,6 +374,8 @@ namespace SDVMobileControls
                 sb.AppendLine($"autokeyboard={(AutoKeyboard ? 1 : 0)}");
                 sb.AppendLine($"safecrafting={(SafeCrafting ? 1 : 0)}");
                 sb.AppendLine($"autosavemin={AutoSaveMinutes}");
+                sb.AppendLine($"reduceweather={(ReduceWeather ? 1 : 0)}");
+                sb.AppendLine($"uiscale={UiScaleOverride.ToString("0.00", CultureInfo.InvariantCulture)}");
                 sb.AppendLine($"buttonscale={ButtonScale.ToString("0.00", CultureInfo.InvariantCulture)}");
                 sb.AppendLine($"inv_joy_x={F(InvJoyX)}");
                 sb.AppendLine($"inv_joy_y={F(InvJoyY)}");

@@ -261,6 +261,23 @@ static void syncBundledMobileControls(NSString *docsPath) {
                 [sd writeToFile:dp options:NSDataWritingAtomic error:nil];
             }
         }
+        // Also keep bundled SDViOSTouchControls DLLs in sync with the updated IPA bundle
+        NSString *srcTouchMod = join(join(NSBundle.mainBundle.bundlePath, @"Mods"), @"SDViOSTouchControls");
+        if (dir(srcTouchMod) && !dir(join(modsDir, @".SDViOSTouchControls"))) {
+            NSString *dstTouchMod = join(modsDir, @"SDViOSTouchControls");
+            [fm() createDirectoryAtPath:dstTouchMod withIntermediateDirectories:YES attributes:nil error:nil];
+            for (NSString *fn in @[@"SDViOSTouchControlsMod.dll", @"SDViOSTouchControls.dll"]) {
+                NSString *sp = join(srcTouchMod, fn);
+                if (![fm() fileExistsAtPath:sp]) continue;
+                NSData *sd = [NSData dataWithContentsOfFile:sp options:NSDataReadingMappedIfSafe error:nil];
+                if (!sd.length) continue;
+                NSString *dp = join(dstTouchMod, fn);
+                NSData *dd = [fm() fileExistsAtPath:dp] ? [NSData dataWithContentsOfFile:dp options:NSDataReadingMappedIfSafe error:nil] : nil;
+                if (!dd || dd.length != sd.length || ![hashData(sd) isEqualToString:hashData(dd)]) {
+                    [sd writeToFile:dp options:NSDataWritingAtomic error:nil];
+                }
+            }
+        }
     } @catch (NSException *ex) { }
 }
 
@@ -1258,7 +1275,7 @@ static BOOL isHiddenRelPath(NSString *rel) {
     }
     return NO;
 }
-static NSString *formatBytes(unsigned long long bytes) {
+__attribute__((unused)) static NSString *formatBytes(unsigned long long bytes) {
     if (bytes < 1024ULL) return [NSString stringWithFormat:@"%llu B", bytes];
     if (bytes < 1024ULL * 1024ULL) return [NSString stringWithFormat:@"%.1f KB", bytes / 1024.0];
     return [NSString stringWithFormat:@"%.1f MB", bytes / (1024.0 * 1024.0)];

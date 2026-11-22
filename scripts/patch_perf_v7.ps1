@@ -620,6 +620,43 @@ Retarget-Branches $mFwd $verbAnchor $fl0
 $fl1.Operand = $verbAnchor
 Write-Host "  Injected direct IL hooks TouchVirtualPad.MobileExtraKeysHook + MobileExtraKeysListHook for custom PC buttons!"
 
+# 1.7 Fix CoreAssetPropagator hooks in SDViOSTouchControls:
+#   (a) Never hook/suppress CoreAssetPropagator.PropagateTexture (breaks Content Patcher UI/retexture mods like Cat Valley UI!)
+#   (b) Gate PrefixPropagateMap on DeferredMapLoader.IsBulkLoading so map propagation works normally after save load.
+$tTouchModEntry = $tMod.GetType("SDViOSTouchControls.ModEntry")
+if (-not $tTouchModEntry) { throw "Missing SDViOSTouchControls.ModEntry for Patch 1.7!" }
+$mApplyHarmony = $tTouchModEntry.Methods | Where-Object { $_.Name -eq "ApplyHarmonyPatches" }
+if (-not $mApplyHarmony -or -not $mApplyHarmony.HasBody) { throw "Missing ApplyHarmonyPatches!" }
+$ptStrPatched = 0
+foreach ($ins in $mApplyHarmony.Body.Instructions) {
+    if ($ins.OpCode.Name -eq "ldstr" -and "$($ins.Operand)" -eq "PropagateTexture") {
+        $ins.Operand = "__Disabled_PropagateTexture__"
+        $ptStrPatched++
+    }
+}
+if ($ptStrPatched -lt 1) { throw "Expected PropagateTexture string in ApplyHarmonyPatches!" }
+Write-Host "  Disabled SDViOSTouchControls PropagateTexture suppression ($ptStrPatched hook skipped)."
+
+$mPrefPropMap = $tTouchModEntry.Methods | Where-Object { $_.Name -eq "PrefixPropagateMap" }
+$tDefMapLoader = $tMod.GetType("SDViOSTouchControls.DeferredMapLoader")
+$mGetBulkLoad = if ($tDefMapLoader) { $tDefMapLoader.Methods | Where-Object { $_.Name -eq "get_IsBulkLoading" } } else { $null }
+if (-not $mPrefPropMap -or -not $mPrefPropMap.HasBody -or -not $mGetBulkLoad) { throw "Missing PrefixPropagateMap or DeferredMapLoader.get_IsBulkLoading!" }
+$pmIl = $mPrefPropMap.Body.GetILProcessor()
+$mPrefPropMap.Body.Instructions.Clear()
+$mPrefPropMap.Body.ExceptionHandlers.Clear()
+$mPrefPropMap.Body.Variables.Clear()
+$lSkipMap = $pmIl.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0)
+$pmIl.Append($pmIl.Create([Mono.Cecil.Cil.OpCodes]::Call, $mGetBulkLoad))
+$pmIl.Append($pmIl.Create([Mono.Cecil.Cil.OpCodes]::Brtrue_S, $lSkipMap))
+$pmIl.Append($pmIl.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_1))
+$pmIl.Append($pmIl.Create([Mono.Cecil.Cil.OpCodes]::Ret))
+$pmIl.Append($lSkipMap)
+$pmIl.Append($pmIl.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0))
+$pmIl.Append($pmIl.Create([Mono.Cecil.Cil.OpCodes]::Stind_I1))
+$pmIl.Append($pmIl.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0))
+$pmIl.Append($pmIl.Create([Mono.Cecil.Cil.OpCodes]::Ret))
+Write-Host "  Gated PrefixPropagateMap on DeferredMapLoader.IsBulkLoading!"
+
 Write-Host "  v7 TouchControls: Native 3x/2x + Direct MobileHooks + PrefixClientBounds + MenuLag(stackSkip, GC 140MB x$gmLowered) + Poll 45f + Watchdog $bumped"
 $tAsm.Write($outTouch)
 $tAsm.Dispose()
@@ -1202,6 +1239,222 @@ if ($tShader -and $mStrReplace -and $mStrContains -and $mStrConcat2) {
     }
     Write-Host "  iOS Shader Fix (MonoGame): MGFX v8..10 enabled + Auto Desktop GLSL -> GLSL ES precision header + ShaderInfoLog output!"
 }
+
+# 3.6 Implement Texture2D.CopyFromTexture(Texture2D src) in MonoGame.Framework.dll!
+# Base SDViosport MonoGame stubbed CopyFromTexture as a 1-instruction `ret`, silently discarding ALL
+# SMAPI CoreAssetPropagator.PropagateTexture() updates (TitleButtons, Clouds, MenuTiles, Cursors, fonts,
+# portraits, recolors, UI packs such as Cat Valley UI, Earthy Interface, Vintage Interface, etc.)!
+$tTex2D    = $mgMod.GetType("Microsoft.Xna.Framework.Graphics.Texture2D")
+$tTexBase  = $mgMod.GetType("Microsoft.Xna.Framework.Graphics.Texture")
+$tGfxRes   = $mgMod.GetType("Microsoft.Xna.Framework.Graphics.GraphicsResource")
+$tGfxDev   = $mgMod.GetType("Microsoft.Xna.Framework.Graphics.GraphicsDevice")
+$tTexColl  = $mgMod.GetType("Microsoft.Xna.Framework.Graphics.TextureCollection")
+$tColor    = $mgMod.GetType("Microsoft.Xna.Framework.Color")
+$mCopyFrom = if ($tTex2D) { $tTex2D.Methods | Where-Object { $_.Name -eq "CopyFromTexture" -and $_.Parameters.Count -eq 1 } } else { $null }
+if (-not $mCopyFrom) { throw "Missing Texture2D.CopyFromTexture(Texture2D) in MonoGame.Framework.dll!" }
+
+$fTexWidth     = $tTex2D.Fields   | Where-Object { $_.Name -eq "width" }
+$fTexHeight    = $tTex2D.Fields   | Where-Object { $_.Name -eq "height" }
+$fActWidth     = $tTex2D.Fields   | Where-Object { $_.Name -eq "_actualWidth" }
+$fActHeight    = $tTex2D.Fields   | Where-Object { $_.Name -eq "_actualHeight" }
+$fTexFormat    = $tTexBase.Fields | Where-Object { $_.Name -eq "_format" }
+$fLevelCount   = $tTexBase.Fields | Where-Object { $_.Name -eq "_levelCount" }
+$fGlTexture    = $tTexBase.Fields | Where-Object { $_.Name -eq "glTexture" }
+$fGlLastSamp   = $tTexBase.Fields | Where-Object { $_.Name -eq "glLastSamplerState" }
+$mGetDisposed  = $tGfxRes.Methods | Where-Object { $_.Name -eq "get_IsDisposed" }
+$mGetGD        = $tGfxRes.Methods | Where-Object { $_.Name -eq "get_GraphicsDevice" }
+$mDeleteGL     = $tTexBase.Methods| Where-Object { $_.Name -eq "DeleteGLTexture" }
+$mGetData1Def  = $tTex2D.Methods  | Where-Object { $_.Name -eq "GetData" -and $_.Parameters.Count -eq 1 }
+$mSetData1Def  = $tTex2D.Methods  | Where-Object { $_.Name -eq "SetData" -and $_.Parameters.Count -eq 1 }
+$mGetColorData = $tTex2D.Methods  | Where-Object { $_.Name -eq "GetColorData" }
+$mSetTexelW    = $tTex2D.Methods  | Where-Object { $_.Name -eq "set_TexelWidth" }
+$mSetTexelH    = $tTex2D.Methods  | Where-Object { $_.Name -eq "set_TexelHeight" }
+$mTexPlatCtor  = $tTex2D.Methods  | Where-Object { $_.Name -eq "PlatformConstruct" }
+$mGetTextures  = $tGfxDev.Methods | Where-Object { $_.Name -eq "get_Textures" }
+$mTexCollDirty = $tTexColl.Methods| Where-Object { $_.Name -eq "Dirty" }
+$tSysException = $mgMod.GetTypeReferences() | Where-Object { $_.FullName -eq "System.Exception" } | Select-Object -First 1
+
+foreach ($req in @($fTexWidth,$fTexHeight,$fActWidth,$fActHeight,$fTexFormat,$fLevelCount,$fGlTexture,$fGlLastSamp,$mGetDisposed,$mGetGD,$mDeleteGL,$mGetData1Def,$mSetData1Def,$mGetColorData,$mSetTexelW,$mSetTexelH,$mTexPlatCtor,$mGetTextures,$mTexCollDirty,$tColor,$tSysException)) {
+    if (-not $req) { throw "Missing required MonoGame member for Texture2D.CopyFromTexture implementation!" }
+}
+
+$mGetDataColor = New-Object Mono.Cecil.GenericInstanceMethod($mGetData1Def)
+$mGetDataColor.GenericArguments.Add($tColor)
+$mSetDataColor = New-Object Mono.Cecil.GenericInstanceMethod($mSetData1Def)
+$mSetDataColor.GenericArguments.Add($tColor)
+$tColorArray = New-Object Mono.Cecil.ArrayType($tColor)
+
+$mCopyFrom.Body.Instructions.Clear()
+$mCopyFrom.Body.ExceptionHandlers.Clear()
+$mCopyFrom.Body.Variables.Clear()
+$mCopyFrom.Body.InitLocals = $true
+$mCopyFrom.Body.MaxStackSize = 8
+
+$vW    = New-Object Mono.Cecil.Cil.VariableDefinition($mgMod.TypeSystem.Int32)
+$vH    = New-Object Mono.Cecil.Cil.VariableDefinition($mgMod.TypeSystem.Int32)
+$vData = New-Object Mono.Cecil.Cil.VariableDefinition($tColorArray)
+$vGd   = New-Object Mono.Cecil.Cil.VariableDefinition($tGfxDev)
+$mCopyFrom.Body.Variables.Add($vW)
+$mCopyFrom.Body.Variables.Add($vH)
+$mCopyFrom.Body.Variables.Add($vData)
+$mCopyFrom.Body.Variables.Add($vGd)
+
+$cil = $mCopyFrom.Body.GetILProcessor()
+$lTryStart    = $cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1)
+$lGetColData  = $cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1)
+$lAfterRead   = $cil.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vData)
+$lResize      = $cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0)
+$lSyncActual  = $cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0)
+$lRet         = $cil.Create([Mono.Cecil.Cil.OpCodes]::Ret)
+$lLeaveTry    = $cil.Create([Mono.Cecil.Cil.OpCodes]::Leave, $lRet)
+$lCatchStart  = $cil.Create([Mono.Cecil.Cil.OpCodes]::Pop)
+
+# Early guards: null, self, disposed, invalid dimensions, uninitialized GL handle
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $lRet))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Beq, $lRet))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Call, $mGetDisposed))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Brtrue, $lRet))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Call, $mGetDisposed))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Brtrue, $lRet))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fTexWidth))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Stloc, $vW))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fTexHeight))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Stloc, $vH))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vW))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ble, $lRet))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vH))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ble, $lRet))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fGlTexture))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ble, $lRet))
+
+# try { Read pixels from src (fast path when SurfaceFormat.Color == 0, fallback GetColorData())
+$cil.Append($lTryStart)
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fTexFormat))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Brtrue, $lGetColData))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vW))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vH))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Mul))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Newarr, $tColor))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Stloc, $vData))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vData))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Call, $mGetDataColor))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Br, $lAfterRead))
+
+$cil.Append($lGetColData)
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Call, $mGetColorData))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Stloc, $vData))
+
+$cil.Append($lAfterRead)
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $lLeaveTry))
+
+# Check if destination needs resize / format reset / GL texture recreation
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fTexWidth))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vW))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Bne_Un, $lResize))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fTexHeight))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vH))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Bne_Un, $lResize))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fTexFormat))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Brtrue, $lResize))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fLevelCount))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_1))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Bne_Un, $lResize))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fGlTexture))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ble, $lResize))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Br, $lSyncActual))
+
+# Resize & re-create GL texture cleanly
+$cil.Append($lResize)
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Call, $mDeleteGL))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vW))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Stfld, $fTexWidth))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vH))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Stfld, $fTexHeight))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldc_R4, [float]1.0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vW))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Conv_R4))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Div))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Call, $mSetTexelW))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldc_R4, [float]1.0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vH))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Conv_R4))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Div))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Call, $mSetTexelH))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Stfld, $fTexFormat))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_1))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Stfld, $fLevelCount))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldnull))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Stfld, $fGlLastSamp))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vW))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vH))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Call, $mTexPlatCtor))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Call, $mGetGD))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Stloc, $vGd))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vGd))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $lSyncActual))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vGd))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mGetTextures))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mTexCollDirty))
+
+# Sync ActualWidth/ActualHeight and upload pixels on UI thread
+$cil.Append($lSyncActual)
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fActWidth))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Stfld, $fActWidth))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fActHeight))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Stfld, $fActHeight))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vData))
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Call, $mSetDataColor))
+$cil.Append($lLeaveTry)
+
+# catch (Exception) { }
+$cil.Append($lCatchStart)
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Leave, $lRet))
+$cil.Append($lRet)
+
+$eh = New-Object Mono.Cecil.Cil.ExceptionHandler([Mono.Cecil.Cil.ExceptionHandlerType]::Catch)
+$eh.CatchType    = $tSysException
+$eh.TryStart     = $lTryStart
+$eh.TryEnd       = $lCatchStart
+$eh.HandlerStart = $lCatchStart
+$eh.HandlerEnd   = $lRet
+$mCopyFrom.Body.ExceptionHandlers.Add($eh)
+Write-Host "  iOS Content Patcher Texture Propagation Fix (MonoGame): Implemented real Texture2D.CopyFromTexture(Texture2D) with dynamic resize + GL cache invalidation!"
 
 $mgAsm.Write($outMG)
 $mgAsm.Dispose()

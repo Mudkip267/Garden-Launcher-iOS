@@ -453,8 +453,18 @@ namespace SDVMobileControls
                         protectedTex.Add(t);
                 }
 
-                // 3. Collect final set of off-screen map Texture2Ds to evict & GPU-dispose
-                var toDispose = new HashSet<Texture2D>(ReferenceComparer.Instance);
+                // 3. Collect final set of off-screen map/portrait Texture2Ds to evict from SMAPI caches.
+                //    CRITICAL iOS OpenGL ES + Shader Mod Safety (SDV-Radiance, DynamicReflections, etc.):
+                //    Never call tex.Dispose() eagerly on shared GameContentManager textures because C# rendering
+                //    mods cache Texture2D references loaded from Game1.content (e.g., ShadowRenderer._textureCache
+                //    and _propCache). Eagerly deleting their GL texture leaves glTexture = -1, which OpenGL ES
+                //    samples as solid opaque black (0,0,0,1) blocks!
+                //    Instead: unlink them from all SMAPI/MonoGame/xTile caches so .NET GC collects unreferenced
+                //    textures and MonoGame's GraphicsResource finalizer safely calls GraphicsDevice.DisposeTexture()
+                //    ONLY once zero mods hold a reference. Pure Content Patcher (0% C# code) dead copies still
+                //    dispose immediately for instant VRAM reclamation.
+                var toUnlink = new HashSet<Texture2D>(ReferenceComparer.Instance);
+                var toImmediateDispose = new HashSet<Texture2D>(ReferenceComparer.Instance);
                 for (int i = 0; i < candidates.Count; i++)
                 {
                     var c = candidates[i];
@@ -463,13 +473,14 @@ namespace SDVMobileControls
                     var dict = GetCacheDict(c.mgr);
                     dict?.Remove(c.rawKey);
                     RemoveFromBaseDisposables(c.mgr, c.tex);
-                    toDispose.Add(c.tex);
+                    toUnlink.Add(c.tex);
                 }
 
                 // 4. Clean ModContentManagers:
-                //    (a) ALWAYS remove any entry referencing a texture in `toDispose` (prevents Action:Load returning disposed textures!)
-                //    (b) For pure Pathoschild.ContentPatcher content packs (0% C# code), also evict dead Texture2D copies
-                //        not referenced by any live GameContentManager or protectedTex (e.g., EditImage source PNG duplicates!)
+                //    (a) ALWAYS remove any entry referencing a texture in `toUnlink`
+                //    (b) For pure Pathoschild.ContentPatcher content packs (0% C# code), also evict & immediately
+                //        dispose dead Texture2D copies not referenced by any live GameContentManager or protectedTex
+                //        (e.g., EditImage source PNG duplicates — zero C# mod can hold these).
                 HashSet<Texture2D> allLiveGameTex = null;
                 foreach (object mm in modManagers)
                 {
@@ -498,12 +509,13 @@ namespace SDVMobileControls
                         if (!(kv.Value is Texture2D mtex))
                             continue;
 
-                        bool shouldEvict = toDispose.Contains(mtex);
+                        bool shouldEvict = toUnlink.Contains(mtex);
                         if (!shouldEvict && isCpPack && !mtex.IsDisposed && !allLiveGameTex.Contains(mtex))
                         {
                             // Pure Content Patcher pack texture not referenced by any GameContentManager or Game1
                             shouldEvict = true;
-                            toDispose.Add(mtex);
+                            toUnlink.Add(mtex);
+                            toImmediateDispose.Add(mtex);
                         }
 
                         if (shouldEvict)
@@ -524,9 +536,9 @@ namespace SDVMobileControls
                     }
                 }
 
-                // 5. Also ensure NO remaining entry in ANY GameContentManager or m_tileSheetTextures or VanillaContentManager
-                //    points to a Texture2D we are about to Dispose()!
-                if (toDispose.Count > 0)
+                // 5. Also ensure NO remaining entry in ANY GameContentManager, m_tileSheetTextures,
+                //    NPC.portrait, or VanillaContentManager retains a texture we evicted!
+                if (toUnlink.Count > 0)
                 {
                     foreach (object gm in gameManagers)
                     {
@@ -535,7 +547,7 @@ namespace SDVMobileControls
                         List<string> extraRm = null;
                         foreach (var kv in dict)
                         {
-                            if (kv.Value is Texture2D gt && toDispose.Contains(gt))
+                            if (kv.Value is Texture2D gt && toUnlink.Contains(gt))
                             {
                                 if (extraRm == null) extraRm = new List<string>(4);
                                 extraRm.Add(kv.Key);
@@ -546,7 +558,7 @@ namespace SDVMobileControls
                             for (int i = 0; i < extraRm.Count; i++)
                                 dict.Remove(extraRm[i]);
                         }
-                        foreach (Texture2D dt in toDispose)
+                        foreach (Texture2D dt in toUnlink)
                             RemoveFromBaseDisposables(gm, dt);
                     }
 
@@ -555,7 +567,7 @@ namespace SDVMobileControls
                         List<TileSheet> rmTs = null;
                         foreach (var kv in tsDict)
                         {
-                            if (kv.Value != null && toDispose.Contains(kv.Value))
+                            if (kv.Value != null && toUnlink.Contains(kv.Value))
                             {
                                 if (rmTs == null) rmTs = new List<TileSheet>(8);
                                 rmTs.Add(kv.Key);
@@ -568,7 +580,7 @@ namespace SDVMobileControls
                         }
                     }
 
-                    // Null off-screen villager npc.portrait references BEFORE disposing so NPC.get_Portrait() reloads cleanly via ChooseAppearance!
+                    // Null off-screen villager npc.portrait references so NPC.get_Portrait() reloads cleanly via ChooseAppearance!
                     if (_fNpcPortrait != null)
                     {
                         try
@@ -582,12 +594,12 @@ namespace SDVMobileControls
                                     for (int c = 0; c < loc.characters.Count; c++)
                                     {
                                         NPC ch = loc.characters[c];
-                                        if (ch != null && _fNpcPortrait.GetValue(ch) is Texture2D pt && toDispose.Contains(pt))
+                                        if (ch != null && _fNpcPortrait.GetValue(ch) is Texture2D pt && toUnlink.Contains(pt))
                                         {
                                             if (ch.IsVillager && !ch.portraitOverridden)
                                                 _fNpcPortrait.SetValue(ch, null);
                                             else
-                                                toDispose.Remove(pt); // Safety guard: never dispose an un-reloadable portrait!
+                                                toImmediateDispose.Remove(pt);
                                         }
                                     }
                                 }
@@ -597,28 +609,42 @@ namespace SDVMobileControls
                     }
 
                     // Clean VanillaContentManager.loadedAssets / disposableAssets if present
-                    PurgeFromMonoGameContentManager(_fVanillaContentMgr?.GetValue(coordinator), toDispose);
+                    PurgeFromMonoGameContentManager(_fVanillaContentMgr?.GetValue(coordinator), toUnlink);
 
-                    // 6. Dispose GPU textures immediately on the main thread & calculate VRAM freed
-                    long bytesFreed = 0;
+                    // 6. Immediately dispose ONLY pure Content Patcher dead copies (0% C# references);
+                    //    shared GameContentManager textures are freed safely via GC finalizer ONLY when
+                    //    no C# mod (e.g., SDV-Radiance / DynamicReflections) still references them!
+                    long bytesImmediate = 0;
+                    long bytesGcCandidate = 0;
                     int disposedCount = 0;
-                    foreach (Texture2D tex in toDispose)
+                    int unlinkedCount = 0;
+                    foreach (Texture2D tex in toUnlink)
                     {
                         if (tex == null || tex.IsDisposed)
                             continue;
-                        try
+                        long texBytes = (long)tex.Width * tex.Height * 4L;
+                        if (toImmediateDispose.Contains(tex))
                         {
-                            bytesFreed += (long)tex.Width * tex.Height * 4L;
-                            tex.Dispose();
-                            disposedCount++;
+                            try
+                            {
+                                tex.Dispose();
+                                bytesImmediate += texBytes;
+                                disposedCount++;
+                            }
+                            catch { }
                         }
-                        catch { }
+                        else
+                        {
+                            bytesGcCandidate += texBytes;
+                            unlinkedCount++;
+                        }
                     }
 
-                    if (disposedCount > 0)
+                    if (disposedCount > 0 || unlinkedCount > 0)
                     {
-                        double mb = bytesFreed / (1024.0 * 1024.0);
-                        _monitor?.Log($"[MapRamOptimizer] ({reason}) Freed {disposedCount} off-screen/CP textures (~{mb:F1} MB VRAM).", LogLevel.Info);
+                        double mbImm = bytesImmediate / (1024.0 * 1024.0);
+                        double mbGc = bytesGcCandidate / (1024.0 * 1024.0);
+                        _monitor?.Log($"[MapRamOptimizer] ({reason}) Freed {disposedCount} CP textures ({mbImm:F1} MB) + unlinked {unlinkedCount} off-screen textures ({mbGc:F1} MB GC-safe).", LogLevel.Info);
 
                         if (runGc)
                         {
@@ -628,7 +654,7 @@ namespace SDVMobileControls
                             }
                             catch { }
                         }
-                        else if (bytesFreed >= 24L * 1024L * 1024L)
+                        else if ((bytesImmediate + bytesGcCandidate) >= 24L * 1024L * 1024L)
                         {
                             try
                             {
@@ -774,7 +800,7 @@ namespace SDVMobileControls
                 normKey.IndexOf("music", StringComparison.OrdinalIgnoreCase) >= 0)
                 return false;
 
-            // Never touch shared global Maps/* assets held outside xTile.Map
+            // Never touch shared global Maps/* assets held outside xTile.Map or reused on every outdoor warp
             if (normKey.IndexOf("springobjects", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 normKey.IndexOf("walls_and_floors", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 normKey.IndexOf("menutiles", StringComparison.OrdinalIgnoreCase) >= 0 ||
@@ -787,6 +813,15 @@ namespace SDVMobileControls
                 normKey.IndexOf("cursor", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 string.Equals(normKey, "maps/paths", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(normKey, "paths", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            // Keep current season's core outdoor/town/beach tilesheets resident (avoids reload stutter & shader cache churn on FarmHouse/Shop warps)
+            string curSeason = Game1.currentSeason;
+            if (!string.IsNullOrEmpty(curSeason) &&
+                normKey.IndexOf(curSeason + "_", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                (normKey.IndexOf("outdoorstilesheet", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 normKey.IndexOf("_town", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 normKey.IndexOf("_beach", StringComparison.OrdinalIgnoreCase) >= 0))
                 return false;
 
             // Must be a known map tilesheet or under Maps/

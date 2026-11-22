@@ -8,9 +8,9 @@ using StardewValley.Menus;
 namespace SDVMobileControls
 {
     /// <summary>
-    /// Authentic Stardew Valley Mobile-style Full-Height Vertical Scrollable Toolbar (all 12 / 24 / 36 slots).
-    /// Uses official Game1.menuTexture wooden 9-slice frame + tile 10/56 slot textures,
-    /// spans full screen height with smooth momentum scrolling, and supports live thickness & opacity adjustment.
+    /// Authentic Stardew Valley Mobile-style Vertical Scrollable Toolbar (all 12 / 24 / 36 slots).
+    /// Supports 1-3 columns, customizable visible items per column (Auto full-height or 4-12 rows/col),
+    /// live slot size & opacity, Left or Right edge docking, GPU Scissor clipping, and momentum scrolling.
     /// </summary>
     internal sealed class VerticalToolbar
     {
@@ -20,9 +20,12 @@ namespace SDVMobileControls
         private IClickableMenu _hiddenPcToolbar;
         private Rectangle _panelRect;
         private int _slotSize = 72;
-        private float _visibleSlots = 9f;
+        private int _slotGap = 0;
+        private int _cols = 1;
+        private int _totalRows = 12;
+        private float _visibleRows = 9f;
         private int _pad = 12;
-        private float _scrollSlots;
+        private float _scrollRows;
         private float _scrollVel;
 
         private int _touchId = -1;
@@ -33,6 +36,9 @@ namespace SDVMobileControls
 
         public Rectangle Bounds => _panelRect;
         public bool IsTouchActive => _touchId >= 0;
+        public int Columns => _cols;
+        public float VisibleRows => _visibleRows;
+        public int SlotSize => _slotSize;
 
         public void ResetTouch()
         {
@@ -83,44 +89,90 @@ namespace SDVMobileControls
         }
 
         /// <summary>
-        /// Computes full-height edge-to-edge vertical layout using user thickness scale (0.60..1.45).
+        /// Computes dynamic multi-column vertical toolbar layout with exact visible rows/col, size scale, and side docking.
         /// </summary>
-        public void ComputeLayout(int vpW, int vpH, int safeLeftPx, float sizeScale)
+        public void ComputeLayout(
+            int vpW, int vpH,
+            int safeLeftPx, int safeRightPx,
+            float sizeScale,
+            int columns,
+            int visibleRowsSetting,
+            int side,
+            float normY)
         {
             int maxItems = Math.Max(12, Game1.player?.MaxItems ?? 12);
-            float scale = Math.Clamp(sizeScale, 0.60f, 1.45f);
+            _cols = Math.Clamp(columns, 1, 3);
+            _totalRows = (maxItems + _cols - 1) / _cols;
+            float scale = Math.Clamp(sizeScale, 0.55f, 1.50f);
 
             int vMargin = Math.Max(4, vpH / 160);
-            int panelY = vMargin;
-            int panelH = Math.Max(160, vpH - vMargin * 2);
+            int maxPanelH = Math.Max(160, vpH - vMargin * 2);
 
-            _pad = Math.Clamp((int)(vpH / 76f * Math.Sqrt(scale)), 9, 18);
-            float baseSlot = Math.Clamp(vpH / 9.2f, 48f, 128f);
-            _slotSize = (int)Math.Clamp(baseSlot * scale, 36f, vpH / 4.6f);
+            _pad = Math.Clamp((int)(vpH / 78f * Math.Sqrt(scale)), 8, 16);
+            float baseSlot = Math.Clamp(vpH / 9.2f, 44f, 128f);
 
+            int panelH;
+            if (visibleRowsSetting <= 0)
+            {
+                // Auto Full-Height mode: span full vertical height (or hug totalRows if fewer rows exist, e.g. 3 cols x 4 rows)
+                _slotSize = (int)Math.Clamp(baseSlot * scale, 34f, vpH / 4.2f);
+                _slotGap = _cols > 1 ? Math.Max(2, _slotSize / 26) : 0;
+                int allRowsH = _totalRows * _slotSize + Math.Max(0, _totalRows - 1) * _slotGap + _pad * 2;
+                panelH = Math.Min(maxPanelH, Math.Max(_slotSize * 2 + _pad * 2, allRowsH));
+            }
+            else
+            {
+                // Explicit Visible Items per Column mode (4..12): fits exact row count & scales cleanly with ToolbarSize!
+                int targetRows = Math.Clamp(visibleRowsSetting, 4, 12);
+                int effRows = Math.Min(targetRows, _totalRows);
+                int roughGap = _cols > 1 ? 3 : 0;
+                int maxFitSlot = Math.Max(28, (maxPanelH - _pad * 2 - Math.Max(0, effRows - 1) * roughGap) / Math.Max(1, effRows));
+                int desiredSlot = (int)Math.Round(baseSlot * scale);
+                _slotSize = Math.Clamp(desiredSlot, 28, maxFitSlot);
+                _slotGap = _cols > 1 ? Math.Max(2, _slotSize / 26) : 0;
+                int desiredPanelH = effRows * _slotSize + Math.Max(0, effRows - 1) * _slotGap + _pad * 2;
+                panelH = Math.Min(maxPanelH, desiredPanelH);
+            }
+
+            float rowPitch = Math.Max(1f, _slotSize + _slotGap);
             int innerH = Math.Max(_slotSize, panelH - _pad * 2);
-            _visibleSlots = Math.Max(1f, innerH / (float)_slotSize);
+            _visibleRows = Math.Max(1f, (innerH + _slotGap) / rowPitch);
 
-            int scrollbarW = maxItems > _visibleSlots ? Math.Max(5, _pad / 2) : 0;
+            bool scrollable = _totalRows > _visibleRows + 0.05f;
+            int scrollbarW = scrollable ? Math.Max(5, _pad / 2) : 0;
             int scrollbarGap = scrollbarW > 0 ? Math.Max(3, _pad / 4) : 0;
-            int panelW = _slotSize + _pad * 2 + scrollbarW + scrollbarGap;
-            int x = Math.Max(safeLeftPx + Math.Max(4, vpW / 240), Math.Max(4, vpW / 220));
+            int gridW = _cols * _slotSize + Math.Max(0, _cols - 1) * _slotGap;
+            int panelW = gridW + _pad * 2 + scrollbarW + scrollbarGap;
+
+            int panelY = (panelH >= maxPanelH - 4)
+                ? vMargin
+                : vMargin + (int)Math.Round((maxPanelH - panelH) * Math.Clamp(normY, 0f, 1f));
+
+            int x;
+            if (side == 1)
+            {
+                int rightMargin = Math.Max(safeRightPx + Math.Max(4, vpW / 240), Math.Max(4, vpW / 220));
+                x = Math.Max(4, vpW - rightMargin - panelW);
+            }
+            else
+            {
+                x = Math.Max(safeLeftPx + Math.Max(4, vpW / 240), Math.Max(4, vpW / 220));
+            }
 
             _panelRect = new Rectangle(x, panelY, panelW, panelH);
 
-            float maxScroll = Math.Max(0f, maxItems - _visibleSlots);
-            _scrollSlots = Math.Clamp(_scrollSlots, 0f, maxScroll);
+            float maxScroll = Math.Max(0f, _totalRows - _visibleRows);
+            _scrollRows = Math.Clamp(_scrollRows, 0f, maxScroll);
         }
 
         public void UpdateInertia()
         {
             if (_touchId >= 0 || Math.Abs(_scrollVel) < 0.004f)
                 return;
-            int maxItems = Math.Max(12, Game1.player?.MaxItems ?? 12);
-            float maxScroll = Math.Max(0f, maxItems - _visibleSlots);
-            _scrollSlots = Math.Clamp(_scrollSlots + _scrollVel, 0f, maxScroll);
+            float maxScroll = Math.Max(0f, _totalRows - _visibleRows);
+            _scrollRows = Math.Clamp(_scrollRows + _scrollVel, 0f, maxScroll);
             _scrollVel *= 0.87f;
-            if (_scrollSlots <= 0f || _scrollSlots >= maxScroll)
+            if (_scrollRows <= 0f || _scrollRows >= maxScroll)
                 _scrollVel = 0f;
         }
 
@@ -128,7 +180,8 @@ namespace SDVMobileControls
         {
             selectedItem = false;
             int maxItems = Math.Max(12, Game1.player?.MaxItems ?? 12);
-            float maxScroll = Math.Max(0f, maxItems - _visibleSlots);
+            float maxScroll = Math.Max(0f, _totalRows - _visibleRows);
+            float rowPitch = Math.Max(1f, _slotSize + _slotGap);
             Point pt = new Point((int)vp.X, (int)vp.Y);
 
             if (tl.Id == _touchId)
@@ -142,9 +195,9 @@ namespace SDVMobileControls
 
                     if (_touchDragged && maxScroll > 0f)
                     {
-                        float deltaSlots = -dy / Math.Max(20f, _slotSize);
-                        _scrollSlots = Math.Clamp(_scrollSlots + deltaSlots, 0f, maxScroll);
-                        _scrollVel = deltaSlots;
+                        float deltaRows = -dy / Math.Max(20f, rowPitch);
+                        _scrollRows = Math.Clamp(_scrollRows + deltaRows, 0f, maxScroll);
+                        _scrollVel = deltaRows;
                     }
                     return true;
                 }
@@ -168,9 +221,13 @@ namespace SDVMobileControls
                 _touchLastY = vp.Y;
                 _touchDragged = false;
                 _scrollVel = 0f;
+
+                float relX = vp.X - (_panelRect.X + _pad);
                 float relY = vp.Y - (_panelRect.Y + _pad);
-                int idx = (int)Math.Floor(_scrollSlots + relY / Math.Max(1f, _slotSize));
-                _tappedSlot = (idx >= 0 && idx < maxItems) ? idx : -1;
+                int col = Math.Clamp((int)Math.Floor(relX / rowPitch), 0, _cols - 1);
+                int row = (int)Math.Floor(_scrollRows + relY / rowPitch);
+                int idx = row * _cols + col;
+                _tappedSlot = (row >= 0 && idx >= 0 && idx < maxItems) ? idx : -1;
                 return true;
             }
 
@@ -186,6 +243,7 @@ namespace SDVMobileControls
             float itemAlpha = Math.Clamp(alpha + 0.14f, 0.30f, 1.00f);
             int maxItems = Math.Max(12, Game1.player.MaxItems);
             int px = PixelUi.Step(vpH);
+            int rowPitch = _slotSize + _slotGap;
 
             // 1. Official Stardew Valley Mobile wooden 9-slice toolbar frame (Game1.menuTexture)
             bool drewNativeFrame = false;
@@ -215,7 +273,8 @@ namespace SDVMobileControls
 
             int contentTop = _panelRect.Y + _pad;
             int contentBot = _panelRect.Bottom - _pad;
-            int slotX = _panelRect.X + _pad;
+            int slotStartX = _panelRect.X + _pad;
+            int gridW = _cols * _slotSize + Math.Max(0, _cols - 1) * _slotGap;
             int activeIdx = Game1.player.CurrentToolIndex;
 
             Rectangle normalSlotSrc = default;
@@ -232,18 +291,24 @@ namespace SDVMobileControls
             }
             catch { }
 
-            int firstVis = Math.Max(0, (int)Math.Floor(_scrollSlots));
-            int visRows = (int)Math.Ceiling(_visibleSlots) + 1;
-            float fracOffset = _scrollSlots - firstVis;
+            int firstVisRow = Math.Max(0, (int)Math.Floor(_scrollRows));
+            int visRowCount = (int)Math.Ceiling(_visibleRows) + 1;
+            float fracOffset = _scrollRows - firstVisRow;
 
-            // GPU Scissor Clip strictly inside the wooden inner frame -> silky smooth sub-pixel scrolling with ZERO popping or border bleed!
+            // GPU Scissor Clip + native 64x64 Stardew Matrix transform:
+            // Item.drawInMenu ALWAYS centers at (location + 32,32) and places stack counts / quality stars / watering bars inside 64x64!
+            // Scaling a 64x64 local slot grid via transformMatrix guarantees 100% dead-center items at EVERY thickness & column count!
+            float slotScale = Math.Max(0.25f, _slotSize / 64f);
+            float pitchLocal = 64f + (_slotGap / slotScale);
+            Matrix slotMatrix = Matrix.CreateScale(slotScale) * Matrix.CreateTranslation(slotStartX, contentTop, 0f);
+
             var gd = sb.GraphicsDevice;
             Rectangle prevScissor = gd != null ? gd.ScissorRectangle : Rectangle.Empty;
-            bool scissored = false;
+            bool customBatch = false;
             if (gd != null)
             {
                 Rectangle vpBounds = gd.Viewport.Bounds;
-                Rectangle rawClip = new Rectangle(slotX - 2, contentTop, _slotSize + 4, Math.Max(1, contentBot - contentTop));
+                Rectangle rawClip = new Rectangle(slotStartX - 2, contentTop, gridW + 4, Math.Max(1, contentBot - contentTop));
                 Rectangle clip = Rectangle.Intersect(vpBounds, rawClip);
                 if (clip.Width > 0 && clip.Height > 0)
                 {
@@ -251,56 +316,82 @@ namespace SDVMobileControls
                     {
                         sb.End();
                         gd.ScissorRectangle = clip;
-                        sb.Begin(SpriteSortMode.Deferred, BlendState.AlphaBlend, SamplerState.PointClamp, null, ScissorRasterizer);
-                        scissored = true;
+                        sb.Begin(SpriteSortMode.Deferred, BlendState.AlphaBlend, SamplerState.PointClamp, null, ScissorRasterizer, null, slotMatrix);
+                        customBatch = true;
                     }
-                    catch { scissored = false; }
+                    catch { customBatch = false; }
                 }
             }
 
             try
             {
-                for (int row = 0; row <= visRows; row++)
+                for (int r = 0; r <= visRowCount; r++)
                 {
-                    int slotIdx = firstVis + row;
-                    if (slotIdx < 0 || slotIdx >= maxItems)
+                    int rowIdx = firstVisRow + r;
+                    if (rowIdx < 0 || rowIdx >= _totalRows)
                         continue;
 
-                    int sy = contentTop + (int)Math.Round((row - fracOffset) * _slotSize);
-                    if (sy + _slotSize <= contentTop || sy >= contentBot)
+                    int syScreen = contentTop + (int)Math.Round((r - fracOffset) * rowPitch);
+                    if (syScreen + _slotSize <= contentTop || syScreen >= contentBot)
                         continue;
 
-                    var slotR = new Rectangle(slotX, sy, _slotSize, _slotSize);
-                    bool isSel = (slotIdx == activeIdx);
+                    for (int c = 0; c < _cols; c++)
+                    {
+                        int slotIdx = rowIdx * _cols + c;
+                        if (slotIdx < 0 || slotIdx >= maxItems)
+                            continue;
 
-                    if (hasMenuTex)
-                    {
-                        // Official Stardew Mobile slot texture: tile 56 (crisp red-gold border) for selected, tile 10 for normal
-                        sb.Draw(Game1.menuTexture, slotR, isSel ? selectedSlotSrc : normalSlotSrc, Color.White * alpha);
-                    }
-                    else
-                    {
-                        sb.Draw(pixel, slotR, (isSel ? new Color(255, 226, 148) : new Color(224, 188, 128)) * alpha);
-                    }
+                        bool isSel = (slotIdx == activeIdx);
+                        Item item = (slotIdx < Game1.player.Items.Count) ? Game1.player.Items[slotIdx] : null;
 
-                    Item item = (slotIdx < Game1.player.Items.Count) ? Game1.player.Items[slotIdx] : null;
-                    if (item != null)
-                    {
-                        float scale = (_slotSize * 0.84f) / 64f;
-                        Vector2 iconPos = new Vector2(
-                            slotR.X + (_slotSize - 64f * scale) * 0.5f,
-                            slotR.Y + (_slotSize - 64f * scale) * 0.5f);
-                        try
+                        if (customBatch)
                         {
-                            item.drawInMenu(sb, iconPos, scale, itemAlpha, 0.88f, StackDrawType.Draw, Color.White, drawShadow: true);
+                            float lx = c * pitchLocal;
+                            float ly = (r - fracOffset) * pitchLocal;
+                            var localR = new Rectangle((int)Math.Round(lx), (int)Math.Round(ly), 64, 64);
+
+                            if (hasMenuTex)
+                                sb.Draw(Game1.menuTexture, localR, isSel ? selectedSlotSrc : normalSlotSrc, Color.White * alpha);
+                            else
+                                sb.Draw(pixel, localR, (isSel ? new Color(255, 226, 148) : new Color(224, 188, 128)) * alpha);
+
+                            if (item != null)
+                            {
+                                try
+                                {
+                                    // Exact Stardew Toolbar.draw convention: 64x64 box at (lx, ly) with scale 0.86f -> dead center!
+                                    item.drawInMenu(sb, new Vector2(lx, ly), 0.86f, itemAlpha, 0.88f, StackDrawType.Draw, Color.White, drawShadow: true);
+                                }
+                                catch { }
+                            }
                         }
-                        catch { }
+                        else
+                        {
+                            int sx = slotStartX + c * rowPitch;
+                            var slotR = new Rectangle(sx, syScreen, _slotSize, _slotSize);
+                            if (hasMenuTex)
+                                sb.Draw(Game1.menuTexture, slotR, isSel ? selectedSlotSrc : normalSlotSrc, Color.White * alpha);
+                            else
+                                sb.Draw(pixel, slotR, (isSel ? new Color(255, 226, 148) : new Color(224, 188, 128)) * alpha);
+
+                            if (item != null)
+                            {
+                                // Fallback without transform matrix: Item.drawInMenu centers at location + (32, 32)!
+                                float scale = (_slotSize * 0.84f) / 64f;
+                                Vector2 iconPos = new Vector2(slotR.Center.X - 32f, slotR.Center.Y - 32f);
+                                try
+                                {
+                                    item.drawInMenu(sb, iconPos, scale, itemAlpha, 0.88f, StackDrawType.Draw, Color.White, drawShadow: true);
+                                }
+                                catch { }
+                            }
+                        }
                     }
                 }
             }
             finally
             {
-                if (scissored && gd != null)
+                if (customBatch && gd != null)
                 {
                     try
                     {
@@ -313,15 +404,15 @@ namespace SDVMobileControls
             }
 
             // Slim Stardew wooden scrollbar along the inner right edge when scrollable
-            if (maxItems > _visibleSlots)
+            if (_totalRows > _visibleRows + 0.05f)
             {
                 int trackW = Math.Max(4, _pad / 2 - 1);
                 int trackX = _panelRect.Right - _pad - trackW + 3;
                 int trackH = Math.Max(24, contentBot - contentTop);
                 sb.Draw(pixel, new Rectangle(trackX, contentTop, trackW, trackH), new Color(102, 54, 22) * (0.28f * alpha));
 
-                float frac = _scrollSlots / Math.Max(0.01f, maxItems - _visibleSlots);
-                int thumbH = Math.Max(20, (int)(trackH * Math.Clamp(_visibleSlots / maxItems, 0.14f, 0.95f)));
+                float frac = _scrollRows / Math.Max(0.01f, _totalRows - _visibleRows);
+                int thumbH = Math.Max(20, (int)(trackH * Math.Clamp(_visibleRows / _totalRows, 0.14f, 0.95f)));
                 int thumbY = contentTop + (int)Math.Round((trackH - thumbH) * frac);
                 var thumbR = new Rectangle(trackX, thumbY, trackW, thumbH);
                 sb.Draw(pixel, thumbR, new Color(156, 86, 36) * (0.90f * alpha));

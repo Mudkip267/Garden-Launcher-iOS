@@ -11,6 +11,7 @@
 #import "UiConfig.m"
 #import "AppleTheme.m"
 #import "RamMonitor.m"
+#import "SaveManager.m"
 
 static NSString *sdvAppDisplayName(void) {
     NSString *n = NSBundle.mainBundle.infoDictionary[@"CFBundleDisplayName"];
@@ -261,7 +262,7 @@ static NSString *sdvProbeLocalNetwork(void) {
     UIStackView *_pane;
     UIView *_veil;
 
-    // 0 = Cài Mod, 1 = Thư viện, 2 = Hiệu năng & Nút, 3 = Co-op LAN, 4 = Hướng dẫn
+    // 0 = Cài Mod, 1 = Thư viện, 2 = File Save, 3 = Hiệu năng & Nút, 4 = Co-op LAN, 5 = Hướng dẫn, 6 = Credit
     NSInteger _tab;
     NSInteger _uiSubTab; // 0 = Menu Bar, 1 = Nút & Joystick, 2 = Bảng SET/MODS
     NSArray<SDVAppleButton *> *_tabButtons;
@@ -278,10 +279,12 @@ static NSString *sdvProbeLocalNetwork(void) {
     NSDictionary *_plan;
     NSDictionary *_library;
     NSArray<NSDictionary *> *_catalog;
+    NSArray<NSDictionary *> *_savesList;
     NSArray *_prefs;
     NSMutableDictionary *_translations;
     BOOL _choosingFolder;
     BOOL _importingGameData;
+    BOOL _importingSave;
 
     // Live UI Studio refs
     SDVUiConfig *_uiCfg;
@@ -313,6 +316,7 @@ static NSString *sdvProbeLocalNetwork(void) {
     if (_root.path.length) {
         _uiCfg = [SDVUiConfig loadFromDocuments:_root.path];
         _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
+        _savesList = sdvListSaves(_root.path);
         if (_pane) [self renderAll:NO];
     }
 }
@@ -364,6 +368,7 @@ static NSString *sdvProbeLocalNetwork(void) {
 #endif
     _uiCfg = [SDVUiConfig loadFromDocuments:_root.path];
     _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
+    _savesList = sdvListSaves(_root.path);
     _tab = 0;
     _uiSubTab = 0;
 
@@ -492,13 +497,13 @@ static NSString *sdvProbeLocalNetwork(void) {
     pinInsets(brandRow, brandWrap, UIEdgeInsetsMake(2, 4, 4, 2));
     [sideStack addArrangedSubview:brandWrap];
 
-    // 6 Native iOS Split-View Sidebar Rows (Cài Mod | Thư viện | Hiệu năng & Nút | Co-op LAN | Hướng dẫn | Credit)
-    _sidebarTabs = mkVStack(2.5);
+    // 7 Native iOS Split-View Sidebar Rows (Cài Mod | Thư viện | File Save | Hiệu năng & Nút | Co-op LAN | Hướng dẫn | Credit)
+    _sidebarTabs = mkVStack(2.0);
     NSMutableArray *tBtns = [NSMutableArray array];
-    for (NSInteger i = 0; i < 6; i++) {
+    for (NSInteger i = 0; i < 7; i++) {
         SDVAppleButton *b = [SDVAppleButton buttonWithType:UIButtonTypeCustom];
         b.tag = i;
-        b.layer.cornerRadius = 9.5;
+        b.layer.cornerRadius = 9.0;
         b.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeading;
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
@@ -506,7 +511,7 @@ static NSString *sdvProbeLocalNetwork(void) {
         b.imageEdgeInsets = UIEdgeInsetsMake(0, 0, 0, 8);
         b.titleEdgeInsets = UIEdgeInsetsMake(0, 8, 0, -8);
 #pragma clang diagnostic pop
-        [b.heightAnchor constraintEqualToConstant:31.5].active = YES;
+        [b.heightAnchor constraintEqualToConstant:29.5].active = YES;
         [b addTarget:self action:@selector(selectTab:) forControlEvents:UIControlEventTouchUpInside];
         [_sidebarTabs addArrangedSubview:b];
         [tBtns addObject:b];
@@ -540,14 +545,15 @@ static NSString *sdvProbeLocalNetwork(void) {
     NSArray *titles = @[
         _stagedFiles.count > 0 ? [NSString stringWithFormat:@"Cài Mod (%lu)", (unsigned long)_stagedFiles.count] : @"Cài Mod",
         _catalog.count > 0 ? [NSString stringWithFormat:@"Thư viện (%lu)", (unsigned long)_catalog.count] : @"Thư viện",
+        _savesList.count > 0 ? [NSString stringWithFormat:@"File Save (%lu)", (unsigned long)_savesList.count] : @"File Save",
         @"Hiệu năng & Nút",
         @"Co-op LAN",
         @"Hướng dẫn",
         @"Credit"
     ];
-    NSArray *navTitles = @[@"Cài đặt Mod", @"Thư viện Mod", @"Hiệu năng & Điều khiển", @"Co-op LAN / IP", @"Hướng dẫn sử dụng", @"Credit & Cộng đồng"];
-    NSArray *icons = @[@"square.and.arrow.down.fill", @"square.stack.3d.up.fill", @"slider.horizontal.3", @"wifi", @"book.fill", @"heart.fill"];
-    NSArray *iconTints = @[kTintBlue, kTintIndigo, kTintGreen, kTintTeal, kTintOrange, kTintPink];
+    NSArray *navTitles = @[@"Cài đặt Mod", @"Thư viện Mod", @"Quản lý File Save", @"Hiệu năng & Điều khiển", @"Co-op LAN / IP", @"Hướng dẫn sử dụng", @"Credit & Cộng đồng"];
+    NSArray *icons = @[@"square.and.arrow.down.fill", @"square.stack.3d.up.fill", @"externaldrive.fill", @"slider.horizontal.3", @"wifi", @"book.fill", @"heart.fill"];
+    NSArray *iconTints = @[kTintBlue, kTintIndigo, kTintOrange, kTintGreen, kTintTeal, kTintPurple, kTintPink];
 
     if (_tab >= 0 && _tab < (NSInteger)navTitles.count) {
         _navTitleLabel.text = navTitles[_tab];
@@ -571,6 +577,8 @@ static NSString *sdvProbeLocalNetwork(void) {
     _tab = sender.tag;
     [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
     if (_tab == 2) {
+        _savesList = sdvListSaves(_root.path);
+    } else if (_tab == 3) {
         _uiCfg = [SDVUiConfig loadFromDocuments:_root.path];
         _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
     }
@@ -617,9 +625,10 @@ static NSString *sdvProbeLocalNetwork(void) {
 
     if (_tab == 0) [self renderInstallTab];
     else if (_tab == 1) [self renderLibraryTab];
-    else if (_tab == 2) [self renderUiStudioTab];
-    else if (_tab == 3) [self renderCoopTab];
-    else if (_tab == 4) [self renderGuideTab];
+    else if (_tab == 2) [self renderSavesTab];
+    else if (_tab == 3) [self renderUiStudioTab];
+    else if (_tab == 4) [self renderCoopTab];
+    else if (_tab == 5) [self renderGuideTab];
     else [self renderCreditTab];
 
     if (animate && !UIAccessibilityIsReduceMotionEnabled()) {
@@ -914,7 +923,175 @@ static NSString *sdvProbeLocalNetwork(void) {
 }
 
 // ============================================================
-// TAB 2: HIỆU NĂNG (v6 KHÓA 2.0×) & TÙY CHỈNH NÚT BẤM
+// TAB 2: QUẢN LÝ FILE SAVE (NHẬP / XUẤT / TỰ CẤU HÌNH ĐA NỀN TẢNG)
+// ============================================================
+-(void)renderSavesTab {
+    _savesList = sdvListSaves(_root.path);
+
+    // Card 1: Nhập File Save đa nền tảng (ZIP/RAR/7Z, thư mục, hoặc tệp Save rời)
+    UIStackView *impBox = mkVStack(10);
+    UIStackView *impHdr = mkHStack(10);
+    [impHdr addArrangedSubview:mkSettingsIconBadge(@"tray.and.arrow.down.fill", kTintOrange, 32)];
+    UIStackView *impTxt = mkVStack(1.5);
+    [impTxt addArrangedSubview:mkLabel(@"Nhập File Save (Tự động cấu hình đa nền tảng)", 15, UIFontWeightSemibold, kInkPrimary)];
+    [impTxt addArrangedSubview:mkLabel(@"Hỗ trợ Save từ PC (Windows / Mac / Linux), Android (Mobile / SMAPI) & iOS (App Store / Arcade).", 12, UIFontWeightRegular, kInkSecondary)];
+    [impHdr addArrangedSubview:impTxt];
+    [impBox addArrangedSubview:impHdr];
+
+    UIStackView *btnRow = mkHStack(8);
+    btnRow.distribution = UIStackViewDistributionFillEqually;
+    SDVAppleButton *zipBtn = mkIOSButton(@"Nhập file nén / XML", @"doc.zipper", kTintBlue, UIColor.whiteColor, 13, UIEdgeInsetsMake(10, 10, 10, 10));
+    [zipBtn addTarget:self action:@selector(importSaveZipTapped) forControlEvents:UIControlEventTouchUpInside];
+    SDVAppleButton *dirBtn = mkIOSButton(@"Chọn thư mục Save", @"folder.badge.plus", [kTintOrange colorWithAlphaComponent:0.15], kTintOrange, 13, UIEdgeInsetsMake(10, 10, 10, 10));
+    [dirBtn addTarget:self action:@selector(importSaveFolderTapped) forControlEvents:UIControlEventTouchUpInside];
+    [btnRow addArrangedSubview:zipBtn];
+    [btnRow addArrangedSubview:dirBtn];
+    [impBox addArrangedSubview:btnRow];
+
+    [impBox addArrangedSubview:mkLabel(@"Tự động chuẩn hóa tên thư mục/tệp (tránh lỗi phân biệt hoa thường trên iOS), xóa rác __MACOSX / EMERGENCY_SAVE, bỏ BOM UTF-8, tự tạo SaveGameInfo nếu thiếu và sao lưu bản cũ khi trùng tên.", 11.5, UIFontWeightRegular, kInkSecondary)];
+    [_pane addArrangedSubview:mkGroupedCard(impBox, UIEdgeInsetsMake(13, 14, 13, 14))];
+
+    // Card 2: Danh sách Save hiện có & Xuất File Save (.ZIP đa nền tảng)
+    UIStackView *secRow = mkHStack(8);
+    [secRow addArrangedSubview:mkSectionTitle([NSString stringWithFormat:@"Danh sách File Save (%lu)", (unsigned long)_savesList.count])];
+    [secRow addArrangedSubview:[UIView new]];
+    SDVAppleButton *refBtn = mkIOSButton(@"Làm mới", @"arrow.clockwise", kBgCardSubtle, kTintBlue, 12, UIEdgeInsetsMake(5, 10, 5, 10));
+    refBtn.layer.cornerRadius = 8;
+    [refBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [refBtn addTarget:self action:@selector(refreshSavesTapped) forControlEvents:UIControlEventTouchUpInside];
+    [secRow addArrangedSubview:refBtn];
+    [_pane addArrangedSubview:secRow];
+
+    if (!_savesList.count) {
+        UIStackView *empty = mkVStack(6);
+        [empty addArrangedSubview:mkLabel(@"Chưa có file Save nào trong Documents/Saves", 14, UIFontWeightSemibold, kInkPrimary)];
+        [empty addArrangedSubview:mkLabel(@"Hãy tạo nhân vật mới trong game hoặc bấm \"Nhập file nén / XML\" ở trên để đưa file Save từ PC, Android hoặc iOS vào chơi ngay.", 12.5, UIFontWeightRegular, kInkSecondary)];
+        [_pane addArrangedSubview:mkGroupedCard(empty, UIEdgeInsetsMake(14, 14, 14, 14))];
+    } else {
+        NSMutableArray<UIView *> *rows = [NSMutableArray array];
+        for (NSUInteger i = 0; i < _savesList.count; i++) {
+            NSDictionary *sv = _savesList[i];
+            UIStackView *row = mkHStack(10);
+            [row addArrangedSubview:mkSettingsIconBadge(@"leaf.fill", kTintGreen, 30)];
+
+            UIStackView *info = mkVStack(2);
+            NSString *title = [NSString stringWithFormat:@"%@ · Nông trại %@", sv[@"farmerName"], sv[@"farmName"]];
+            [info addArrangedSubview:mkLabel(title, 13.5, UIFontWeightSemibold, kInkPrimary)];
+
+            NSString *meta = [NSString stringWithFormat:@"%@ · Ngày %@ · Năm %@ · %@g · v%@ · %@",
+                sv[@"season"], sv[@"day"], sv[@"year"], sv[@"money"], sv[@"gameVersion"], sv[@"sizeText"]];
+            [info addArrangedSubview:mkLabel(meta, 11.5, UIFontWeightRegular, kInkSecondary)];
+
+            NSMutableArray<NSString *> *tags = [NSMutableArray arrayWithObject:sv[@"folderName"]];
+            if ([sv[@"hasQuickSave"] boolValue]) [tags addObject:@"Có QuickSave"];
+            if (![sv[@"hasInfo"] boolValue]) [tags addObject:@"Thiếu SaveGameInfo (sẽ tự tạo khi xuất)"];
+            if ([sv[@"caseMismatch"] boolValue]) [tags addObject:@"Lệch hoa/thường"];
+            [info addArrangedSubview:mkLabel([tags componentsJoinedByString:@" · "], 11, UIFontWeightMedium, kInkTertiary)];
+            [row addArrangedSubview:info];
+
+            SDVAppleButton *expBtn = mkIOSButton(@"Xuất .ZIP", @"square.and.arrow.up", [kTintBlue colorWithAlphaComponent:0.13], kTintBlue, 12.5, UIEdgeInsetsMake(7, 10, 7, 10));
+            expBtn.layer.cornerRadius = 9;
+            expBtn.tag = 7000 + (NSInteger)i;
+            [expBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+            [expBtn addTarget:self action:@selector(exportSaveTapped:) forControlEvents:UIControlEventTouchUpInside];
+            [row addArrangedSubview:expBtn];
+
+            SDVAppleButton *delBtn = mkIOSButton(@"", @"trash.fill", [kTintRed colorWithAlphaComponent:0.12], kTintRed, 12.5, UIEdgeInsetsMake(7, 8, 7, 8));
+            delBtn.layer.cornerRadius = 9;
+            delBtn.tag = 7500 + (NSInteger)i;
+            [delBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+            [delBtn addTarget:self action:@selector(deleteSaveTapped:) forControlEvents:UIControlEventTouchUpInside];
+            [row addArrangedSubview:delBtn];
+
+            [rows addObject:row];
+        }
+        [_pane addArrangedSubview:mkGroupedRows(rows, 48)];
+        [_pane addArrangedSubview:mkSectionFooter(@"Bấm \"Xuất .ZIP\" để đóng gói chuẩn đa nền tảng (PC Windows / Mac / Linux / Android SMAPI / iOS) rồi lưu ra Tệp, iCloud Drive hoặc gửi qua AirDrop / Zalo / Telegram.")];
+    }
+}
+
+-(void)refreshSavesTapped {
+    _savesList = sdvListSaves(_root.path);
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+    [self renderAll:NO];
+}
+
+-(void)importSaveZipTapped {
+    _choosingFolder = NO; _importingGameData = NO; _importingSave = YES; _appendPick = NO;
+    [self picker:sdvAllArchivePickerTypes() copy:YES multi:YES];
+}
+
+-(void)importSaveFolderTapped {
+    _choosingFolder = NO; _importingGameData = NO; _importingSave = YES; _appendPick = NO;
+    [self picker:@[UTTypeFolder] copy:NO multi:NO];
+}
+
+-(void)exportSaveTapped:(UIButton *)btn {
+    NSInteger idx = btn.tag - 7000;
+    if (idx < 0 || idx >= (NSInteger)_savesList.count) return;
+    NSDictionary *sv = _savesList[(NSUInteger)idx];
+    NSString *folderPath = sv[@"folderPath"];
+    NSString *label = [NSString stringWithFormat:@"%@ (%@)", sv[@"farmerName"], sv[@"folderName"]];
+
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Chọn định dạng Xuất File Save"
+                                                                   message:[NSString stringWithFormat:@"Save: %@\nTự động chuẩn hóa UTF-8, tên thư mục khớp chữ hoa/thường và đóng gói .ZIP sạch.", label]
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+    __weak typeof(self) weakSelf = self;
+    void (^runExport)(NSInteger) = ^(NSInteger mode) {
+        __strong typeof(weakSelf) s = weakSelf;
+        if (!s) return;
+        __block NSURL *zipUrl = nil;
+        [s work:@"Đang đóng gói File Save (.ZIP)…" action:^{
+            zipUrl = sdvExportSaveToZip(folderPath, mode);
+        } done:^{
+            if (!zipUrl) return;
+            UIActivityViewController *avc = [[UIActivityViewController alloc] initWithActivityItems:@[zipUrl] applicationActivities:nil];
+            avc.completionWithItemsHandler = ^(UIActivityType activityType, BOOL completed, NSArray *returnedItems, NSError *activityError) {
+                (void)activityType; (void)returnedItems; (void)activityError;
+                if (completed) {
+                    s->_message = [NSString stringWithFormat:@"Đã xuất File Save \"%@\" thành công!", zipUrl.lastPathComponent];
+                    s->_messageIsError = NO;
+                    [s renderAll:NO];
+                }
+            };
+            [s presentSafely:avc];
+        }];
+    };
+
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Đa nền tảng chuẩn (PC / Mac / Linux / Android SMAPI / iOS)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) { (void)a; runExport(0); }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Sao lưu Garden Launcher iOS (Kèm QuickSave)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) { (void)a; runExport(1); }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Tương thích Mobile gốc (iOS App Store / Android)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) { (void)a; runExport(2); }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentSafely:sheet];
+}
+
+-(void)deleteSaveTapped:(UIButton *)btn {
+    NSInteger idx = btn.tag - 7500;
+    if (idx < 0 || idx >= (NSInteger)_savesList.count) return;
+    NSDictionary *sv = _savesList[(NSUInteger)idx];
+    NSString *folderPath = sv[@"folderPath"];
+    NSString *folderName = sv[@"folderName"];
+
+    UIAlertController *al = [UIAlertController alertControllerWithTitle:@"Xóa File Save?"
+                                                                message:[NSString stringWithFormat:@"Xóa vĩnh viễn Save \"%@ (%@)\"? Bạn nên bấm \"Xuất .ZIP\" để sao lưu trước khi xóa.", sv[@"farmerName"], folderName]
+                                                         preferredStyle:UIAlertControllerStyleAlert];
+    [al addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
+    [al addAction:[UIAlertAction actionWithTitle:@"Xóa" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+        (void)a;
+        [self work:@"Đang xóa Save…" action:^{
+            removeItem(folderPath);
+        } done:^{
+            self->_savesList = sdvListSaves(self->_root.path);
+            self->_message = [NSString stringWithFormat:@"Đã xóa File Save %@.", folderName];
+            self->_messageIsError = NO;
+            [self renderAll:NO];
+        }];
+    }]];
+    [self presentSafely:al];
+}
+
+// ============================================================
+// TAB 3: HIỆU NĂNG (v6 KHÓA 2.0×) & TÙY CHỈNH NÚT BẤM
 // ============================================================
 -(UIView *)mkSliderRow:(NSString *)title min:(float)lo max:(float)hi val:(float)val valText:(NSString *)valText tag:(NSInteger)tag {
     UIStackView *box = mkVStack(4);
@@ -1160,18 +1337,70 @@ static NSString *sdvProbeLocalNetwork(void) {
         }
     } else if (_ctrlSectionTab == 1) {
         // ==================== TAB 1: GIAO DIỆN & MENU ====================
+        [_pane addArrangedSubview:mkSectionTitle(@"Thanh Item dọc kiểu Mobile (Toolbar)")];
+        NSMutableArray<UIView *> *tbRows = [NSMutableArray array];
+        [tbRows addObject:[self mkSettingsSwitchRow:@"Bật thanh item dọc 36 ô (thay thanh ngang PC)" icon:@"sidebar.left" color:kTintBlue on:_mobileCfg.verticalToolbar tag:48]];
+
+        // Vị trí cạnh (Trái / Phải)
+        {
+            UIStackView *sideRow = mkHStack(10);
+            [sideRow addArrangedSubview:mkSettingsIconBadge(@"rectangle.lefthalf.inset.filled", kTintIndigo, 28)];
+            [sideRow addArrangedSubview:mkLabel(@"Vị trí cạnh màn hình", 13.5, UIFontWeightMedium, kInkPrimary)];
+            [sideRow addArrangedSubview:[UIView new]];
+            UISegmentedControl *sideSeg = [[UISegmentedControl alloc] initWithItems:@[@"Cạnh trái", @"Cạnh phải"]];
+            sideSeg.selectedSegmentIndex = (_mobileCfg.toolbarSide == 1) ? 1 : 0;
+            [sideSeg setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+            [sideSeg addTarget:self action:@selector(toolbarSideChanged:) forControlEvents:UIControlEventValueChanged];
+            [sideRow addArrangedSubview:sideSeg];
+            [tbRows addObject:sideRow];
+        }
+
+        // Số cột hiển thị (1 / 2 / 3 cột)
+        {
+            UIStackView *colRow = mkHStack(10);
+            [colRow addArrangedSubview:mkSettingsIconBadge(@"square.grid.2x2.fill", kTintPurple, 28)];
+            [colRow addArrangedSubview:mkLabel(@"Số cột hiển thị", 13.5, UIFontWeightMedium, kInkPrimary)];
+            [colRow addArrangedSubview:[UIView new]];
+            UISegmentedControl *colSeg = [[UISegmentedControl alloc] initWithItems:@[@"1 cột", @"2 cột", @"3 cột"]];
+            colSeg.selectedSegmentIndex = MAX(0, MIN(2, _mobileCfg.toolbarColumns - 1));
+            [colSeg setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+            [colSeg addTarget:self action:@selector(toolbarColumnsChanged:) forControlEvents:UIControlEventValueChanged];
+            [colRow addArrangedSubview:colSeg];
+            [tbRows addObject:colRow];
+        }
+
+        // Số ô hiển thị mỗi cột (Tự động hoặc 4..12 ô)
+        NSString *tbRowsTxt = (_mobileCfg.toolbarVisibleRows <= 0)
+            ? @"Tự động (tràn dọc)"
+            : [NSString stringWithFormat:@"%ld ô / cột", (long)_mobileCfg.toolbarVisibleRows];
+        float tbRowsVal = (_mobileCfg.toolbarVisibleRows <= 0) ? 3.0f : (float)_mobileCfg.toolbarVisibleRows;
+        [tbRows addObject:[self mkSliderRow:@"Số lượng item hiển thị / cột" min:3.0f max:12.0f val:tbRowsVal valText:tbRowsTxt tag:24]];
+        [tbRows addObject:[self mkSliderRow:@"Kích thước / Độ dày ô item" min:0.55f max:1.50f val:_mobileCfg.toolbarSize valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_mobileCfg.toolbarSize * 100)] tag:22]];
+        [tbRows addObject:[self mkSliderRow:@"Độ trong suốt thanh item" min:0.20f max:1.00f val:_mobileCfg.toolbarOpacity valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_mobileCfg.toolbarOpacity * 100)] tag:23]];
+
+        // Nút mở nhanh Edit Layout kéo vị trí & cỡ thanh item trực tiếp trên màn hình game
+        {
+            UIStackView *edRow = mkHStack(10);
+            [edRow addArrangedSubview:mkSettingsIconBadge(@"arrow.up.left.and.down.right.and.arrow.up.right.and.down.left", kTintBlue, 28)];
+            UIStackView *edTxt = mkVStack(1);
+            [edTxt addArrangedSubview:mkLabel(@"Chỉnh bố cục trực tiếp trên màn hình game", 13.5, UIFontWeightSemibold, kInkPrimary)];
+            [edTxt addArrangedSubview:mkLabel(@"Kéo thanh item sang trái/phải/lên/xuống & kéo góc + để đổi cỡ", 11.5, UIFontWeightRegular, kInkSecondary)];
+            SDVAppleButton *edBtn = mkIOSButton(@"Edit Layout", @"slider.horizontal.below.rectangle", kTintBlue, UIColor.whiteColor, 12.5, UIEdgeInsetsMake(8, 12, 8, 12));
+            [edBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+            [edBtn addTarget:self action:@selector(editToolbarLayoutTapped) forControlEvents:UIControlEventTouchUpInside];
+            [edRow addArrangedSubview:edTxt];
+            [edRow addArrangedSubview:edBtn];
+            [tbRows addObject:edRow];
+        }
+        [_pane addArrangedSubview:mkGroupedRows(tbRows, 48)];
+        [_pane addArrangedSubview:mkSectionFooter(@"Thanh item tự căn giữa icon, số lượng, sao chất lượng & thanh nước ở mọi kích thước. Tự động né đồng hồ & nút bấm dù đặt cạnh trái hay cạnh phải.")];
+
         [_pane addArrangedSubview:mkSectionTitle(@"Thanh công cụ & Tiện ích HUD")];
-        NSMutableArray<UIView *> *hudRows = [NSMutableArray arrayWithObjects:
+        [_pane addArrangedSubview:mkGroupedRows(@[
             [self mkSettingsSwitchRow:@"Hiện thanh tiện ích (BAG · MAP · QST · SAVE · KEY · EDIT · HIDE)" icon:@"rectangle.topthird.inset.filled" color:kTintGreen on:_mobileCfg.showTopUtility tag:34],
             [self mkSettingsSwitchRow:@"Hiện nút thả biểu cảm mặt cười (Emote)" icon:@"face.smiling.fill" color:kTintOrange on:_mobileCfg.showEmoteButton tag:40],
-            [self mkSettingsSwitchRow:@"Hiện ô vuông đỏ chỉ mục tiêu công cụ (Tool Hit Box)" icon:@"viewfinder" color:kTintRed on:_mobileCfg.showToolHitLocation tag:53],
-            [self mkSettingsSwitchRow:@"Thanh item dọc cạnh trái 36 ô (tràn dọc kiểu Mobile)" icon:@"sidebar.left" color:kTintBlue on:_mobileCfg.verticalToolbar tag:48],
-            nil];
-        if (_mobileCfg.verticalToolbar) {
-            [hudRows addObject:[self mkSliderRow:@"Độ dày (cỡ ô) thanh item dọc" min:0.60f max:1.45f val:_mobileCfg.toolbarSize valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_mobileCfg.toolbarSize * 100)] tag:22]];
-            [hudRows addObject:[self mkSliderRow:@"Độ trong suốt thanh item dọc" min:0.20f max:1.00f val:_mobileCfg.toolbarOpacity valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_mobileCfg.toolbarOpacity * 100)] tag:23]];
-        }
-        [_pane addArrangedSubview:mkGroupedRows(hudRows, 48)];
+            [self mkSettingsSwitchRow:@"Hiện ô vuông đỏ chỉ mục tiêu công cụ (Tool Hit Box)" icon:@"viewfinder" color:kTintRed on:_mobileCfg.showToolHitLocation tag:53]
+        ], 48)];
         [_pane addArrangedSubview:mkSectionFooter(@"Mẹo: Bấm nút HIDE trên thanh tiện ích để ẩn sạch toàn bộ nút trên màn hình — chạm đúp (2 lần nhanh) bất kỳ đâu để hiện lại.")];
 
         [_pane addArrangedSubview:mkSectionTitle(@"Thao tác Menu & An toàn")];
@@ -1433,7 +1662,10 @@ static NSString *sdvProbeLocalNetwork(void) {
         @20: [NSString stringWithFormat:@"%d%%", (int)roundf((_mobileCfg ? _mobileCfg.pixelOpacity : 1.0f) * 100)],
         @21: [NSString stringWithFormat:@"%d%%", (int)roundf((_mobileCfg ? _mobileCfg.joyDeadzone : 0.11f) * 100)],
         @22: [NSString stringWithFormat:@"%d%%", (int)roundf((_mobileCfg ? _mobileCfg.toolbarSize : 1.00f) * 100)],
-        @23: [NSString stringWithFormat:@"%d%%", (int)roundf((_mobileCfg ? _mobileCfg.toolbarOpacity : 0.90f) * 100)]
+        @23: [NSString stringWithFormat:@"%d%%", (int)roundf((_mobileCfg ? _mobileCfg.toolbarOpacity : 0.90f) * 100)],
+        @24: (!_mobileCfg || _mobileCfg.toolbarVisibleRows <= 0)
+            ? @"Tự động (tràn dọc)"
+            : [NSString stringWithFormat:@"%ld ô / cột", (long)_mobileCfg.toolbarVisibleRows]
     };
     for (NSNumber *k in txt) {
         UILabel *l = _sliderLabels[k];
@@ -1527,7 +1759,8 @@ static NSString *sdvProbeLocalNetwork(void) {
             return;
         case 22:
             if (!_mobileCfg) _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
-            _mobileCfg.toolbarSize = sdvClampf(q, 0.60f, 1.45f);
+            _mobileCfg.verticalToolbar = YES;
+            _mobileCfg.toolbarSize = sdvClampf(q, 0.55f, 1.50f);
             [self syncLiveLabels];
             {
                 NSTimeInterval nowM = NSDate.date.timeIntervalSinceReferenceDate;
@@ -1539,7 +1772,21 @@ static NSString *sdvProbeLocalNetwork(void) {
             return;
         case 23:
             if (!_mobileCfg) _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
+            _mobileCfg.verticalToolbar = YES;
             _mobileCfg.toolbarOpacity = sdvClampf(q, 0.20f, 1.00f);
+            [self syncLiveLabels];
+            {
+                NSTimeInterval nowM = NSDate.date.timeIntervalSinceReferenceDate;
+                if (nowM - _lastLiveSave > 0.10) {
+                    _lastLiveSave = nowM;
+                    [_mobileCfg saveToDocuments:_root.path];
+                }
+            }
+            return;
+        case 24:
+            if (!_mobileCfg) _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
+            _mobileCfg.verticalToolbar = YES;
+            _mobileCfg.toolbarVisibleRows = (sl.value < 3.5f) ? 0 : MAX(4, MIN(12, (NSInteger)roundf(sl.value)));
             [self syncLiveLabels];
             {
                 NSTimeInterval nowM = NSDate.date.timeIntervalSinceReferenceDate;
@@ -1559,11 +1806,39 @@ static NSString *sdvProbeLocalNetwork(void) {
 }
 
 -(void)sliderEnded:(UISlider *)sl {
-    if (sl.tag == 17 || sl.tag == 18 || sl.tag == 19 || sl.tag == 20 || sl.tag == 21 || sl.tag == 22 || sl.tag == 23) {
+    if (sl.tag >= 17 && sl.tag <= 24) {
         [_mobileCfg saveToDocuments:_root.path];
         return;
     }
     [_uiCfg saveToDocuments:_root.path];
+}
+
+-(void)toolbarSideChanged:(UISegmentedControl *)seg {
+    _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
+    _mobileCfg.verticalToolbar = YES;
+    _mobileCfg.toolbarSide = (seg.selectedSegmentIndex == 1) ? 1 : 0;
+    [_mobileCfg saveToDocuments:_root.path];
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+    [self renderAll:NO];
+}
+
+-(void)toolbarColumnsChanged:(UISegmentedControl *)seg {
+    _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
+    _mobileCfg.verticalToolbar = YES;
+    _mobileCfg.toolbarColumns = MAX(1, MIN(3, seg.selectedSegmentIndex + 1));
+    [_mobileCfg saveToDocuments:_root.path];
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+    [self renderAll:NO];
+}
+
+-(void)editToolbarLayoutTapped {
+    if (_veil) return;
+    _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
+    if (!_mobileCfg.verticalToolbar) {
+        _mobileCfg.verticalToolbar = YES;
+        [_mobileCfg saveToDocuments:_root.path];
+    }
+    [self enterMobileEditLayoutTapped];
 }
 
 -(void)autoSaveMinutesChanged:(UISegmentedControl *)seg {
@@ -1983,7 +2258,7 @@ static NSString *sdvProbeLocalNetwork(void) {
 }
 
 -(void)switchToCreditTab {
-    _tab = 5;
+    _tab = 6;
     [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
     [self renderAll:YES];
     [_scroll setContentOffset:CGPointZero animated:NO];
@@ -2148,6 +2423,7 @@ static NSString *sdvProbeLocalNetwork(void) {
 -(void)scan:(NSURL *)r {
     _library = installed(r.path);
     _catalog = modCatalog(r.path);
+    _savesList = sdvListSaves(r.path);
     NSString *h = latest(r);
     _last = h ? journal(h)[@"name"] : nil;
 }
@@ -2173,11 +2449,11 @@ static NSArray<UTType *> *sdvAllArchivePickerTypes(void) {
     return arr;
 }
 
--(void)folder { _choosingFolder = YES; _importingGameData = NO; _appendPick = NO; [self picker:@[UTTypeFolder] copy:NO multi:NO]; }
--(void)package { _choosingFolder = NO; _importingGameData = NO; _appendPick = NO; [self picker:sdvAllArchivePickerTypes() copy:YES multi:YES]; }
--(void)pickModFolder { _choosingFolder = NO; _importingGameData = NO; _appendPick = NO; [self picker:@[UTTypeFolder] copy:NO multi:NO]; }
--(void)addMorePackages { _choosingFolder = NO; _importingGameData = NO; _appendPick = YES; [self picker:sdvAllArchivePickerTypes() copy:YES multi:YES]; }
--(void)importGameDataTapped { _choosingFolder = NO; _importingGameData = YES; _appendPick = NO; [self picker:sdvAllArchivePickerTypes() copy:YES multi:NO]; }
+-(void)folder { _choosingFolder = YES; _importingGameData = NO; _importingSave = NO; _appendPick = NO; [self picker:@[UTTypeFolder] copy:NO multi:NO]; }
+-(void)package { _choosingFolder = NO; _importingGameData = NO; _importingSave = NO; _appendPick = NO; [self picker:sdvAllArchivePickerTypes() copy:YES multi:YES]; }
+-(void)pickModFolder { _choosingFolder = NO; _importingGameData = NO; _importingSave = NO; _appendPick = NO; [self picker:@[UTTypeFolder] copy:NO multi:NO]; }
+-(void)addMorePackages { _choosingFolder = NO; _importingGameData = NO; _importingSave = NO; _appendPick = YES; [self picker:sdvAllArchivePickerTypes() copy:YES multi:YES]; }
+-(void)importGameDataTapped { _choosingFolder = NO; _importingGameData = YES; _importingSave = NO; _appendPick = NO; [self picker:sdvAllArchivePickerTypes() copy:YES multi:NO]; }
 
 -(void)recheckGameData {
     syncBundledLidgren(_root.path);
@@ -2224,6 +2500,29 @@ static NSArray<UTType *> *sdvAllArchivePickerTypes(void) {
     _message = nil;
     if (_choosingFolder) {
         _root = urls.firstObject; _library = nil; _last = nil; [self refresh]; return;
+    }
+    if (_importingSave) {
+        _importingSave = NO;
+        _tab = 2;
+        __block NSDictionary *res = nil;
+        [self work:@"Đang giải nén & tự động cấu hình File Save đa nền tảng…" action:^{
+            @try {
+                res = sdvImportSavesFromURLs(urls, self->_root.path);
+            } @finally {
+                for (NSURL *u in urls) {
+                    if ([u.path containsString:@"/tmp/"] || [u.path containsString:@"/Inbox/"]) {
+                        [fm() removeItemAtURL:u error:nil];
+                    }
+                }
+            }
+            self->_savesList = sdvListSaves(self->_root.path);
+        } done:^{
+            self->_message = res[@"message"] ?: @"Đã nhập File Save thành công!";
+            self->_messageIsError = NO;
+            [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];
+            [self renderAll:YES];
+        }];
+        return;
     }
     if (_importingGameData) {
         _importingGameData = NO;

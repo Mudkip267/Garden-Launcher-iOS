@@ -30,11 +30,12 @@ namespace SDVMobileControls
                 if (!loc.isTilePassable(new Location(tx, ty), Game1.viewport))
                     return false;
 
-                // Use a slightly inset 44x44 foot hitbox on foot, or a wider 72x48 hitbox while riding a Horse so A* avoids tight 1-tile fence traps!
+                // Exact Stardew Farmer foot hitbox sits in the BOTTOM HALF of the tile (y+32..y+64, 48x32),
+                // NOT y+10! Using y+10 false-collided with walls/doorframes/house porches directly north of walkable tiles.
                 bool riding = who != null && who.isRidingHorse();
                 var box = riding
-                    ? new Microsoft.Xna.Framework.Rectangle(tx * 64 - 4, ty * 64 + 8, 72, 48)
-                    : new Microsoft.Xna.Framework.Rectangle(tx * 64 + 10, ty * 64 + 10, 44, 44);
+                    ? new Microsoft.Xna.Framework.Rectangle(tx * 64 - 4, ty * 64 + 16, 72, 44)
+                    : new Microsoft.Xna.Framework.Rectangle(tx * 64 + 10, ty * 64 + 34, 44, 26);
                 if (loc.isCollidingPosition(box, Game1.viewport, isFarmer: true, 0, glider: false, who))
                     return false;
 

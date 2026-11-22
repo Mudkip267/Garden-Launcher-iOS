@@ -132,11 +132,18 @@ namespace SDVMobileControls
         private Point _targetTile;
         private bool _hasTargetTile;
         private TileIntent _pendingIntent;
+        private bool _hasPendingWarp;
+        private Point _pendingWarpTile;
+        private int _warpPushFrames;
         private Vector2 _lastPlayerPos;
         private int _stuckFrames;
         private int _actionPulseXFrames;
         private int _actionPulseAFrames;
         private string _lastLocationName;
+        private MobileControlMode _lastModeSeen = MobileControlMode.VirtualGamepad;
+        private bool _wasInMenu;
+        private Vector2 _unstickLastPos;
+        private int _unstickStillTicks;
 
         // Slingshot touch drag-to-aim state
         private int _slingshotTouchId = -1;
@@ -241,7 +248,7 @@ namespace SDVMobileControls
         private string _lastAutoSaveLoc;
 
         // ---- Dedicated Mobile Edit Layout Mode + In-Game PC Key Picker ----
-        private enum EditTarget { None = 0, Joy = 1, Tool = 2, Act = 3, TopBar = 4, CustomKey = 5 }
+        private enum EditTarget { None = 0, Joy = 1, Tool = 2, Act = 3, TopBar = 4, CustomKey = 5, Toolbar = 6 }
         private bool _editMode;
         private EditTarget _editSelected = EditTarget.None;
         private int _editSelectedCustomId = -1;
@@ -502,6 +509,7 @@ namespace SDVMobileControls
             _repeatActive = false;
             _repeatCooldown = 0;
             _unstickHoldTicks = 0;
+            _unstickStillTicks = 0;
             _fishBendTouchId = -1;
             _fishBendX = 0f;
             _hideTapTouchId = -1;
@@ -567,6 +575,8 @@ namespace SDVMobileControls
             _pathIdx = 0;
             _hasTargetTile = false;
             _pendingIntent = default;
+            _hasPendingWarp = false;
+            _warpPushFrames = 0;
             _stuckFrames = 0;
             _repeatActive = false;
             _repeatCooldown = 0;
@@ -793,6 +803,11 @@ namespace SDVMobileControls
             if (!Context.IsWorldReady || Game1.dayTimeMoneyBox == null || _vpW <= 0)
                 return;
             int rightPadVp = ComputeSafeRightPx();
+            if (IsMobileModeActive && _cfg.VerticalToolbar && _cfg.ToolbarSide == 1 && !_guiHidden && _verticalToolbar.Bounds.Width > 0)
+            {
+                int tbRightNeed = (_vpW - _verticalToolbar.Bounds.Left) + 10;
+                if (tbRightNeed > rightPadVp) rightPadVp = tbRightNeed;
+            }
             if (rightPadVp == 0 && _lastAppliedSafeRightPad == 0)
                 return;
             try
@@ -1241,6 +1256,7 @@ namespace SDVMobileControls
             _editMode = false;
             _keyPickerOpen = false;
             _saveMenuOpen = false;
+            _wasInMenu = true;
             ResetGameplayState();
             TickCustomButtonPulses();
 
@@ -2175,6 +2191,12 @@ namespace SDVMobileControls
             _cfg.PollReload();
             ApplyLiveUiScaleAndWeather();
             _invShop.Reset();
+            if (_wasInMenu || _cfg.Mode != _lastModeSeen)
+            {
+                _wasInMenu = false;
+                _lastModeSeen = _cfg.Mode;
+                ResetGameplayState();
+            }
             var br = EnsureBridge(pad);
             if (!_loggedFirstIntercept)
             {
@@ -2315,10 +2337,16 @@ namespace SDVMobileControls
                 _joyActivated = false;
                 _tapTouchId = -1;
                 _holdWalking = false;
+                _tapChargingTool = false;
                 _toolTouchId = -1;
                 _interactTouchId = -1;
                 _toolPressed = false;
                 _interactPressed = false;
+                _slingshotTouchId = -1;
+                _toolbarTouchId = -1;
+                _fishBendTouchId = -1;
+                _fishBendX = 0f;
+                _verticalToolbar.ResetTouch();
                 ApplyToPad(pad, Vector2.Zero, false, false, false);
                 return;
             }
@@ -2628,9 +2656,11 @@ namespace SDVMobileControls
                         sawTap = true;
                         _tapCurScreen = vp;
                         float moved = Vector2.Distance(vp, _tapStartScreen);
+                        float chargeWobble = Math.Max(52f, _vpH * 0.055f);
                         if (!_tapChargingTool && !_holdWalking)
                         {
-                            bool canCharge = CanChargeCurrentTool() && moved < 22f && (nowSec - _tapStartTime) >= 0.30;
+                            bool canChargeNow = CanChargeCurrentTool();
+                            bool canCharge = canChargeNow && moved < chargeWobble && (nowSec - _tapStartTime) >= 0.16;
                             if (canCharge)
                             {
                                 _tapChargingTool = true;
@@ -2638,7 +2668,7 @@ namespace SDVMobileControls
                                 if (Game1.player != null)
                                     Game1.player.faceGeneralDirection(ViewportToWorld(_tapStartScreen));
                             }
-                            else if (moved >= 22f || (!CanChargeCurrentTool() && (nowSec - _tapStartTime) >= 0.22))
+                            else if (moved >= (canChargeNow ? chargeWobble : 24f) || (!canChargeNow && (nowSec - _tapStartTime) >= 0.22))
                             {
                                 _holdWalking = true;
                                 ClearPath();
@@ -2770,6 +2800,23 @@ namespace SDVMobileControls
                         _holdWalking = false;
                         _tapChargingTool = false;
                         sawTap = true;
+
+                        // Tap-to-Move Instant Fishing Rod Charge:
+                        // When holding a FishingRod near water and pressing on water, begin charging IMMEDIATELY
+                        // (0ms delay, wobble-proof) and hold ButtonX continuously until finger is lifted!
+                        if (CanChargeCurrentTool() && Game1.player?.CurrentTool is FishingRod pressRod &&
+                            !pressRod.isCasting && !pressRod.castedButBobberStillInAir &&
+                            Game1.currentLocation != null && !Game1.player.UsingTool)
+                        {
+                            Vector2 wPos = ViewportToWorld(vp);
+                            Point tapT = new Point((int)Math.Floor(wPos.X / 64f), (int)Math.Floor(wPos.Y / 64f));
+                            if (IsWaterInFishingCastReach(Game1.currentLocation, Game1.player.TilePoint, tapT))
+                            {
+                                _tapChargingTool = true;
+                                ClearPath();
+                                Game1.player.faceGeneralDirection(wPos);
+                            }
+                        }
                         continue;
                     }
 
@@ -2792,6 +2839,10 @@ namespace SDVMobileControls
 
             _toolPressed = sawTool || _tapChargingTool;
             _interactPressed = sawInteract;
+
+            // Lock movement strictly to zero while charging a tool (prevents wobble cancelling FishingRod cast!)
+            if (_tapChargingTool)
+                stickVec = Vector2.Zero;
 
             // --- 2. Hold-to-Walk (+ Smooth Auto-Harvest/Machine Sweep in Tap-to-Move!) ---
             if (_holdWalking && !_tapChargingTool && stickVec == Vector2.Zero && Game1.player != null)
@@ -2821,9 +2872,36 @@ namespace SDVMobileControls
                 }
             }
 
-            // --- 3. A* Tap-to-Move Path Follower ---
-            if (stickVec == Vector2.Zero && !_toolPressed && !_interactPressed && !sawSlingshot && _path != null)
-                stickVec = StepPathFollower();
+            // --- 3. A* Tap-to-Move Path Follower + Door/Warp Exit Push ---
+            if (stickVec == Vector2.Zero && !_toolPressed && !_interactPressed && !sawSlingshot)
+            {
+                if (_path != null)
+                {
+                    stickVec = StepPathFollower();
+                }
+                else if (_warpPushFrames > 0 && Game1.player != null && !Game1.fadeToBlack)
+                {
+                    _warpPushFrames--;
+                    Vector2 warpCenter = new Vector2(_pendingWarpTile.X * 64f + 32f, _pendingWarpTile.Y * 64f + 32f);
+                    Vector2 playerCenter = Game1.player.GetBoundingBox().Center.ToVector2();
+                    Vector2 diff = warpCenter - playerCenter;
+                    if (diff.LengthSquared() > 4f)
+                    {
+                        diff.Normalize();
+                        stickVec = diff;
+                    }
+                    else
+                    {
+                        // Nudge straight toward map edge if player is already centered on the warp tile
+                        int mapH = Game1.currentLocation?.Map?.Layers?[0]?.LayerHeight ?? 0;
+                        int mapW = Game1.currentLocation?.Map?.Layers?[0]?.LayerWidth ?? 0;
+                        if (mapH > 0 && _pendingWarpTile.Y >= mapH - 2) stickVec = new Vector2(0f, 1f);
+                        else if (_pendingWarpTile.Y <= 1) stickVec = new Vector2(0f, -1f);
+                        else if (mapW > 0 && _pendingWarpTile.X >= mapW - 2) stickVec = new Vector2(1f, 0f);
+                        else if (_pendingWarpTile.X <= 1) stickVec = new Vector2(-1f, 0f);
+                    }
+                }
+            }
 
             // --- 4. Action Pulses + Auto-Repeat 1-tap chop/mine until broken ---
             bool fireX = _toolPressed || sawSlingshot;
@@ -2912,24 +2990,90 @@ namespace SDVMobileControls
             // --- 6. Optional Safe Periodic Auto-Save (DEFAULT OFF, skips Mines/Volcano/Combat/Moving) ---
             TryPeriodicAutoSave(br, stickVec, fireX || fireA || sawSlingshot, nowSec);
 
-            // --- 7. Auto-Unstick Watchdog (prevents CanMove/freezeControls getting stuck after menu/emote close!) ---
+            // --- 7. Full Auto-Unstick Watchdog (rescues ALL Stardew freeze locks: CanMove, freezeControls, freezePause,
+            //        PauseForSingleAnimation, stuck UsingTool/isEating/controller/FishingRod/stray KeyboardSubscriber!) ---
             if (stickVec.LengthSquared() > 0.08f &&
+                !_toolPressed && !_interactPressed && !sawSlingshot &&
                 Game1.player != null &&
                 Game1.activeClickableMenu == null &&
                 !Game1.eventUp && !Game1.dialogueUp && !Game1.fadeToBlack &&
-                !Game1.player.UsingTool && !Game1.player.IsEmoting && !Game1.player.isSitting.Value &&
-                (!Game1.player.CanMove || Game1.freezeControls))
+                Game1.currentMinigame == null)
             {
-                if (++_unstickHoldTicks >= 30)
+                Farmer uWho = Game1.player;
+                bool activeWaitingFish = uWho.CurrentTool is FishingRod uFr &&
+                                         (uFr.isFishing || uFr.isNibbling || uFr.isReeling || uFr.castedButBobberStillInAir);
+                bool hasHardLock =
+                    !uWho.CanMove ||
+                    Game1.freezeControls ||
+                    uWho.freezePause > 0 ||
+                    (uWho.FarmerSprite != null && uWho.FarmerSprite.PauseForSingleAnimation) ||
+                    uWho.isEating ||
+                    uWho.usingSlingshot ||
+                    uWho.controller != null ||
+                    (uWho.UsingTool && !activeWaitingFish) ||
+                    (Game1.keyboardDispatcher != null && Game1.keyboardDispatcher.Subscriber != null &&
+                     (Game1.chatBox == null || !Game1.chatBox.isActive()));
+
+                if (hasHardLock)
+                {
+                    // Trigger at 18 ticks (~0.30s) — BEFORE StepPathFollower's 36-tick abort so Tap-to-Move ALSO recovers!
+                    if (++_unstickHoldTicks >= 18)
+                    {
+                        _unstickHoldTicks = 0;
+                        _unstickStillTicks = 0;
+                        try
+                        {
+                            if (uWho.IsSitting()) uWho.StopSitting(animate: false);
+                            uWho.completelyStopAnimatingOrDoingAction();
+                            uWho.forceCanMove();
+                            uWho.controller = null;
+                            if (uWho.CurrentTool is FishingRod stuckRod && !activeWaitingFish)
+                            {
+                                stuckRod.isTimingCast = false;
+                                stuckRod.isCasting = false;
+                                stuckRod.pullingOutOfWater = false;
+                            }
+                            if (Game1.keyboardDispatcher != null && (Game1.chatBox == null || !Game1.chatBox.isActive()))
+                                Game1.keyboardDispatcher.Subscriber = null;
+                        }
+                        catch { }
+                    }
+                }
+                else
                 {
                     _unstickHoldTicks = 0;
-                    Game1.player.CanMove = true;
-                    Game1.freezeControls = false;
+                    // Secondary watchdog: if farmer is pushing joystick/path for 36 ticks without moving even 1px
+                    // while sitting/emoting/animation-locked, release sitting/emote cleanly!
+                    if (Vector2.DistanceSquared(uWho.Position, _unstickLastPos) < 1.5f)
+                    {
+                        if (++_unstickStillTicks >= 36 && !activeWaitingFish)
+                        {
+                            _unstickStillTicks = 0;
+                            if (uWho.IsSitting() || uWho.IsEmoting)
+                            {
+                                try
+                                {
+                                    if (uWho.IsSitting()) uWho.StopSitting(animate: false);
+                                    uWho.IsEmoting = false;
+                                    uWho.forceCanMove();
+                                }
+                                catch { }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        _unstickLastPos = uWho.Position;
+                        _unstickStillTicks = 0;
+                    }
                 }
             }
             else
             {
                 _unstickHoldTicks = 0;
+                _unstickStillTicks = 0;
+                if (Game1.player != null)
+                    _unstickLastPos = Game1.player.Position;
             }
 
             if (sawSlingshot)
@@ -3172,7 +3316,22 @@ namespace SDVMobileControls
                         }
                     }
 
-                    // 2. Hit-test standard Mobile controls
+                    // 2. Hit-test Vertical Toolbar (if enabled: inner corner handle resizes ToolbarSize, body drags side Left<->Right & Y!)
+                    if (hit == EditTarget.None && _cfg.VerticalToolbar && _verticalToolbar.Bounds.Width > 0)
+                    {
+                        Rectangle tbR = _verticalToolbar.Bounds;
+                        if (HitToolbarResizeHandle(tbR, _cfg.ToolbarSide, vp))
+                        {
+                            hit = EditTarget.Toolbar;
+                            resize = true;
+                        }
+                        else if (tbR.Contains(pt))
+                        {
+                            hit = EditTarget.Toolbar;
+                        }
+                    }
+
+                    // 3. Hit-test standard Mobile controls
                     if (hit == EditTarget.None && _cfg.Mode != MobileControlMode.TapToMove)
                     {
                         Rectangle rTool = GetEditRect(EditTarget.Tool);
@@ -3205,7 +3364,7 @@ namespace SDVMobileControls
                 {
                     Vector2 d = vp - _editDragLastVp;
                     _editDragLastVp = vp;
-                    ApplyEditDelta(_editDragTarget, _editDragCustomId, _editResizing, d);
+                    ApplyEditDelta(_editDragTarget, _editDragCustomId, _editResizing, d, vp);
                     ComputeLayout();
                 }
                 else if ((tl.State == TouchLocationState.Released || tl.State == TouchLocationState.Invalid) && tl.Id == _editTouchId)
@@ -3234,6 +3393,8 @@ namespace SDVMobileControls
                     return IsInvisibleBarMode ? _invActRect : _visActRect;
                 case EditTarget.TopBar:
                     return _topBarGroupRect;
+                case EditTarget.Toolbar:
+                    return _verticalToolbar.Bounds;
                 default:
                     return Rectangle.Empty;
             }
@@ -3255,11 +3416,38 @@ namespace SDVMobileControls
             return Math.Abs(vp.X - r.Right) <= grip && Math.Abs(vp.Y - r.Bottom) <= grip;
         }
 
-        private void ApplyEditDelta(EditTarget target, int customId, bool resize, Vector2 deltaPx)
+        private bool HitToolbarResizeHandle(Rectangle r, int side, Vector2 vp)
+        {
+            if (r.IsEmpty) return false;
+            float grip = Math.Max(42f, Math.Min(_vpW, _vpH) * 0.055f);
+            float hx = side == 1 ? r.Left : r.Right;
+            float hy = r.Bottom;
+            return Math.Abs(vp.X - hx) <= grip && Math.Abs(vp.Y - hy) <= grip;
+        }
+
+        private void ApplyEditDelta(EditTarget target, int customId, bool resize, Vector2 deltaPx, Vector2 curVp)
         {
             float dx = deltaPx.X / Math.Max(1f, _vpW);
             float dy = deltaPx.Y / Math.Max(1f, _vpH);
             float unit = Math.Max(1f, Math.Min(_vpW, _vpH));
+
+            if (target == EditTarget.Toolbar)
+            {
+                if (resize)
+                {
+                    float signedDx = (_cfg.ToolbarSide == 1 ? -deltaPx.X : deltaPx.X);
+                    float dScale = (signedDx + deltaPx.Y * 0.35f) / Math.Max(120f, unit * 0.28f);
+                    _cfg.ToolbarSize = Math.Clamp(_cfg.ToolbarSize + dScale, 0.55f, 1.50f);
+                }
+                else
+                {
+                    // Drag horizontally past center flips Left <-> Right edge cleanly; drag vertically repositions Y!
+                    if (curVp.X > _vpW * 0.62f) _cfg.ToolbarSide = 1;
+                    else if (curVp.X < _vpW * 0.38f) _cfg.ToolbarSide = 0;
+                    _cfg.ToolbarY = Math.Clamp(_cfg.ToolbarY + dy * 1.35f, 0.0f, 1.0f);
+                }
+                return;
+            }
 
             if (target == EditTarget.CustomKey)
             {
@@ -3412,9 +3600,10 @@ namespace SDVMobileControls
                 return dir;
             }
             _joyKnob = curVp;
-            // Remap [dz .. 1.0] -> [0.32 .. 1.0] so ANY pull past user's JoyDeadzone always clears SDViOSTouchControls' 0.25 DPad threshold!
+            // Remap [dz .. 1.0] -> [0.42 .. 1.0] so even a gentle 45-degree diagonal pull (0.42 * 0.707 = 0.297 > 0.25)
+            // ALWAYS clears SDViOSTouchControls' 0.25 DPad threshold on both axes without standing still!
             float t = Math.Clamp((dist / _activeJoyRadius - dz) / Math.Max(0.01f, 1.0f - dz), 0f, 1f);
-            float mag = 0.32f + t * 0.68f;
+            float mag = 0.42f + t * 0.58f;
             return dir * mag;
         }
 
@@ -3597,7 +3786,32 @@ namespace SDVMobileControls
 
             TileIntent intent = AutoToolAndCombat.InspectTile(loc, tappedTile, who, _cfg.AutoTool);
 
-            if (intent.Kind != TileActionKind.None && cheb <= 1)
+            // Check interior/exterior loc.doors (e.g. villager bedroom doors) if not already an Action tile
+            if (intent.Kind == TileActionKind.None)
+            {
+                try
+                {
+                    if (loc.doors != null && loc.doors.ContainsKey(tappedTile))
+                    {
+                        intent.Kind = TileActionKind.Interact;
+                        intent.StopAdjacent = true;
+                    }
+                }
+                catch { }
+            }
+
+            // Detect Door / Exit / Map-Edge Warps (FarmHouse, Shops, Coops, Barns, Mines, Map Exits!)
+            // Allows tapping the door rug OR dark doorway edge to walk cleanly out the door!
+            bool tappedWarp = false;
+            Point warpGoal = tappedTile;
+            if (intent.Kind == TileActionKind.None && TryFindNearbyWarp(loc, tappedTile, out Point foundWarp))
+            {
+                tappedWarp = true;
+                warpGoal = foundWarp;
+                intent.StopAdjacent = false;
+            }
+
+            if (!tappedWarp && intent.Kind != TileActionKind.None && cheb <= 1)
             {
                 ClearPath();
                 TriggerTileIntent(who, tappedTile, intent);
@@ -3605,7 +3819,7 @@ namespace SDVMobileControls
             }
 
             // Tap empty adjacent tile while holding a placeable object (Chest, Keg, Fence, Path, Sprinkler, Furniture, Bomb, etc.)!
-            if (intent.Kind == TileActionKind.None && cheb == 1 && who.ActiveObject != null &&
+            if (!tappedWarp && intent.Kind == TileActionKind.None && cheb == 1 && who.ActiveObject != null &&
                 (who.ActiveObject.isPlaceable() || who.ActiveObject.bigCraftable.Value))
             {
                 ClearPath();
@@ -3614,23 +3828,130 @@ namespace SDVMobileControls
                 return;
             }
 
-            List<Point> path = PathFinder.FindPath(loc, playerTile, tappedTile, who, intent.StopAdjacent);
+            Point pathGoal = tappedWarp ? warpGoal : tappedTile;
+            List<Point> path = PathFinder.FindPath(loc, playerTile, pathGoal, who, intent.StopAdjacent);
             if (path == null)
-                return;
-
-            if (path.Count == 0 && intent.Kind != TileActionKind.None)
             {
-                TriggerTileIntent(who, tappedTile, intent);
+                // Even if A* couldn't path directly to an out-of-bounds door edge, if player is right beside the warp, push through!
+                if (tappedWarp && Math.Max(Math.Abs(playerTile.X - warpGoal.X), Math.Abs(playerTile.Y - warpGoal.Y)) <= 2)
+                {
+                    ClearPath();
+                    _pendingWarpTile = warpGoal;
+                    _warpPushFrames = 48;
+                }
                 return;
+            }
+
+            if (path.Count == 0)
+            {
+                if (tappedWarp)
+                {
+                    ClearPath();
+                    _pendingWarpTile = warpGoal;
+                    _warpPushFrames = 48;
+                    return;
+                }
+                if (intent.Kind != TileActionKind.None)
+                {
+                    TriggerTileIntent(who, tappedTile, intent);
+                    return;
+                }
             }
 
             _path = path;
             _pathIdx = 0;
-            _targetTile = tappedTile;
+            _targetTile = pathGoal;
             _hasTargetTile = true;
             _pendingIntent = intent;
+            _hasPendingWarp = tappedWarp;
+            _pendingWarpTile = warpGoal;
+            _warpPushFrames = 0;
             _lastPlayerPos = who.Position;
             _stuckFrames = 0;
+        }
+
+        private static bool IsWaterInFishingCastReach(GameLocation loc, Point playerTile, Point tappedTile)
+        {
+            if (loc == null) return false;
+            try
+            {
+                // Must tap on water (or 1 tile off the shoreline edge next to water)
+                bool tapIsWater = loc.isWaterTile(tappedTile.X, tappedTile.Y);
+                if (!tapIsWater)
+                {
+                    // Forgive slight tap miss on shoreline bank (check 4-neighbors of tapped tile)
+                    tapIsWater = loc.isWaterTile(tappedTile.X + 1, tappedTile.Y) ||
+                                 loc.isWaterTile(tappedTile.X - 1, tappedTile.Y) ||
+                                 loc.isWaterTile(tappedTile.X, tappedTile.Y + 1) ||
+                                 loc.isWaterTile(tappedTile.X, tappedTile.Y - 1);
+                    if (!tapIsWater) return false;
+                }
+
+                int cheb = Math.Max(Math.Abs(playerTile.X - tappedTile.X), Math.Abs(playerTile.Y - tappedTile.Y));
+                if (cheb <= 2)
+                    return true;
+                if (cheb > 8)
+                    return false;
+
+                // Player tapped water 3..8 tiles away: start immediate charging ONLY if player is already standing
+                // at the shore/dock/bridge (i.e. water exists within 1..3 tiles in the tapped direction).
+                int dx = Math.Sign(tappedTile.X - playerTile.X);
+                int dy = Math.Sign(tappedTile.Y - playerTile.Y);
+                for (int step = 1; step <= 3; step++)
+                {
+                    if (loc.isWaterTile(playerTile.X + dx * step, playerTile.Y + dy * step))
+                        return true;
+                    if (dx != 0 && dy != 0)
+                    {
+                        if (loc.isWaterTile(playerTile.X + dx * step, playerTile.Y) ||
+                            loc.isWaterTile(playerTile.X, playerTile.Y + dy * step))
+                            return true;
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private static bool TryFindNearbyWarp(GameLocation loc, Point tappedTile, out Point warpTile)
+        {
+            warpTile = tappedTile;
+            if (loc?.warps == null || loc.warps.Count == 0)
+                return false;
+
+            try
+            {
+                int mapW = loc.Map?.Layers?[0]?.LayerWidth ?? 0;
+                int mapH = loc.Map?.Layers?[0]?.LayerHeight ?? 0;
+                bool tapOutOrBlocked = tappedTile.X < 0 || tappedTile.Y < 0 || tappedTile.X >= mapW || tappedTile.Y >= mapH ||
+                                       !PathFinder.IsTileWalkable(loc, tappedTile.X, tappedTile.Y, Game1.player);
+                int maxDist = tapOutOrBlocked ? 2 : 1;
+
+                int bestDistSq = int.MaxValue;
+                bool found = false;
+                for (int i = 0; i < loc.warps.Count; i++)
+                {
+                    Warp w = loc.warps[i];
+                    if (w == null || w.npcOnly.Value)
+                        continue;
+                    int dx = Math.Abs(w.X - tappedTile.X);
+                    int dy = Math.Abs(w.Y - tappedTile.Y);
+                    if (Math.Max(dx, dy) > maxDist)
+                        continue;
+                    int dSq = dx * dx + dy * dy;
+                    if (dSq < bestDistSq)
+                    {
+                        bestDistSq = dSq;
+                        warpTile = new Point(w.X, w.Y);
+                        found = true;
+                    }
+                }
+                return found;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private static bool IsSelfUsableObject(StardewValley.Object obj)
@@ -3659,9 +3980,17 @@ namespace SDVMobileControls
 
             if (Vector2.DistanceSquared(who.Position, _lastPlayerPos) < 4f)
             {
-                if (++_stuckFrames > 22)
+                // 36 ticks (> Auto-Unstick's 18 ticks!) so Auto-Unstick rescues a frozen farmer BEFORE A* cancels!
+                if (++_stuckFrames > 36)
                 {
+                    bool hadWarp = _hasPendingWarp;
+                    Point warpT = _pendingWarpTile;
                     ClearPath();
+                    if (hadWarp && Math.Max(Math.Abs(who.TilePoint.X - warpT.X), Math.Abs(who.TilePoint.Y - warpT.Y)) <= 2)
+                    {
+                        _pendingWarpTile = warpT;
+                        _warpPushFrames = 42;
+                    }
                     return Vector2.Zero;
                 }
             }
@@ -3701,13 +4030,31 @@ namespace SDVMobileControls
             Farmer who = Game1.player;
             Point target = _targetTile;
             TileIntent intent = _pendingIntent;
+            bool hadWarp = _hasPendingWarp;
+            Point warpTile = _pendingWarpTile;
             ClearPath();
 
-            if (who != null && intent.Kind != TileActionKind.None)
+            if (who == null)
+                return;
+
+            if (hadWarp)
+            {
+                // Walk straight into the Warp tile so GameLocation.isCollidingWithWarp exits doors reliably!
+                _pendingWarpTile = warpTile;
+                _warpPushFrames = 48;
+                return;
+            }
+
+            if (intent.Kind != TileActionKind.None)
             {
                 int cheb = Math.Max(Math.Abs(who.TilePoint.X - target.X), Math.Abs(who.TilePoint.Y - target.Y));
                 if (cheb <= 1)
                     TriggerTileIntent(who, target, intent);
+            }
+            else if (intent.StopAdjacent)
+            {
+                // e.g., walked to water shoreline while holding FishingRod -> face the water ready to hold-charge!
+                who.faceGeneralDirection(new Vector2(target.X * 64f + 32f, target.Y * 64f + 32f));
             }
         }
 
@@ -4193,6 +4540,25 @@ namespace SDVMobileControls
             for (int y = step; y < _vpH; y += step)
                 sb.Draw(_pixel, new Rectangle(0, y, _vpW, 1), gridCol);
 
+            // Editable Vertical Toolbar preview (drag Left<->Right or Y, drag inner bottom + corner to resize size!)
+            if (_cfg.VerticalToolbar && _verticalToolbar.Bounds.Width > 0)
+            {
+                _verticalToolbar.Draw(sb, _pixel, _vpH, _cfg.ToolbarOpacity);
+                Rectangle tbR = _verticalToolbar.Bounds;
+                bool sel = (_editSelected == EditTarget.Toolbar);
+                Color tbAccent = sel ? new Color(255, 224, 96) : new Color(72, 210, 235);
+                DrawRectOutline(sb, tbR, sel ? 4 : 3, tbAccent);
+                string tbTag = $"{_cfg.ToolbarColumns}C {(int)Math.Round(_cfg.ToolbarSize * 100)}%";
+                var tagR = new Rectangle(tbR.X, tbR.Y + 4, tbR.Width, Math.Max(24, _vpH / 28));
+                sb.Draw(_pixel, tagR, Color.Black * 0.65f);
+                _bridge?.DrawCenteredString(sb, _pixel, tbTag, tagR, Color.White, Math.Max(1, _vpH / 320));
+                int hs = Math.Max(26, _vpH / 32);
+                int hx = _cfg.ToolbarSide == 1 ? tbR.Left : tbR.Right - hs;
+                var hRect = new Rectangle(hx, tbR.Bottom - hs, hs, hs);
+                sb.Draw(_pixel, hRect, tbAccent);
+                _bridge?.DrawCenteredString(sb, _pixel, "+", hRect, Color.Black, Math.Max(2, _vpH / 280));
+            }
+
             // Standard Mobile controls
             if (_cfg.Mode != MobileControlMode.TapToMove)
             {
@@ -4423,23 +4789,33 @@ namespace SDVMobileControls
             if (_cfg.SwapRightButtons) { _visToolRect = visAct; _visActRect = visTool; }
             else { _visToolRect = visTool; _visActRect = visAct; }
 
-            // 3. Safe Area + Full-Height Left Vertical Toolbar FIRST (so Top Utility Bar & Joystick adapt dynamically to its thickness!)
+            // 3. Safe Area + Multi-Column Vertical Toolbar FIRST (so Top Bar, Clock, Joystick & Action Buttons adapt dynamically to Left/Right edge & thickness!)
             _safeLeftPx = ComputeSafeLeftPx();
             _safeRightPx = ComputeSafeRightPx();
             if (_cfg.VerticalToolbar)
             {
-                _verticalToolbar.ComputeLayout(_vpW, _vpH, _safeLeftPx, _cfg.ToolbarSize);
+                _verticalToolbar.ComputeLayout(
+                    _vpW, _vpH,
+                    _safeLeftPx, _safeRightPx,
+                    _cfg.ToolbarSize,
+                    _cfg.ToolbarColumns,
+                    _cfg.ToolbarVisibleRows,
+                    _cfg.ToolbarSide,
+                    _cfg.ToolbarY);
             }
 
-            // Collapsible Top Utility Bar — dynamically clears Full-Height Vertical Toolbar when ON & auto-fits clear of Clock!
-            int minLeftClear = _cfg.VerticalToolbar ? (_verticalToolbar.Bounds.Right + 10) : (_safeLeftPx + 8);
+            // Collapsible Top Utility Bar — dynamically clears Vertical Toolbar (Left or Right) & auto-fits clear of Clock!
+            int minLeftClear = (_cfg.VerticalToolbar && _cfg.ToolbarSide == 0) ? (_verticalToolbar.Bounds.Right + 10) : (_safeLeftPx + 8);
             int leftX = Math.Max(minLeftClear, (int)(_cfg.TopBarX * _vpW));
             int topY = (int)(_cfg.TopBarY * _vpH);
             int pillH = (int)Math.Clamp(unit * 0.056f, 28f, unit * 0.08f);
             bool showChatBtn = Context.IsMultiplayer;
 
-            // Auto-fit Top Bar width so it NEVER collides with DayTimeMoneyBox on 16:9 / 4:3 / thick Vertical Toolbar!
-            int maxTopBarRight = _vpW - _safeRightPx - Math.Max(215, (int)(_vpW * 0.21f));
+            // Auto-fit Top Bar width so it NEVER collides with DayTimeMoneyBox (or Right-docked Vertical Toolbar!)
+            int rightClockAndTb = _safeRightPx + Math.Max(215, (int)(_vpW * 0.21f));
+            if (_cfg.VerticalToolbar && _cfg.ToolbarSide == 1 && _verticalToolbar.Bounds.Width > 0)
+                rightClockAndTb += _verticalToolbar.Bounds.Width + 12;
+            int maxTopBarRight = _vpW - rightClockAndTb;
             if (!_topBarCollapsed && maxTopBarRight > leftX + 180)
             {
                 float estUnits = 1.85f * 4f + 2.15f * 3f + 1.10f
@@ -4526,40 +4902,71 @@ namespace SDVMobileControls
                 _btnSpecRect = MirrorX(_btnSpecRect);
             }
 
-            // Auto-clear left-edge VerticalToolbar so NEITHER right-handed Joystick NOR left-handed Action Buttons overlap it!
-            if (_cfg.VerticalToolbar && !_editMode)
+            // Auto-clear VerticalToolbar (BOTH Left and Right docking!) so NEITHER Joystick NOR Action Buttons overlap it!
+            if (_cfg.VerticalToolbar && !_editMode && _verticalToolbar.Bounds.Width > 0)
             {
-                int minX = _verticalToolbar.Bounds.Right + 8;
-                if (!_cfg.LeftHandedMobile)
+                if (_cfg.ToolbarSide == 0)
                 {
-                    if (_invJoyRect.X < minX && _invJoyRect.Right > minX + 60)
+                    int minX = _verticalToolbar.Bounds.Right + 8;
+                    if (!_cfg.LeftHandedMobile)
                     {
-                        int delta = minX - _invJoyRect.X;
-                        _invJoyRect = new Rectangle(minX, _invJoyRect.Y, Math.Max(60, _invJoyRect.Width - delta), _invJoyRect.Height);
+                        if (_invJoyRect.X < minX && _invJoyRect.Right > minX + 60)
+                        {
+                            int delta = minX - _invJoyRect.X;
+                            _invJoyRect = new Rectangle(minX, _invJoyRect.Y, Math.Max(60, _invJoyRect.Width - delta), _invJoyRect.Height);
+                        }
+                        if (_visJoyCenter.X - _visJoyRadius < minX)
+                            _visJoyCenter = new Vector2(minX + _visJoyRadius + 4, _visJoyCenter.Y);
                     }
-                    if (_visJoyCenter.X - _visJoyRadius < minX)
+                    else
                     {
-                        _visJoyCenter = new Vector2(minX + _visJoyRadius + 4, _visJoyCenter.Y);
+                        int leftMostInv = Math.Min(_invToolRect.X, _invActRect.X);
+                        if (leftMostInv < minX)
+                        {
+                            int shift = minX - leftMostInv;
+                            _invToolRect = new Rectangle(_invToolRect.X + shift, _invToolRect.Y, _invToolRect.Width, _invToolRect.Height);
+                            _invActRect = new Rectangle(_invActRect.X + shift, _invActRect.Y, _invActRect.Width, _invActRect.Height);
+                        }
+                        int leftMostVis = Math.Min(_visToolRect.X, _visActRect.X);
+                        if (leftMostVis < minX)
+                        {
+                            int shift = minX - leftMostVis;
+                            _visToolRect = new Rectangle(_visToolRect.X + shift, _visToolRect.Y, _visToolRect.Width, _visToolRect.Height);
+                            _visActRect = new Rectangle(_visActRect.X + shift, _visActRect.Y, _visActRect.Width, _visActRect.Height);
+                        }
+                        if (_btnRotateRect.X < minX) _btnRotateRect = new Rectangle(minX, _btnRotateRect.Y, _btnRotateRect.Width, _btnRotateRect.Height);
+                        if (_btnSpecRect.X < minX) _btnSpecRect = new Rectangle(minX, _btnSpecRect.Y, _btnSpecRect.Width, _btnSpecRect.Height);
                     }
                 }
                 else
                 {
-                    int leftMostInv = Math.Min(_invToolRect.X, _invActRect.X);
-                    if (leftMostInv < minX)
+                    int maxX = _verticalToolbar.Bounds.Left - 8;
+                    if (!_cfg.LeftHandedMobile)
                     {
-                        int shift = minX - leftMostInv;
-                        _invToolRect = new Rectangle(_invToolRect.X + shift, _invToolRect.Y, _invToolRect.Width, _invToolRect.Height);
-                        _invActRect = new Rectangle(_invActRect.X + shift, _invActRect.Y, _invActRect.Width, _invActRect.Height);
+                        int rightMostInv = Math.Max(_invToolRect.Right, _invActRect.Right);
+                        if (rightMostInv > maxX)
+                        {
+                            int shift = rightMostInv - maxX;
+                            _invToolRect = new Rectangle(Math.Max(8, _invToolRect.X - shift), _invToolRect.Y, _invToolRect.Width, _invToolRect.Height);
+                            _invActRect = new Rectangle(Math.Max(8, _invActRect.X - shift), _invActRect.Y, _invActRect.Width, _invActRect.Height);
+                        }
+                        int rightMostVis = Math.Max(_visToolRect.Right, _visActRect.Right);
+                        if (rightMostVis > maxX)
+                        {
+                            int shift = rightMostVis - maxX;
+                            _visToolRect = new Rectangle(Math.Max(8, _visToolRect.X - shift), _visToolRect.Y, _visToolRect.Width, _visToolRect.Height);
+                            _visActRect = new Rectangle(Math.Max(8, _visActRect.X - shift), _visActRect.Y, _visActRect.Width, _visActRect.Height);
+                        }
+                        if (_btnRotateRect.Right > maxX) _btnRotateRect = new Rectangle(Math.Max(8, maxX - _btnRotateRect.Width), _btnRotateRect.Y, _btnRotateRect.Width, _btnRotateRect.Height);
+                        if (_btnSpecRect.Right > maxX) _btnSpecRect = new Rectangle(Math.Max(8, maxX - _btnSpecRect.Width), _btnSpecRect.Y, _btnSpecRect.Width, _btnSpecRect.Height);
                     }
-                    int leftMostVis = Math.Min(_visToolRect.X, _visActRect.X);
-                    if (leftMostVis < minX)
+                    else
                     {
-                        int shift = minX - leftMostVis;
-                        _visToolRect = new Rectangle(_visToolRect.X + shift, _visToolRect.Y, _visToolRect.Width, _visToolRect.Height);
-                        _visActRect = new Rectangle(_visActRect.X + shift, _visActRect.Y, _visActRect.Width, _visActRect.Height);
+                        if (_invJoyRect.Right > maxX && maxX - _invJoyRect.X > 60)
+                            _invJoyRect = new Rectangle(_invJoyRect.X, _invJoyRect.Y, Math.Max(60, maxX - _invJoyRect.X), _invJoyRect.Height);
+                        if (_visJoyCenter.X + _visJoyRadius > maxX)
+                            _visJoyCenter = new Vector2(Math.Max(_visJoyRadius + 8, maxX - _visJoyRadius - 4), _visJoyCenter.Y);
                     }
-                    if (_btnRotateRect.X < minX) _btnRotateRect = new Rectangle(minX, _btnRotateRect.Y, _btnRotateRect.Width, _btnRotateRect.Height);
-                    if (_btnSpecRect.X < minX) _btnSpecRect = new Rectangle(minX, _btnSpecRect.Y, _btnSpecRect.Width, _btnSpecRect.Height);
                 }
             }
 

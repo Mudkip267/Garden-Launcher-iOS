@@ -279,8 +279,12 @@ static long long sdvNextRev(void) {
 @property(nonatomic, assign) NSInteger safePaddingPx; // -1 = Auto, 0..80 px
 @property(nonatomic, assign) BOOL safeDialogueAndTooltip;
 @property(nonatomic, assign) BOOL verticalToolbar;
-@property(nonatomic, assign) float toolbarSize; // 0.60..1.45
+@property(nonatomic, assign) float toolbarSize; // 0.55..1.50
 @property(nonatomic, assign) float toolbarOpacity; // 0.20..1.00
+@property(nonatomic, assign) NSInteger toolbarColumns; // 1..3
+@property(nonatomic, assign) NSInteger toolbarVisibleRows; // 0=Auto, 4..12
+@property(nonatomic, assign) NSInteger toolbarSide; // 0=Left, 1=Right
+@property(nonatomic, assign) float toolbarY; // 0.0..1.0 (vertical position)
 @property(nonatomic, assign) BOOL showToolHitLocation; // Default YES
 @property(nonatomic, assign) BOOL batterySaver30Fps;
 @property(nonatomic, assign) float pixelOpacity; // 0.25..1.00
@@ -328,6 +332,10 @@ static long long sdvNextRev(void) {
     c.verticalToolbar = NO;
     c.toolbarSize = 1.00f;
     c.toolbarOpacity = 0.90f;
+    c.toolbarColumns = 1;
+    c.toolbarVisibleRows = 0;
+    c.toolbarSide = 0;
+    c.toolbarY = 0.50f;
     c.showToolHitLocation = YES;
     c.batterySaver30Fps = NO;
     c.pixelOpacity = 1.00f;
@@ -404,9 +412,19 @@ static long long sdvNextRev(void) {
         } else if ([k isEqualToString:@"verticaltb"]) {
             c.verticalToolbar = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
         } else if ([k isEqualToString:@"tbsize"]) {
-            c.toolbarSize = sdvClampf(v.floatValue, 0.60f, 1.45f);
+            c.toolbarSize = sdvClampf(v.floatValue, 0.55f, 1.50f);
         } else if ([k isEqualToString:@"tbopacity"]) {
             c.toolbarOpacity = sdvClampf(v.floatValue, 0.20f, 1.00f);
+        } else if ([k isEqualToString:@"tbcols"]) {
+            NSInteger tc = v.integerValue;
+            c.toolbarColumns = MAX(1, MIN(3, tc));
+        } else if ([k isEqualToString:@"tbrows"]) {
+            NSInteger tr = v.integerValue;
+            c.toolbarVisibleRows = (tr <= 0) ? 0 : MAX(4, MIN(12, tr));
+        } else if ([k isEqualToString:@"tbside"]) {
+            c.toolbarSide = (v.integerValue == 1) ? 1 : 0;
+        } else if ([k isEqualToString:@"tby"]) {
+            c.toolbarY = sdvClampf(v.floatValue, 0.0f, 1.0f);
         } else if ([k isEqualToString:@"toolhitbox"]) {
             c.showToolHitLocation = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
         } else if ([k isEqualToString:@"saver30fps"]) {
@@ -513,7 +531,7 @@ static long long sdvNextRev(void) {
     }
 
     NSMutableString *s = [NSMutableString stringWithFormat:
-        @"mode=%ld\nautotool=%d\nautoattack=%d\npinchzoom=%d\ntouchhint2=%d\ntoputility=%d\nswapbuttons=%d\nmobileshopdrag=%d\nautokeyboard=%d\nsafecrafting=%d\nautosavemin=%ld\nreduceweather=%d\nuiscale=%.2f\nbuttonscale=%.2f\nemotebtn=%d\nautorepeat=%d\nrestoretool=%d\nspecbtn=%d\nautocombatmode=%d\nautohidegp=%d\nautopause=%d\nfishhaptic=%d\nsafepadding=%ld\nsafedialogue=%d\nverticaltb=%d\ntbsize=%.2f\ntbopacity=%.2f\ntoolhitbox=%d\nsaver30fps=%d\npixelopacity=%.2f\nlefthanded=%d\njoydeadzone=%.2f\nrespectmute=%d\n",
+        @"mode=%ld\nautotool=%d\nautoattack=%d\npinchzoom=%d\ntouchhint2=%d\ntoputility=%d\nswapbuttons=%d\nmobileshopdrag=%d\nautokeyboard=%d\nsafecrafting=%d\nautosavemin=%ld\nreduceweather=%d\nuiscale=%.2f\nbuttonscale=%.2f\nemotebtn=%d\nautorepeat=%d\nrestoretool=%d\nspecbtn=%d\nautocombatmode=%d\nautohidegp=%d\nautopause=%d\nfishhaptic=%d\nsafepadding=%ld\nsafedialogue=%d\nverticaltb=%d\ntbsize=%.2f\ntbopacity=%.2f\ntbcols=%ld\ntbrows=%ld\ntbside=%ld\ntby=%.3f\ntoolhitbox=%d\nsaver30fps=%d\npixelopacity=%.2f\nlefthanded=%d\njoydeadzone=%.2f\nrespectmute=%d\n",
         (long)self.mode, self.autoTool ? 1 : 0, self.autoAttack ? 1 : 0,
         self.pinchZoom ? 1 : 0, self.showTouchHint ? 1 : 0,
         self.showTopUtility ? 1 : 0, self.swapRightButtons ? 1 : 0,
@@ -528,8 +546,12 @@ static long long sdvNextRev(void) {
         self.autoPauseOnBackground ? 1 : 0, self.fishingHaptic ? 1 : 0,
         (long)self.safePaddingPx, self.safeDialogueAndTooltip ? 1 : 0,
         self.verticalToolbar ? 1 : 0,
-        sdvClampf(self.toolbarSize, 0.60f, 1.45f),
+        sdvClampf(self.toolbarSize, 0.55f, 1.50f),
         sdvClampf(self.toolbarOpacity, 0.20f, 1.00f),
+        (long)MAX(1, MIN(3, self.toolbarColumns)),
+        (long)(self.toolbarVisibleRows <= 0 ? 0 : MAX(4, MIN(12, self.toolbarVisibleRows))),
+        (long)(self.toolbarSide == 1 ? 1 : 0),
+        sdvClampf(self.toolbarY, 0.0f, 1.0f),
         self.showToolHitLocation ? 1 : 0,
         self.batterySaver30Fps ? 1 : 0,
         sdvClampf(self.pixelOpacity, 0.25f, 1.00f), self.leftHandedMobile ? 1 : 0,

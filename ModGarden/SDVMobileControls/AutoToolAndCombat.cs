@@ -327,7 +327,10 @@ namespace SDVMobileControls
                 {
                     if (who.CurrentTool is FishingRod)
                     {
-                        intent.Kind = TileActionKind.UseTool;
+                        // Do NOT auto-fire a 0%-power stub cast on short tap/arrival!
+                        // Press-and-hold on water starts instant FishingRod charging in MobileControlsEngine;
+                        // tapping distant water walks neatly to the shoreline ready to hold-charge.
+                        intent.Kind = TileActionKind.None;
                         intent.StopAdjacent = true;
                         return intent;
                     }

@@ -1556,7 +1556,7 @@ namespace SDVMobileControls
                     }
                 }
 
-                // Draw Stardew pixel slot box + item icon right under finger
+                // Draw Stardew pixel slot box + item icon right under finger (dead-center using drawInMenu's fixed +32,+32 pivot!)
                 float iconScale = Math.Clamp(Math.Min(vpW, vpH) / 720f, 1.0f, 2.2f);
                 int slotSize = (int)(68f * iconScale);
                 var floatBox = new Rectangle((int)(_touchCurVp.X - slotSize * 0.5f), (int)(_touchCurVp.Y - slotSize * 0.5f), slotSize, slotSize);
@@ -1565,8 +1565,8 @@ namespace SDVMobileControls
                     sb.Draw(Game1.menuTexture, floatBox, Game1.getSourceRectForStandardTileSheet(Game1.menuTexture, 10), Color.White * 0.92f);
                 }
                 catch { }
-                Vector2 drawPos = new Vector2(_touchCurVp.X - 32f * iconScale, _touchCurVp.Y - 32f * iconScale);
-                try { _dragItem.drawInMenu(sb, drawPos, iconScale, 1f, 1f, StackDrawType.Draw, Color.White, true); } catch { }
+                Vector2 drawPos = new Vector2(_touchCurVp.X - 32f, _touchCurVp.Y - 32f);
+                try { _dragItem.drawInMenu(sb, drawPos, iconScale * 0.88f, 1f, 1f, StackDrawType.Draw, Color.White, true); } catch { }
             }
 
             // 2. Draw authentic Stardew Valley Pixel Parchment Buy / Sell / Split Popup!
@@ -1627,8 +1627,9 @@ namespace SDVMobileControls
 
             if (_popupSaleItem != null)
             {
-                Vector2 iconPos = new Vector2(slotBox.X + (slotPx - 64f * iconScale) * 0.5f, slotBox.Y + (slotPx - 64f * iconScale) * 0.5f);
-                try { _popupSaleItem.drawInMenu(sb, iconPos, iconScale, 1f, 1f, StackDrawType.Hide, Color.White, true); } catch { }
+                // Item.drawInMenu ALWAYS centers sprite at location + (32f, 32f) regardless of scaleSize!
+                Vector2 iconPos = new Vector2(slotBox.Center.X - 32f, slotBox.Center.Y - 32f);
+                try { _popupSaleItem.drawInMenu(sb, iconPos, iconScale * 0.90f, 1f, 1f, StackDrawType.Hide, Color.White, true); } catch { }
             }
 
             // Header title & subtitle in warm Stardew wood ink

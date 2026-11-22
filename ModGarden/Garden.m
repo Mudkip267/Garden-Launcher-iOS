@@ -120,36 +120,125 @@ static void syncBundledLidgren(NSString *docsPath) {
     } @catch (NSException *ex) { }
 }
 
-static void syncBundledSmapi(NSString *docsPath) {
-    if (!docsPath.length) return;
+static BOOL dataContainsAscii(NSData *data, const char *needle) {
+    if (!data.length || !needle || !needle[0]) return NO;
+    NSData *pat = [NSData dataWithBytesNoCopy:(void *)needle length:strlen(needle) freeWhenDone:NO];
+    return [data rangeOfData:pat options:0 range:NSMakeRange(0, data.length)].location != NSNotFound;
+}
+
+static NSString *syncBundledSmapi(NSString *docsPath) {
+    if (!docsPath.length) return @"no-docs";
     @try {
         NSString *smapiRoot = join(join(join(NSBundle.mainBundle.bundlePath, @"Frameworks"), @"SDVModGarden.framework"), @"BundledSMAPI");
-        if (!dir(smapiRoot)) return;
+        if (!dir(smapiRoot)) return @"no-bundle";
         [fm() createDirectoryAtPath:docsPath withIntermediateDirectories:YES attributes:nil error:nil];
 
-        // 1. Deploy open-source StardewModdingAPI.dll (SMAPI 4.5.2, iOS-verified) if missing
         NSString *srcDll = join(smapiRoot, @"StardewModdingAPI.dll");
-        NSString *dstDll = join(docsPath, @"StardewModdingAPI.dll");
-        if ([fm() fileExistsAtPath:srcDll] && ![fm() fileExistsAtPath:dstDll]) {
-            NSData *d = [NSData dataWithContentsOfFile:srcDll options:NSDataReadingMappedIfSafe error:nil];
-            if (d.length) [d writeToFile:dstDll options:NSDataWritingAtomic error:nil];
+        NSString *srcInternal = join(smapiRoot, @"smapi-internal");
+        if (![fm() fileExistsAtPath:srcDll]) return @"no-src-dll";
+        NSData *srcDllData = [NSData dataWithContentsOfFile:srcDll options:NSDataReadingMappedIfSafe error:nil];
+        if (!srcDllData.length) return @"empty-src-dll";
+        NSString *srcHash = hashData(srcDllData);
+
+        NSString *srcToolkit = join(srcInternal, @"SMAPI.Toolkit.dll");
+        NSData *srcToolkitData = [fm() fileExistsAtPath:srcToolkit] ? [NSData dataWithContentsOfFile:srcToolkit options:NSDataReadingMappedIfSafe error:nil] : nil;
+        NSString *srcToolkitHash = srcToolkitData.length ? hashData(srcToolkitData) : nil;
+
+        NSMutableArray<NSString *> *targets = [NSMutableArray arrayWithObject:docsPath];
+        NSString *subSdv = join(docsPath, @"StardewValley");
+        if (dir(subSdv) && ([fm() fileExistsAtPath:join(subSdv, @"Stardew Valley.dll")] || [fm() fileExistsAtPath:join(subSdv, @"StardewModdingAPI.dll")])) {
+            [targets addObject:subSdv];
         }
 
-        // 2. Deploy smapi-internal/ files (preserving existing user config.json if present)
-        NSString *srcInternal = join(smapiRoot, @"smapi-internal");
-        NSString *dstInternal = join(docsPath, @"smapi-internal");
-        if (dir(srcInternal)) {
-            NSDirectoryEnumerator *en = [fm() enumeratorAtPath:srcInternal];
-            for (NSString *rel in en) {
-                if (![en.fileAttributes.fileType isEqualToString:NSFileTypeRegular]) continue;
-                NSString *dst = join(dstInternal, rel);
-                if ([fm() fileExistsAtPath:dst]) continue;
-                [fm() createDirectoryAtPath:dst.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
-                NSData *d = [NSData dataWithContentsOfFile:join(srcInternal, rel) options:NSDataReadingMappedIfSafe error:nil];
-                if (d) [d writeToFile:dst options:NSDataWritingAtomic error:nil];
+        NSMutableArray<NSString *> *notes = [NSMutableArray array];
+        for (NSString *base in targets) {
+            NSString *dstDll = join(base, @"StardewModdingAPI.dll");
+            NSString *dstInternal = join(base, @"smapi-internal");
+            NSString *stampPath = join(dstInternal, @".garden_smapi_v1");
+
+            NSString *reason = nil;
+            NSData *dstData = [fm() fileExistsAtPath:dstDll] ? [NSData dataWithContentsOfFile:dstDll options:NSDataReadingMappedIfSafe error:nil] : nil;
+            if (!dstData || dstData.length < 100 * 1024) {
+                reason = @"missing";
+            } else if (dataContainsAscii(dstData, "set_InputEncoding") || dataContainsAscii(dstData, "set_OutputEncoding")) {
+                // Windows-compiled SMAPI calls Console.set_InputEncoding/OutputEncoding -> PlatformNotSupportedException on iOS!
+                reason = @"windows-smapi-detected";
+            } else if (!dataContainsAscii(dstData, "ConsoleColorSchemes")) {
+                // Older SMAPI (<=4.3) incompatible with bundled SMAPI 4.5.2 internals
+                reason = @"legacy-smapi-detected";
+            } else {
+                NSString *stamp = [NSString stringWithContentsOfFile:stampPath encoding:NSUTF8StringEncoding error:nil];
+                stamp = [stamp stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+                if (![stamp isEqualToString:srcHash]) {
+                    reason = @"stamp-mismatch";
+                }
+            }
+
+            if (!reason && srcToolkitHash.length) {
+                NSString *dstToolkit = join(dstInternal, @"SMAPI.Toolkit.dll");
+                NSData *dstTk = [fm() fileExistsAtPath:dstToolkit] ? [NSData dataWithContentsOfFile:dstToolkit options:NSDataReadingMappedIfSafe error:nil] : nil;
+                if (!dstTk || dstTk.length != srcToolkitData.length || ![hashData(dstTk) isEqualToString:srcToolkitHash]) {
+                    reason = @"toolkit-mismatch";
+                }
+            }
+
+            if (!reason && dir(srcInternal)) {
+                NSDirectoryEnumerator *chkEn = [fm() enumeratorAtPath:srcInternal];
+                for (NSString *rel in chkEn) {
+                    if (![chkEn.fileAttributes.fileType isEqualToString:NSFileTypeRegular]) continue;
+                    if (![fm() fileExistsAtPath:join(dstInternal, rel)]) {
+                        reason = @"missing-internal";
+                        break;
+                    }
+                }
+            }
+
+            // Also remove any stale cached StardewModdingAPI.dll inside smapi-internal/ if it is a Windows SMAPI or when re-syncing
+            NSString *cachedSmapi = join(dstInternal, @"StardewModdingAPI.dll");
+            if ([fm() fileExistsAtPath:cachedSmapi]) {
+                NSData *cd = [NSData dataWithContentsOfFile:cachedSmapi options:NSDataReadingMappedIfSafe error:nil];
+                if (reason || !cd.length || dataContainsAscii(cd, "set_InputEncoding") || dataContainsAscii(cd, "set_OutputEncoding")) {
+                    [fm() removeItemAtPath:cachedSmapi error:nil];
+                }
+            }
+
+            if (reason) {
+                [fm() createDirectoryAtPath:base withIntermediateDirectories:YES attributes:nil error:nil];
+                [srcDllData writeToFile:dstDll options:NSDataWritingAtomic error:nil];
+
+                // Preserve user's config.user.json if present, then cleanly deploy iOS-verified smapi-internal/
+                NSData *savedUserCfg = nil;
+                NSString *userCfgPath = join(dstInternal, @"config.user.json");
+                if ([fm() fileExistsAtPath:userCfgPath]) {
+                    savedUserCfg = [NSData dataWithContentsOfFile:userCfgPath options:0 error:nil];
+                }
+                if (dir(srcInternal)) {
+                    if ([fm() fileExistsAtPath:dstInternal]) {
+                        [fm() removeItemAtPath:dstInternal error:nil];
+                    }
+                    [fm() createDirectoryAtPath:dstInternal withIntermediateDirectories:YES attributes:nil error:nil];
+                    NSDirectoryEnumerator *en = [fm() enumeratorAtPath:srcInternal];
+                    for (NSString *rel in en) {
+                        if (![en.fileAttributes.fileType isEqualToString:NSFileTypeRegular]) continue;
+                        NSString *dst = join(dstInternal, rel);
+                        [fm() createDirectoryAtPath:dst.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+                        NSData *d = [NSData dataWithContentsOfFile:join(srcInternal, rel) options:NSDataReadingMappedIfSafe error:nil];
+                        if (d) [d writeToFile:dst options:NSDataWritingAtomic error:nil];
+                    }
+                    if (savedUserCfg.length) {
+                        [savedUserCfg writeToFile:userCfgPath options:NSDataWritingAtomic error:nil];
+                    }
+                }
+                [srcHash writeToFile:stampPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                [notes addObject:[NSString stringWithFormat:@"synced:%@", reason]];
+            } else {
+                [notes addObject:@"ok"];
             }
         }
-    } @catch (NSException *ex) { }
+        return notes.count ? [notes componentsJoinedByString:@","] : @"ok";
+    } @catch (NSException *ex) {
+        return [NSString stringWithFormat:@"err:%@", ex.reason ?: @"?"];
+    }
 }
 static void syncBundledMobileControls(NSString *docsPath) {
     if (!docsPath.length) return;
@@ -681,7 +770,10 @@ static NSUInteger importGameDataWithLibArchive(NSURL *url, NSString *docsPath) {
     }
 
     if (bestScore < 0 || bestPrefix == nil) {
-        fail(@"Gói nén này không chứa dữ liệu game PC (Stardew Valley.dll, Content/ hoặc SMAPI). Nếu đây là file mod, hãy dùng nút Chọn tệp Mod!");
+        fail(@"Gói nén này không chứa dữ liệu game PC (Stardew Valley.dll hoặc Content/). Nếu đây là file mod, hãy dùng nút Chọn tệp Mod!");
+    }
+    if (bestScore < 90) {
+        fail(@"SMAPI 4.5.2 bản iOS đã tích hợp sẵn trong Garden Launcher — bạn không cần nhập gói SMAPI từ PC! Hãy chọn gói dữ liệu game PC chứa Stardew Valley.dll và thư mục Content/.");
     }
 
     // Pass 2: Stream-extract into Documents/
@@ -753,10 +845,11 @@ static NSUInteger importGameDataWithLibArchive(NSURL *url, NSString *docsPath) {
                 NSString *extLow = rel.pathExtension.lowercaseString;
 
                 if ([topLow isEqualToString:@"saves"] ||
+                    [topLow isEqualToString:@"smapi-internal"] ||
                     ([topLow isEqualToString:@"mods"] && relParts.count >= 2 &&
                      ([relParts[1] caseInsensitiveCompare:@"SDViOSTouchControls"] == NSOrderedSame ||
                       [relParts[1] caseInsensitiveCompare:@"SDVMobileControls"] == NSOrderedSame)) ||
-                    (relParts.count == 1 && ([extLow isEqualToString:@"exe"] || [extLow isEqualToString:@"so"] || [extLow isEqualToString:@"dylib"] || [extLow isEqualToString:@"pdb"] || [fileLow containsString:@".so."] || [fileLow hasPrefix:@"api-ms-win-"] || [fileLow hasPrefix:@"mscordaccore_"] || [fileLow hasPrefix:@"microsoft.diasymreader"] || [desktopJunk containsObject:fileLow] || [bundleRuntimeFiles containsObject:fileLow]))) {
+                    (relParts.count == 1 && ([fileLow hasPrefix:@"stardewmoddingapi"] || [extLow isEqualToString:@"exe"] || [extLow isEqualToString:@"so"] || [extLow isEqualToString:@"dylib"] || [extLow isEqualToString:@"pdb"] || [fileLow containsString:@".so."] || [fileLow hasPrefix:@"api-ms-win-"] || [fileLow hasPrefix:@"mscordaccore_"] || [fileLow hasPrefix:@"microsoft.diasymreader"] || [desktopJunk containsObject:fileLow] || [bundleRuntimeFiles containsObject:fileLow]))) {
                     if (api->data_skip) api->data_skip(a);
                     continue;
                 }
@@ -838,7 +931,10 @@ static NSUInteger importGameDataZip(NSURL *url, NSString *docsPath) {
         }}
 
         if (bestScore < 0 || bestPrefix == nil) {
-            fail(@"Gói ZIP này không chứa dữ liệu game PC (Stardew Valley.dll, Content/ hoặc SMAPI). Nếu đây là file mod, hãy dùng nút Chọn file Mod!");
+            fail(@"Gói ZIP này không chứa dữ liệu game PC (Stardew Valley.dll hoặc Content/). Nếu đây là file mod, hãy dùng nút Chọn file Mod!");
+        }
+        if (bestScore < 90) {
+            fail(@"SMAPI 4.5.2 bản iOS đã tích hợp sẵn trong Garden Launcher — bạn không cần nhập gói SMAPI từ PC! Hãy chọn gói dữ liệu game PC chứa Stardew Valley.dll và thư mục Content/.");
         }
 
         // Pass 2: Extract cleanly into Documents/ (never overwrite existing Saves/, skip conflicting desktop runtime binaries!)
@@ -892,14 +988,16 @@ static NSUInteger importGameDataZip(NSURL *url, NSString *docsPath) {
             NSString *fileLow = rel.lastPathComponent.lowercaseString;
             NSString *extLow = rel.pathExtension.lowercaseString;
 
-            // Protect existing user saves & built-in touch controls mods
+            // Protect existing user saves, bundled iOS SMAPI 4.5.2 & built-in touch controls mods
             if ([topLow isEqualToString:@"saves"]) continue;
+            if ([topLow isEqualToString:@"smapi-internal"]) continue;
             if ([topLow isEqualToString:@"mods"] && relParts.count >= 2 &&
                 ([relParts[1] caseInsensitiveCompare:@"SDViOSTouchControls"] == NSOrderedSame ||
                  [relParts[1] caseInsensitiveCompare:@"SDVMobileControls"] == NSOrderedSame)) continue;
 
-            // Skip desktop native binaries & desktop .NET BCL DLLs already provided by SDViOS.app for iOS
+            // Skip PC Windows SMAPI, desktop native binaries & desktop .NET BCL DLLs already provided by SDViOS.app for iOS
             if (relParts.count == 1) {
+                if ([fileLow hasPrefix:@"stardewmoddingapi"]) continue;
                 if ([extLow isEqualToString:@"exe"] || [extLow isEqualToString:@"so"] || [extLow isEqualToString:@"dylib"] || [extLow isEqualToString:@"pdb"] || [fileLow containsString:@".so."]) continue;
                 if ([fileLow hasPrefix:@"api-ms-win-"] || [fileLow hasPrefix:@"mscordaccore_"] || [fileLow hasPrefix:@"microsoft.diasymreader"]) continue;
                 if ([desktopJunk containsObject:fileLow] || [bundleRuntimeFiles containsObject:fileLow]) continue;

@@ -303,6 +303,7 @@ static NSString *sdvProbeLocalNetwork(void) {
     NSLayoutConstraint *_ramBarFillW;
     NSTimer *_ramUiTimer;
     BOOL _showPcKeyPicker;
+    BOOL _tbAutoEnabledBySlider;
     NSInteger _ctrlSectionTab; // 0=Điều khiển, 1=Giao diện, 2=Phím PC, 3=Hiệu năng
 }
 
@@ -964,8 +965,8 @@ static NSString *sdvProbeLocalNetwork(void) {
 
     if (!_savesList.count) {
         UIStackView *empty = mkVStack(6);
-        [empty addArrangedSubview:mkLabel(@"Chưa có file Save nào trong Documents/Saves", 14, UIFontWeightSemibold, kInkPrimary)];
-        [empty addArrangedSubview:mkLabel(@"Hãy tạo nhân vật mới trong game hoặc bấm \"Nhập file nén / XML\" ở trên để đưa file Save từ PC, Android hoặc iOS vào chơi ngay.", 12.5, UIFontWeightRegular, kInkSecondary)];
+        [empty addArrangedSubview:mkLabel(@"Chưa có file Save nào trong StardewValley/Saves", 14, UIFontWeightSemibold, kInkPrimary)];
+        [empty addArrangedSubview:mkLabel(@"Hãy tạo nhân vật mới trong game hoặc bấm \"Nhập file nén / XML\" ở trên để đưa file Save từ PC, Android hoặc iOS vào chơi ngay (tự đồng bộ nếu bạn chép tay vào Documents/Saves).", 12.5, UIFontWeightRegular, kInkSecondary)];
         [_pane addArrangedSubview:mkGroupedCard(empty, UIEdgeInsetsMake(14, 14, 14, 14))];
     } else {
         NSMutableArray<UIView *> *rows = [NSMutableArray array];
@@ -983,11 +984,21 @@ static NSString *sdvProbeLocalNetwork(void) {
             [info addArrangedSubview:mkLabel(meta, 11.5, UIFontWeightRegular, kInkSecondary)];
 
             NSMutableArray<NSString *> *tags = [NSMutableArray arrayWithObject:sv[@"folderName"]];
+            BOOL needsFix = (![sv[@"hasInfo"] boolValue] || [sv[@"caseMismatch"] boolValue]);
             if ([sv[@"hasQuickSave"] boolValue]) [tags addObject:@"Có QuickSave"];
-            if (![sv[@"hasInfo"] boolValue]) [tags addObject:@"Thiếu SaveGameInfo (sẽ tự tạo khi xuất)"];
+            if (![sv[@"hasInfo"] boolValue]) [tags addObject:@"Thiếu SaveGameInfo"];
             if ([sv[@"caseMismatch"] boolValue]) [tags addObject:@"Lệch hoa/thường"];
-            [info addArrangedSubview:mkLabel([tags componentsJoinedByString:@" · "], 11, UIFontWeightMedium, kInkTertiary)];
+            [info addArrangedSubview:mkLabel([tags componentsJoinedByString:@" · "], 11, UIFontWeightMedium, needsFix ? kTintOrange : kInkTertiary)];
             [row addArrangedSubview:info];
+
+            if (needsFix) {
+                SDVAppleButton *fixBtn = mkIOSButton(@"Sửa lỗi", @"wrench.and.screwdriver.fill", [kTintOrange colorWithAlphaComponent:0.15], kTintOrange, 12, UIEdgeInsetsMake(7, 9, 7, 9));
+                fixBtn.layer.cornerRadius = 9;
+                fixBtn.tag = 7200 + (NSInteger)i;
+                [fixBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+                [fixBtn addTarget:self action:@selector(repairSaveTapped:) forControlEvents:UIControlEventTouchUpInside];
+                [row addArrangedSubview:fixBtn];
+            }
 
             SDVAppleButton *expBtn = mkIOSButton(@"Xuất .ZIP", @"square.and.arrow.up", [kTintBlue colorWithAlphaComponent:0.13], kTintBlue, 12.5, UIEdgeInsetsMake(7, 10, 7, 10));
             expBtn.layer.cornerRadius = 9;
@@ -1026,6 +1037,24 @@ static NSString *sdvProbeLocalNetwork(void) {
     [self picker:@[UTTypeFolder] copy:NO multi:NO];
 }
 
+-(void)repairSaveTapped:(UIButton *)btn {
+    NSInteger idx = btn.tag - 7200;
+    if (idx < 0 || idx >= (NSInteger)_savesList.count) return;
+    NSDictionary *sv = _savesList[(NSUInteger)idx];
+    NSString *folderPath = sv[@"folderPath"];
+    NSString *folderName = sv[@"folderName"];
+    __block NSString *detail = nil;
+    [self work:@"Đang chuẩn hóa File Save…" action:^{
+        detail = sdvRepairSaveFolder(folderPath);
+        self->_savesList = sdvListSaves(self->_root.path);
+    } done:^{
+        self->_message = [NSString stringWithFormat:@"Đã chuẩn hóa Save %@ (%@).", folderName, detail ?: @"OK"];
+        self->_messageIsError = NO;
+        [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];
+        [self renderAll:NO];
+    }];
+}
+
 -(void)exportSaveTapped:(UIButton *)btn {
     NSInteger idx = btn.tag - 7000;
     if (idx < 0 || idx >= (NSInteger)_savesList.count) return;
@@ -1042,7 +1071,7 @@ static NSString *sdvProbeLocalNetwork(void) {
         if (!s) return;
         __block NSURL *zipUrl = nil;
         [s work:@"Đang đóng gói File Save (.ZIP)…" action:^{
-            zipUrl = sdvExportSaveToZip(folderPath, mode);
+            zipUrl = sdvExportSaveToZip(folderPath, s->_root.path, mode);
         } done:^{
             if (!zipUrl) return;
             UIActivityViewController *avc = [[UIActivityViewController alloc] initWithActivityItems:@[zipUrl] applicationActivities:nil];
@@ -1073,13 +1102,13 @@ static NSString *sdvProbeLocalNetwork(void) {
     NSString *folderName = sv[@"folderName"];
 
     UIAlertController *al = [UIAlertController alertControllerWithTitle:@"Xóa File Save?"
-                                                                message:[NSString stringWithFormat:@"Xóa vĩnh viễn Save \"%@ (%@)\"? Bạn nên bấm \"Xuất .ZIP\" để sao lưu trước khi xóa.", sv[@"farmerName"], folderName]
+                                                                message:[NSString stringWithFormat:@"Xóa vĩnh viễn Save \"%@ (%@)\" (kèm QuickSave & các mốc lưu của nhân vật này)? Bạn nên bấm \"Xuất .ZIP\" để sao lưu trước khi xóa.", sv[@"farmerName"], folderName]
                                                          preferredStyle:UIAlertControllerStyleAlert];
     [al addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
     [al addAction:[UIAlertAction actionWithTitle:@"Xóa" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
         (void)a;
         [self work:@"Đang xóa Save…" action:^{
-            removeItem(folderPath);
+            sdvDeleteSaveFolder(folderPath, self->_root.path);
         } done:^{
             self->_savesList = sdvListSaves(self->_root.path);
             self->_message = [NSString stringWithFormat:@"Đã xóa File Save %@.", folderName];
@@ -1759,7 +1788,7 @@ static NSString *sdvProbeLocalNetwork(void) {
             return;
         case 22:
             if (!_mobileCfg) _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
-            _mobileCfg.verticalToolbar = YES;
+            if (!_mobileCfg.verticalToolbar) { _mobileCfg.verticalToolbar = YES; _tbAutoEnabledBySlider = YES; }
             _mobileCfg.toolbarSize = sdvClampf(q, 0.55f, 1.50f);
             [self syncLiveLabels];
             {
@@ -1772,7 +1801,7 @@ static NSString *sdvProbeLocalNetwork(void) {
             return;
         case 23:
             if (!_mobileCfg) _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
-            _mobileCfg.verticalToolbar = YES;
+            if (!_mobileCfg.verticalToolbar) { _mobileCfg.verticalToolbar = YES; _tbAutoEnabledBySlider = YES; }
             _mobileCfg.toolbarOpacity = sdvClampf(q, 0.20f, 1.00f);
             [self syncLiveLabels];
             {
@@ -1785,7 +1814,7 @@ static NSString *sdvProbeLocalNetwork(void) {
             return;
         case 24:
             if (!_mobileCfg) _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
-            _mobileCfg.verticalToolbar = YES;
+            if (!_mobileCfg.verticalToolbar) { _mobileCfg.verticalToolbar = YES; _tbAutoEnabledBySlider = YES; }
             _mobileCfg.toolbarVisibleRows = (sl.value < 3.5f) ? 0 : MAX(4, MIN(12, (NSInteger)roundf(sl.value)));
             [self syncLiveLabels];
             {
@@ -1808,6 +1837,10 @@ static NSString *sdvProbeLocalNetwork(void) {
 -(void)sliderEnded:(UISlider *)sl {
     if (sl.tag >= 17 && sl.tag <= 24) {
         [_mobileCfg saveToDocuments:_root.path];
+        if (_tbAutoEnabledBySlider) {
+            _tbAutoEnabledBySlider = NO;
+            [self renderAll:NO];
+        }
         return;
     }
     [_uiCfg saveToDocuments:_root.path];
@@ -2191,11 +2224,11 @@ static NSString *sdvProbeLocalNetwork(void) {
         [self mkGuideStep:@"5" title:@"Khởi động lại để SMAPI 4.5.2 nạp mod" body:@"Sau khi cài thêm hoặc bật/tắt mod, hãy vuốt tắt hẳn ứng dụng rồi mở lại để SMAPI nạp danh sách mod mới." color:kTintTeal]
     ], 48)];
 
-    [_pane addArrangedSubview:mkSectionTitle(@"2. Điều khiển Mobile, Phím PC & Save Menu 20 mốc")];
+    [_pane addArrangedSubview:mkSectionTitle(@"2. Điều khiển Mobile, Thanh Item, Phím PC & Quản lý Save")];
     [_pane addArrangedSubview:mkGroupedRows(@[
-        [self mkGuideStep:@"A" title:@"4 Chế độ Mobile & Tiện ích cảm ứng chuyên sâu" body:@"Chuyển trực tiếp giữa Vô hình, 2 Nút, Chạm đi (A*, giữ lì để gồng Cuốc/Bình tưới nâng cấp), Kết hợp hoặc Tay cầm. Vuốt ngang Toolbar hoặc bấm ROW để đổi hàng nhanh; kéo mồi/phao thả thẳng lên cần câu (giữ lì cần để gỡ); tự hiện nút ROT khi cầm nội thất; kéo ngắm trực tiếp Súng cao su; kéo 1 ngón lia camera ở Robin & Bảo tàng; tự bật bàn phím iOS khi chạm ô nhập chữ và tự hiện nút máy thùng cho Prairie King / Junimo Kart / Crane Game." color:kTintBlue],
-        [self mkGuideStep:@"B" title:@"Thanh tiện ích (BAG · MAP · QST · SAVE · KEY · EDIT)" body:@"Mở nhanh Túi đồ (BAG), Bản đồ (MAP), Nhiệm vụ (QST), Bàn phím ảo iOS (KEY) và chế độ chỉnh vị trí nút (EDIT). Bấm dấu < để thu gọn thanh khi cần màn hình thoáng." color:kTintGreen],
-        [self mkGuideStep:@"C" title:@"Save Menu lưu tới 20 mốc thời gian" body:@"Bấm nút SAVE trên thanh tiện ích để mở Save Menu phong cách Stardew Pixel: tạo tới 20 mốc lưu nhanh kèm ngày/giờ/vị trí, tải lại hoặc xóa từng mốc bất kỳ lúc nào." color:kTintOrange],
+        [self mkGuideStep:@"A" title:@"4 Chế độ Mobile & Tiện ích cảm ứng chuyên sâu" body:@"Chuyển trực tiếp giữa Vô hình, 2 Nút, Chạm đi (A* tự qua cửa, giữ trực tiếp trên nước để gồng Cần câu 0ms, giữ trên đất để gồng Cuốc/Bình tưới nâng cấp, kéo lướt thu hoạch), Kết hợp hoặc Tay cầm. Hỗ trợ Thanh Item dọc kiểu Mobile (1–3 cột, 4–12 ô/cột, cạnh Trái/Phải, kéo cỡ trong Edit Layout), kéo mồi/phao thả lên cần câu, tự hiện nút ROT/SPEC, ngắm Súng cao su, lia camera ở Robin & Bảo tàng và máy thùng Prairie King / Junimo Kart / Crane Game." color:kTintBlue],
+        [self mkGuideStep:@"B" title:@"Thanh tiện ích (BAG · MAP · QST · SAVE · KEY · HIDE · EDIT)" body:@"Mở nhanh Túi đồ (BAG), Bản đồ (MAP), Nhiệm vụ (QST), Bàn phím ảo iOS (KEY), ẩn toàn bộ nút (HIDE — chạm đúp để hiện lại) và chế độ chỉnh vị trí nút (EDIT). Bấm dấu < để thu gọn thanh khi cần màn hình thoáng." color:kTintGreen],
+        [self mkGuideStep:@"C" title:@"Save Menu 20 mốc & Nhập / Xuất File Save đa nền tảng" body:@"Bấm nút SAVE trong game để tạo tới 20 mốc thời gian bất kỳ lúc nào. Vào tab File Save ở thanh bên để Nhập Save từ PC (Windows/Mac/Linux), Android, iOS (tự chuẩn hóa hoa-thường, tạo SaveGameInfo, sao lưu bản cũ) hoặc Xuất .ZIP đa nền tảng (kèm QuickSave)." color:kTintOrange],
         [self mkGuideStep:@"D" title:@"Thêm nút phím PC tùy chọn (PC Keys / +PHIM)" body:@"Thêm tối đa 16 phím máy tính (P, I, F1–F12, ESC, TAB, SHIFT, CTRL, ALT, A–Z, 0–9…) từ bảng 56 phím trong tab Hiệu năng & Nút hoặc bấm +PHIM trong Edit Layout. Kéo di chuyển & kéo góc dưới phải để chỉnh kích thước từng phím." color:kTintPurple]
     ], 48)];
 

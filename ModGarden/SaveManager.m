@@ -1,5 +1,24 @@
-// Cross-Platform Stardew Valley Save File Manager (Import, Auto-Config & Export)
+// Cross-Platform Stardew Valley Save File Manager (Import, Auto-Config, Repair & Export)
 // Supports PC (Windows/macOS/Linux), Android (Mobile & SMAPI), iOS (App Store/Arcade/Garden Launcher)
+// Exact iOS .NET 8 / SMAPI Live Paths (verified from System.Private.CoreLib + Stardew Valley.dll):
+//   Live Saves:     <Documents>/.config/StardewValley/Saves/<FolderName>/
+//   QuickSave JSON: <Documents>/Mods/SDViOSTouchControls/data/<FolderName>_quicksave.json
+//   Save Slots:     <Documents>/Mods/SDVMobileControls/SaveSlots/<FolderName>/
+
+static NSString *sdvLiveSavesDir(NSString *docsPath) {
+    if (!docsPath.length) return nil;
+    return join(docsPath, @".config/StardewValley/Saves");
+}
+
+static NSString *sdvQuickSaveDataDir(NSString *docsPath) {
+    if (!docsPath.length) return nil;
+    return join(docsPath, @"Mods/SDViOSTouchControls/data");
+}
+
+static NSString *sdvQuickSaveJsonPath(NSString *docsPath, NSString *folderName) {
+    if (!docsPath.length || !folderName.length) return nil;
+    return join(sdvQuickSaveDataDir(docsPath), [NSString stringWithFormat:@"%@_quicksave.json", folderName]);
+}
 
 static NSString *sdvXmlExtractTag(NSString *xml, NSString *tag) {
     if (!xml.length || !tag.length) return nil;
@@ -45,6 +64,24 @@ static NSString *sdvReadFilePrefixUtf8(NSString *path, NSUInteger maxBytes) {
         ?: [[NSString alloc] initWithData:d encoding:NSISOLatin1StringEncoding];
 }
 
+// Reads the last `maxBytes` of a Stardew SaveGame XML where <dayOfMonth>, <currentSeason>, <year>,
+// <uniqueIDForThisGame>, and <gameVersion> are serialized after <locations>.
+static NSString *sdvReadFileTailUtf8(NSString *path, NSUInteger maxBytes) {
+    NSDictionary *attrs = [fm() attributesOfItemAtPath:path error:nil];
+    unsigned long long fsize = [attrs[NSFileSize] unsignedLongLongValue];
+    if (fsize == 0) return nil;
+    NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:path];
+    if (!fh) return nil;
+    unsigned long long off = (fsize > maxBytes) ? (fsize - maxBytes) : 0;
+    if (off > 0) [fh seekToFileOffset:off];
+    NSData *d = [fh readDataOfLength:maxBytes];
+    [fh closeFile];
+    if (!d.length) return nil;
+    if (off == 0) d = sdvStripUtf8Bom(d);
+    return [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding]
+        ?: [[NSString alloc] initWithData:d encoding:NSISOLatin1StringEncoding];
+}
+
 static BOOL sdvLooksLikeMainSaveXml(NSString *path) {
     if (!path.length || dir(path)) return NO;
     NSString *name = path.lastPathComponent;
@@ -67,18 +104,36 @@ static BOOL sdvLooksLikeSaveGameInfoXml(NSString *path) {
     return ([head rangeOfString:@"<Farmer"].location != NSNotFound);
 }
 
-// Synthesizes a valid SaveGameInfo XML from the <player>...</player> block inside a main Stardew save file
+// Synthesizes a valid SaveGameInfo XML from the <player ...>...</player> block inside a main Stardew save file
 static NSData *sdvSynthesizeSaveGameInfoFromMainData(NSData *mainData) {
     if (!mainData.length) return nil;
     NSData *cleanData = sdvStripUtf8Bom(mainData);
     const char *bytes = (const char *)cleanData.bytes;
     NSUInteger len = cleanData.length;
-    NSData *openPat = [@"<player>" dataUsingEncoding:NSUTF8StringEncoding];
+
+    NSData *openPrefix = [@"<player" dataUsingEncoding:NSUTF8StringEncoding];
     NSData *closePat = [@"</player>" dataUsingEncoding:NSUTF8StringEncoding];
-    NSRange rOpen = [cleanData rangeOfData:openPat options:0 range:NSMakeRange(0, MIN(len, (NSUInteger)(2 * 1024 * 1024)))];
-    if (rOpen.location == NSNotFound) return nil;
-    NSUInteger bodyStart = rOpen.location + rOpen.length;
-    NSRange rClose = [cleanData rangeOfData:closePat options:0 range:NSMakeRange(bodyStart, MIN(len - bodyStart, (NSUInteger)(4 * 1024 * 1024)))];
+    NSUInteger searchStart = 0;
+    NSUInteger bodyStart = NSNotFound;
+    NSUInteger scanLim = MIN(len, (NSUInteger)(4 * 1024 * 1024));
+    while (searchStart < scanLim) {
+        NSRange r = [cleanData rangeOfData:openPrefix options:0 range:NSMakeRange(searchStart, scanLim - searchStart)];
+        if (r.location == NSNotFound) break;
+        NSUInteger after = r.location + r.length;
+        if (after < len && (bytes[after] == '>' || bytes[after] == ' ' || bytes[after] == '\t' || bytes[after] == '\r' || bytes[after] == '\n')) {
+            // Find closing '>' of opening <player ...> tag
+            NSUInteger gt = after;
+            while (gt < len && bytes[gt] != '>') gt++;
+            if (gt < len && bytes[gt] == '>') {
+                bodyStart = gt + 1;
+                break;
+            }
+        }
+        searchStart = r.location + 1;
+    }
+    if (bodyStart == NSNotFound || bodyStart >= len) return nil;
+
+    NSRange rClose = [cleanData rangeOfData:closePat options:0 range:NSMakeRange(bodyStart, len - bodyStart)];
     if (rClose.location == NSNotFound) return nil;
 
     NSData *inner = [NSData dataWithBytes:bytes + bodyStart length:rClose.location - bodyStart];
@@ -132,9 +187,41 @@ static NSString *sdvFormatFileSizeMB(unsigned long long bytes) {
     return [NSString stringWithFormat:@"%.2f MB", (double)bytes / (1024.0 * 1024.0)];
 }
 
+// Auto-migrate any save folders users manually dropped into visible Documents/Saves/
+// (since .config/StardewValley/Saves is hidden in the iOS Files app!) into the real live directory.
+static void sdvMigrateLegacyDocumentsSaves(NSString *docsPath) {
+    if (!docsPath.length) return;
+    NSString *legacyDir = join(docsPath, @"Saves");
+    if (!dir(legacyDir)) return;
+    NSArray<NSString *> *entries = [fm() contentsOfDirectoryAtPath:legacyDir error:nil] ?: @[];
+    if (!entries.count) return;
+
+    NSString *liveDir = sdvLiveSavesDir(docsPath);
+    for (NSString *entry in entries) {
+        if ([entry hasPrefix:@"."] || [entry isEqualToString:@"__MACOSX"]) continue;
+        NSString *srcFolder = join(legacyDir, entry);
+        if (!dir(srcFolder)) continue;
+
+        BOOL hasSaveXml = NO;
+        for (NSString *sub in ([fm() contentsOfDirectoryAtPath:srcFolder error:nil] ?: @[])) {
+            if (sdvLooksLikeMainSaveXml(join(srcFolder, sub))) { hasSaveXml = YES; break; }
+        }
+        if (!hasSaveXml) continue;
+
+        mkdirs(liveDir);
+        NSString *dstFolder = join(liveDir, entry);
+        if (![fm() fileExistsAtPath:dstFolder]) {
+            NSError *me = nil;
+            [fm() moveItemAtPath:srcFolder toPath:dstFolder error:&me];
+        }
+    }
+}
+
 static NSArray<NSDictionary *> *sdvListSaves(NSString *docsPath) {
     if (!docsPath.length) return @[];
-    NSString *savesDir = join(docsPath, @"Saves");
+    @try { sdvMigrateLegacyDocumentsSaves(docsPath); } @catch (NSException *ignored) { }
+
+    NSString *savesDir = sdvLiveSavesDir(docsPath);
     if (!dir(savesDir)) return @[];
 
     NSMutableArray<NSDictionary *> *list = [NSMutableArray array];
@@ -146,7 +233,6 @@ static NSArray<NSDictionary *> *sdvListSaves(NSString *docsPath) {
 
         NSString *mainPath = join(folderPath, entry);
         if (![fm() fileExistsAtPath:mainPath] || dir(mainPath)) {
-            // Fallback search inside folder
             mainPath = nil;
             for (NSString *sub in ([fm() contentsOfDirectoryAtPath:folderPath error:nil] ?: @[])) {
                 NSString *cand = join(folderPath, sub);
@@ -159,24 +245,41 @@ static NSArray<NSDictionary *> *sdvListSaves(NSString *docsPath) {
 
         NSString *infoXml = hasInfo ? sdvReadFilePrefixUtf8(infoPath, 65536) : nil;
         NSString *mainHead = mainPath ? sdvReadFilePrefixUtf8(mainPath, 98304) : nil;
+        NSString *mainTail = mainPath ? sdvReadFileTailUtf8(mainPath, 131072) : nil;
 
         NSString *farmerName = sdvXmlExtractTag(infoXml, @"name") ?: sdvXmlExtractTag(mainHead, @"name") ?: entry;
         NSString *farmName = sdvXmlExtractTag(infoXml, @"farmName") ?: sdvXmlExtractTag(mainHead, @"farmName") ?: @"Nông trại";
-        NSString *day = sdvXmlExtractTag(infoXml, @"dayOfMonthForSaveGame") ?: sdvXmlExtractTag(mainHead, @"dayOfMonthForSaveGame") ?: sdvXmlExtractTag(mainHead, @"dayOfMonth") ?: @"1";
-        NSString *seasonRaw = sdvXmlExtractTag(infoXml, @"seasonForSaveGame") ?: sdvXmlExtractTag(mainHead, @"seasonForSaveGame") ?: sdvXmlExtractTag(mainHead, @"currentSeason") ?: @"0";
-        NSString *year = sdvXmlExtractTag(infoXml, @"yearForSaveGame") ?: sdvXmlExtractTag(mainHead, @"yearForSaveGame") ?: sdvXmlExtractTag(mainHead, @"year") ?: @"1";
+        NSString *day = sdvXmlExtractTag(infoXml, @"dayOfMonthForSaveGame")
+            ?: sdvXmlExtractTag(mainHead, @"dayOfMonthForSaveGame")
+            ?: sdvXmlExtractTag(mainTail, @"dayOfMonth")
+            ?: sdvXmlExtractTag(mainHead, @"dayOfMonth") ?: @"1";
+        NSString *seasonRaw = sdvXmlExtractTag(infoXml, @"seasonForSaveGame")
+            ?: sdvXmlExtractTag(mainHead, @"seasonForSaveGame")
+            ?: sdvXmlExtractTag(mainTail, @"currentSeason")
+            ?: sdvXmlExtractTag(mainHead, @"currentSeason") ?: @"0";
+        NSString *year = sdvXmlExtractTag(infoXml, @"yearForSaveGame")
+            ?: sdvXmlExtractTag(mainHead, @"yearForSaveGame")
+            ?: sdvXmlExtractTag(mainTail, @"year")
+            ?: sdvXmlExtractTag(mainHead, @"year") ?: @"1";
         NSString *money = sdvXmlExtractTag(infoXml, @"money") ?: sdvXmlExtractTag(mainHead, @"money") ?: @"0";
-        NSString *ver = sdvXmlExtractTag(infoXml, @"gameVersion") ?: sdvXmlExtractTag(mainHead, @"gameVersion") ?: @"1.6";
+        NSString *ver = sdvXmlExtractTag(infoXml, @"gameVersion")
+            ?: sdvXmlExtractTag(mainTail, @"gameVersion")
+            ?: sdvXmlExtractTag(mainHead, @"gameVersion") ?: @"1.6";
 
-        BOOL hasQuick = NO;
-        for (NSString *sub in ([fm() contentsOfDirectoryAtPath:folderPath error:nil] ?: @[])) {
-            if ([sub.lowercaseString containsString:@"quicksave"]) { hasQuick = YES; break; }
+        // Check REAL QuickSaveManager JSON at Documents/Mods/SDViOSTouchControls/data/<folderName>_quicksave.json
+        NSString *liveQsPath = sdvQuickSaveJsonPath(docsPath, entry);
+        BOOL hasQuick = (liveQsPath.length && [fm() fileExistsAtPath:liveQsPath] && !dir(liveQsPath));
+        if (!hasQuick) {
+            for (NSString *sub in ([fm() contentsOfDirectoryAtPath:folderPath error:nil] ?: @[])) {
+                if ([sub.lowercaseString containsString:@"quicksave"] && [sub.lowercaseString hasSuffix:@".json"]) {
+                    hasQuick = YES; break;
+                }
+            }
         }
-        // Also check SDViOSTouchControls QuickSave in Documents/Saves/<folder>/.. or QuickSaveState
+
         NSDictionary *attrs = [fm() attributesOfItemAtPath:(mainPath ?: infoPath) error:nil];
         NSDate *modDate = attrs[NSFileModificationDate] ?: [NSDate distantPast];
         unsigned long long bytes = sdvDirSizeBytes(folderPath);
-
         BOOL caseMismatch = (mainPath != nil && ![mainPath.lastPathComponent isEqualToString:entry]);
 
         [list addObject:@{
@@ -205,6 +308,61 @@ static NSArray<NSDictionary *> *sdvListSaves(NSString *docsPath) {
     return list;
 }
 
+// Repairs an existing save folder in place (fixes case-mismatch main save filename, strips BOM, synthesizes missing SaveGameInfo)
+static NSString *sdvRepairSaveFolder(NSString *folderPath) {
+    if (!folderPath.length || !dir(folderPath)) fail(@"Không tìm thấy thư mục Save cần sửa.");
+    NSString *folderName = folderPath.lastPathComponent;
+    NSString *expectedMain = join(folderPath, folderName);
+    NSString *foundMain = ([fm() fileExistsAtPath:expectedMain] && !dir(expectedMain)) ? expectedMain : nil;
+    if (!foundMain) {
+        for (NSString *sub in ([fm() contentsOfDirectoryAtPath:folderPath error:nil] ?: @[])) {
+            NSString *cand = join(folderPath, sub);
+            if (sdvLooksLikeMainSaveXml(cand)) { foundMain = cand; break; }
+        }
+    }
+    if (!foundMain) fail(@"Thư mục Save không có dữ liệu <SaveGame> hợp lệ.");
+
+    NSMutableArray<NSString *> *fixes = [NSMutableArray array];
+    NSData *rawMain = readFile(foundMain);
+    NSData *cleanMain = sdvStripUtf8Bom(rawMain);
+    if (![foundMain.lastPathComponent isEqualToString:folderName] || cleanMain.length != rawMain.length) {
+        writeFile(cleanMain, expectedMain);
+        if (![foundMain isEqualToString:expectedMain]) removeItem(foundMain);
+        [fixes addObject:@"chuẩn hóa tên tệp & UTF-8"];
+    }
+
+    NSString *infoPath = join(folderPath, @"SaveGameInfo");
+    if (![fm() fileExistsAtPath:infoPath] || dir(infoPath)) {
+        // Check case-insensitive variant first
+        NSString *ciInfo = nil;
+        for (NSString *sub in ([fm() contentsOfDirectoryAtPath:folderPath error:nil] ?: @[])) {
+            if ([sub caseInsensitiveCompare:@"SaveGameInfo"] == NSOrderedSame && ![sub isEqualToString:@"SaveGameInfo"]) {
+                ciInfo = join(folderPath, sub); break;
+            }
+        }
+        NSData *infoData = ciInfo ? sdvStripUtf8Bom(readFile(ciInfo)) : sdvSynthesizeSaveGameInfoFromMainData(cleanMain);
+        if (infoData.length) {
+            writeFile(infoData, infoPath);
+            if (ciInfo) removeItem(ciInfo);
+            [fixes addObject:ciInfo ? @"sửa tên SaveGameInfo" : @"tự tạo SaveGameInfo"];
+        }
+    }
+    return fixes.count ? [fixes componentsJoinedByString:@" · "] : @"Save đã đạt chuẩn";
+}
+
+// Deletes a save folder AND its companion QuickSave JSON & Multi-Slot SaveSlots snapshots cleanly
+static void sdvDeleteSaveFolder(NSString *folderPath, NSString *docsPath) {
+    if (!folderPath.length) return;
+    NSString *folderName = folderPath.lastPathComponent;
+    removeItem(folderPath);
+    if (docsPath.length && folderName.length) {
+        NSString *qs = sdvQuickSaveJsonPath(docsPath, folderName);
+        if (qs.length && [fm() fileExistsAtPath:qs]) [fm() removeItemAtPath:qs error:nil];
+        NSString *slotsDir = join(docsPath, [NSString stringWithFormat:@"Mods/SDVMobileControls/SaveSlots/%@", folderName]);
+        if ([fm() fileExistsAtPath:slotsDir]) [fm() removeItemAtPath:slotsDir error:nil];
+    }
+}
+
 static NSString *sdvDetectSourcePlatform(NSString *srcDir, NSString *mainHead, BOOL sawMacJunk) {
     NSArray<NSString *> *sibs = [fm() contentsOfDirectoryAtPath:srcDir error:nil] ?: @[];
     BOOL hasEmergency = NO;
@@ -227,7 +385,8 @@ static NSString *sdvDetectSourcePlatform(NSString *srcDir, NSString *mainHead, B
 }
 
 // Imports 1 or more picked URLs (ZIP/RAR/7Z/TAR.GZ archives, save folders, or raw save XML files),
-// auto-detects source platform, normalizes casing/BOM/SaveGameInfo/mobile junk, backs up collisions, and installs into Documents/Saves/.
+// auto-detects source platform, normalizes casing/BOM/SaveGameInfo/mobile junk, backs up collisions,
+// restores any companion QuickSave JSON, and installs directly into Documents/.config/StardewValley/Saves/.
 static NSDictionary *sdvImportSavesFromURLs(NSArray<NSURL *> *urls, NSString *docsPath) {
     if (!urls.count || !docsPath.length) {
         fail(@"Chưa chọn tệp hoặc thư mục Save.");
@@ -294,7 +453,7 @@ static NSDictionary *sdvImportSavesFromURLs(NSArray<NSURL *> *urls, NSString *do
             fail(@"Không tìm thấy file Save Stardew Valley hợp lệ (<SaveGame>) trong gói/thư mục đã chọn. Hãy chọn file .ZIP hoặc thư mục chứa Save (VD: TenFarm_123456789).");
         }
 
-        NSString *savesDir = join(docsPath, @"Saves");
+        NSString *savesDir = sdvLiveSavesDir(docsPath);
         mkdirs(savesDir);
         NSString *backupRoot = join(docsPath, @"Saves_Backup");
 
@@ -303,6 +462,7 @@ static NSDictionary *sdvImportSavesFromURLs(NSArray<NSURL *> *urls, NSString *do
         NSMutableArray<NSString *> *notes = [NSMutableArray array];
         NSInteger backupCount = 0;
         NSInteger synthInfoCount = 0;
+        NSInteger quickRestoredCount = 0;
         NSInteger legacy15Count = 0;
 
         NSDateFormatter *df = [NSDateFormatter new];
@@ -314,14 +474,15 @@ static NSDictionary *sdvImportSavesFromURLs(NSArray<NSURL *> *urls, NSString *do
             NSData *rawMain = readFile(mainPath);
             NSData *cleanMain = sdvStripUtf8Bom(rawMain);
             NSString *head = sdvReadFilePrefixUtf8(mainPath, 98304) ?: @"";
+            NSString *tail = sdvReadFileTailUtf8(mainPath, 131072) ?: @"";
 
             NSString *platform = sdvDetectSourcePlatform(srcDir, head, sawMacJunk);
             [detectedPlatforms addObject:platform];
 
             NSString *farmerName = sdvXmlExtractTag(head, @"name") ?: @"Farmer";
             NSString *farmName = sdvXmlExtractTag(head, @"farmName") ?: @"";
-            NSString *uniqueId = sdvXmlExtractTag(head, @"uniqueIDForThisGame") ?: @"";
-            NSString *gameVer = sdvXmlExtractTag(head, @"gameVersion") ?: @"";
+            NSString *uniqueId = sdvXmlExtractTag(tail, @"uniqueIDForThisGame") ?: sdvXmlExtractTag(head, @"uniqueIDForThisGame") ?: @"";
+            NSString *gameVer = sdvXmlExtractTag(tail, @"gameVersion") ?: sdvXmlExtractTag(head, @"gameVersion") ?: @"";
             if ([gameVer hasPrefix:@"1.4"] || [gameVer hasPrefix:@"1.5"]) {
                 legacy15Count++;
             }
@@ -353,7 +514,7 @@ static NSDictionary *sdvImportSavesFromURLs(NSArray<NSURL *> *urls, NSString *do
                 if (cleanInfo.length) synthInfoCount++;
             }
 
-            // Backup existing save if collision
+            // Backup existing save if collision (saved into visible Documents/Saves_Backup/)
             NSString *dstDir = join(savesDir, canonical);
             if ([fm() fileExistsAtPath:dstDir]) {
                 mkdirs(backupRoot);
@@ -372,13 +533,18 @@ static NSDictionary *sdvImportSavesFromURLs(NSArray<NSURL *> *urls, NSString *do
                 writeFile(cleanInfo, join(dstDir, @"SaveGameInfo"));
             }
 
-            // Optionally preserve valid QuickSave JSON if present (for Garden Launcher <-> Garden Launcher transfers)
+            // Restore companion QuickSave JSON directly into SDViOSTouchControls/data/<canonical>_quicksave.json!
             for (NSString *sib in ([fm() contentsOfDirectoryAtPath:srcDir error:nil] ?: @[])) {
                 NSString *lo = sib.lowercaseString;
                 if ([lo containsString:@"quicksave"] && [lo hasSuffix:@".json"]) {
-                    NSString *qSrc = join(srcDir, sib);
-                    NSData *qd = [NSData dataWithContentsOfFile:qSrc];
-                    if (qd.length > 2) writeFile(qd, join(dstDir, sib));
+                    NSData *qd = [NSData dataWithContentsOfFile:join(srcDir, sib)];
+                    if (qd.length > 2) {
+                        NSString *dstQs = sdvQuickSaveJsonPath(docsPath, canonical);
+                        mkdirs(dstQs.stringByDeletingLastPathComponent);
+                        writeFile(qd, dstQs);
+                        quickRestoredCount++;
+                        break;
+                    }
                 }
             }
 
@@ -389,6 +555,7 @@ static NSDictionary *sdvImportSavesFromURLs(NSArray<NSURL *> *urls, NSString *do
         }
 
         if (synthInfoCount > 0) [notes addObject:[NSString stringWithFormat:@"tự tạo %ld SaveGameInfo bị thiếu", (long)synthInfoCount]];
+        if (quickRestoredCount > 0) [notes addObject:[NSString stringWithFormat:@"khôi phục %ld QuickSave", (long)quickRestoredCount]];
         if (backupCount > 0) [notes addObject:[NSString stringWithFormat:@"sao lưu %ld bản cũ vào Saves_Backup/", (long)backupCount]];
         if (legacy15Count > 0) [notes addObject:@"Save bản 1.5 sẽ tự nâng lên 1.6 khi vào game"];
 
@@ -413,7 +580,7 @@ static NSDictionary *sdvImportSavesFromURLs(NSArray<NSURL *> *urls, NSString *do
 
 // Exports a save folder to a clean cross-platform .ZIP archive using miniz.
 // exportMode: 0 = Universal PC/Mac/Linux/Android SMAPI/iOS, 1 = Full Garden iOS Backup (with QuickSave), 2 = Vanilla Mobile (iOS/Android)
-static NSURL *sdvExportSaveToZip(NSString *saveFolderPath, NSInteger exportMode) {
+static NSURL *sdvExportSaveToZip(NSString *saveFolderPath, NSString *docsPath, NSInteger exportMode) {
     if (!saveFolderPath.length || !dir(saveFolderPath)) {
         fail(@"Không tìm thấy thư mục Save cần xuất.");
     }
@@ -473,14 +640,27 @@ static NSURL *sdvExportSaveToZip(NSString *saveFolderPath, NSInteger exportMode)
                 mz_zip_writer_add_mem(&z, infoOld.UTF8String, cleanInfo.bytes, cleanInfo.length, MZ_DEFAULT_COMPRESSION);
             }
         } else if (exportMode == 1) {
-            // Full Garden iOS backup: include QuickSave JSON files if present
-            for (NSString *sub in ([fm() contentsOfDirectoryAtPath:saveFolderPath error:nil] ?: @[])) {
-                NSString *lo = sub.lowercaseString;
-                if ([lo containsString:@"quicksave"] && [lo hasSuffix:@".json"]) {
-                    NSData *qd = [NSData dataWithContentsOfFile:join(saveFolderPath, sub)];
-                    if (qd.length) {
-                        NSString *entry = [NSString stringWithFormat:@"%@/%@", folderName, sub];
-                        mz_zip_writer_add_mem(&z, entry.UTF8String, qd.bytes, qd.length, MZ_DEFAULT_COMPRESSION);
+            // Full Garden iOS backup: pack the REAL QuickSave JSON from Mods/SDViOSTouchControls/data/<folder>_quicksave.json!
+            NSString *liveQs = sdvQuickSaveJsonPath(docsPath, folderName);
+            BOOL packedQs = NO;
+            if (liveQs.length && [fm() fileExistsAtPath:liveQs] && !dir(liveQs)) {
+                NSData *qd = [NSData dataWithContentsOfFile:liveQs];
+                if (qd.length > 2) {
+                    NSString *entry = [NSString stringWithFormat:@"%@/%@_quicksave.json", folderName, folderName];
+                    mz_zip_writer_add_mem(&z, entry.UTF8String, qd.bytes, qd.length, MZ_DEFAULT_COMPRESSION);
+                    packedQs = YES;
+                }
+            }
+            if (!packedQs) {
+                for (NSString *sub in ([fm() contentsOfDirectoryAtPath:saveFolderPath error:nil] ?: @[])) {
+                    NSString *lo = sub.lowercaseString;
+                    if ([lo containsString:@"quicksave"] && [lo hasSuffix:@".json"]) {
+                        NSData *qd = [NSData dataWithContentsOfFile:join(saveFolderPath, sub)];
+                        if (qd.length > 2) {
+                            NSString *entry = [NSString stringWithFormat:@"%@/%@", folderName, sub];
+                            mz_zip_writer_add_mem(&z, entry.UTF8String, qd.bytes, qd.length, MZ_DEFAULT_COMPRESSION);
+                            break;
+                        }
                     }
                 }
             }

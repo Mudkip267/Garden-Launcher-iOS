@@ -1411,7 +1411,7 @@ namespace SDVMobileControls
             // If Mobile Buy/Sell/Split/Crafting Popup is open OR dragging an item, give it top priority!
             if (_invShop.IsPopupOpen || (_cfg.MobileShopAndDrag && _invShop.IsDraggingItem))
             {
-                if (_invShop.Update(rawMenu, touches, MapRawToViewport, ViewportToUi, _vpW, _vpH, nowSec))
+                if (_invShop.Update(topMenu, touches, MapRawToViewport, ViewportToUi, _vpW, _vpH, nowSec))
                 {
                     ResetMenuTapState();
                     ApplyToPad(pad, Vector2.Zero, false, false, false);
@@ -1652,7 +1652,7 @@ namespace SDVMobileControls
                         if (cp != null && hitRecipe != null && hitCraftRecipe != null)
                         {
                             // FIXED: 1st tap NEVER crafts immediately — opens Authentic Stardew Mobile Crafting Sheet with ingredients & quantity slider!
-                            _invShop.OpenCraftingPopup(rawMenu, cp, hitRecipe, hitCraftRecipe, tl.Id);
+                            _invShop.OpenCraftingPopup(topMenu, cp, hitRecipe, hitCraftRecipe, tl.Id);
                         }
                         else if (jnm != null && hitJunimo != null)
                         {
@@ -2183,7 +2183,7 @@ namespace SDVMobileControls
                 DrawCustomKeyButtons(sb);
 
             if (showInvShop)
-                _invShop.Draw(sb, _pixel, _circle, br, rawMenu, UiToViewport, ViewportToUi, _vpW, _vpH, _cfg.SafeDialogueAndTooltip);
+                _invShop.Draw(sb, _pixel, _circle, br, topMenu, UiToViewport, ViewportToUi, _vpW, _vpH, _cfg.SafeDialogueAndTooltip);
         }
 
         public void UpdateGameplay(object pad, GameTime gameTime)
@@ -2873,6 +2873,9 @@ namespace SDVMobileControls
             }
 
             // --- 3. A* Tap-to-Move Path Follower + Door/Warp Exit Push ---
+            if (Game1.fadeToBlack)
+                _warpPushFrames = 0;
+
             if (stickVec == Vector2.Zero && !_toolPressed && !_interactPressed && !sawSlingshot)
             {
                 if (_path != null)
@@ -2990,8 +2993,8 @@ namespace SDVMobileControls
             // --- 6. Optional Safe Periodic Auto-Save (DEFAULT OFF, skips Mines/Volcano/Combat/Moving) ---
             TryPeriodicAutoSave(br, stickVec, fireX || fireA || sawSlingshot, nowSec);
 
-            // --- 7. Full Auto-Unstick Watchdog (rescues ALL Stardew freeze locks: CanMove, freezeControls, freezePause,
-            //        PauseForSingleAnimation, stuck UsingTool/isEating/controller/FishingRod/stray KeyboardSubscriber!) ---
+            // --- 7. Tiered Auto-Unstick Watchdog (rescues ALL Stardew freeze locks WITHOUT ever cancelling normal tool swings,
+            //        eating animations, or active FishingRod casts!) ---
             if (stickVec.LengthSquared() > 0.08f &&
                 !_toolPressed && !_interactPressed && !sawSlingshot &&
                 Game1.player != null &&
@@ -3000,24 +3003,51 @@ namespace SDVMobileControls
                 Game1.currentMinigame == null)
             {
                 Farmer uWho = Game1.player;
-                bool activeWaitingFish = uWho.CurrentTool is FishingRod uFr &&
-                                         (uFr.isFishing || uFr.isNibbling || uFr.isReeling || uFr.castedButBobberStillInAir);
-                bool hasHardLock =
-                    !uWho.CanMove ||
-                    Game1.freezeControls ||
-                    uWho.freezePause > 0 ||
-                    (uWho.FarmerSprite != null && uWho.FarmerSprite.PauseForSingleAnimation) ||
-                    uWho.isEating ||
-                    uWho.usingSlingshot ||
-                    uWho.controller != null ||
-                    (uWho.UsingTool && !activeWaitingFish) ||
-                    (Game1.keyboardDispatcher != null && Game1.keyboardDispatcher.Subscriber != null &&
-                     (Game1.chatBox == null || !Game1.chatBox.isActive()));
+                FishingRod uFr = uWho.CurrentTool as FishingRod;
+                bool activeFishingState = uFr != null &&
+                    (uFr.isCasting || uFr.castedButBobberStillInAir || uFr.isFishing || uFr.isNibbling ||
+                     uFr.isReeling || uFr.pullingOutOfWater || uFr.fishCaught || uFr.showingTreasure);
+                bool stuckTimingCast = uFr != null && uFr.isTimingCast;
+                bool strayKbSub = Game1.keyboardDispatcher != null && Game1.keyboardDispatcher.Subscriber != null &&
+                                  (Game1.chatBox == null || !Game1.chatBox.isActive());
 
-                if (hasHardLock)
+                int unstickThreshold = 0;
+                if (activeFishingState)
                 {
-                    // Trigger at 18 ticks (~0.30s) — BEFORE StepPathFollower's 36-tick abort so Tap-to-Move ALSO recovers!
-                    if (++_unstickHoldTicks >= 18)
+                    // Never interrupt an active cast/fishing animation
+                    unstickThreshold = 0;
+                }
+                else if (stuckTimingCast)
+                {
+                    // Safety net ONLY if isTimingCast stays stuck with !_toolPressed for > 2.5s
+                    unstickThreshold = 150;
+                }
+                else if (uWho.isEating)
+                {
+                    // Allow full ~1.5s eating animation to finish healing HP/energy before rescuing
+                    unstickThreshold = 135;
+                }
+                else if (uWho.UsingTool)
+                {
+                    // Allow full ~0.55s Axe/Pickaxe/Hoe/Weapon swing to land before treating as stuck
+                    unstickThreshold = 55;
+                }
+                else if (!uWho.CanMove ||
+                         Game1.freezeControls ||
+                         uWho.freezePause > 0 ||
+                         (uWho.FarmerSprite != null && uWho.FarmerSprite.PauseForSingleAnimation) ||
+                         uWho.usingSlingshot ||
+                         uWho.controller != null ||
+                         strayKbSub)
+                {
+                    // Pure freeze lock (not swinging/eating/fishing): rescue fast at 20 ticks (~0.33s),
+                    // well before StepPathFollower's 36-tick path abort so Tap-to-Move ALSO recovers!
+                    unstickThreshold = 20;
+                }
+
+                if (unstickThreshold > 0)
+                {
+                    if (++_unstickHoldTicks >= unstickThreshold)
                     {
                         _unstickHoldTicks = 0;
                         _unstickStillTicks = 0;
@@ -3027,13 +3057,13 @@ namespace SDVMobileControls
                             uWho.completelyStopAnimatingOrDoingAction();
                             uWho.forceCanMove();
                             uWho.controller = null;
-                            if (uWho.CurrentTool is FishingRod stuckRod && !activeWaitingFish)
+                            if (uFr != null && !activeFishingState)
                             {
-                                stuckRod.isTimingCast = false;
-                                stuckRod.isCasting = false;
-                                stuckRod.pullingOutOfWater = false;
+                                uFr.isTimingCast = false;
+                                uFr.isCasting = false;
+                                uFr.pullingOutOfWater = false;
                             }
-                            if (Game1.keyboardDispatcher != null && (Game1.chatBox == null || !Game1.chatBox.isActive()))
+                            if (strayKbSub)
                                 Game1.keyboardDispatcher.Subscriber = null;
                         }
                         catch { }
@@ -3043,10 +3073,10 @@ namespace SDVMobileControls
                 {
                     _unstickHoldTicks = 0;
                     // Secondary watchdog: if farmer is pushing joystick/path for 36 ticks without moving even 1px
-                    // while sitting/emoting/animation-locked, release sitting/emote cleanly!
+                    // while sitting/emoting, release sitting/emote cleanly!
                     if (Vector2.DistanceSquared(uWho.Position, _unstickLastPos) < 1.5f)
                     {
-                        if (++_unstickStillTicks >= 36 && !activeWaitingFish)
+                        if (++_unstickStillTicks >= 36 && !activeFishingState && !uWho.isEating && !uWho.UsingTool)
                         {
                             _unstickStillTicks = 0;
                             if (uWho.IsSitting() || uWho.IsEmoting)
@@ -3828,7 +3858,7 @@ namespace SDVMobileControls
                 return;
             }
 
-            Point pathGoal = tappedWarp ? warpGoal : tappedTile;
+            Point pathGoal = tappedWarp ? FindWarpApproachTile(loc, warpGoal, playerTile, who) : tappedTile;
             List<Point> path = PathFinder.FindPath(loc, playerTile, pathGoal, who, intent.StopAdjacent);
             if (path == null)
             {
@@ -3860,7 +3890,7 @@ namespace SDVMobileControls
 
             _path = path;
             _pathIdx = 0;
-            _targetTile = pathGoal;
+            _targetTile = tappedWarp ? warpGoal : pathGoal;
             _hasTargetTile = true;
             _pendingIntent = intent;
             _hasPendingWarp = tappedWarp;
@@ -3875,11 +3905,14 @@ namespace SDVMobileControls
             if (loc == null) return false;
             try
             {
-                // Must tap on water (or 1 tile off the shoreline edge next to water)
+                // Must tap directly on water — OR on an impassable shoreline/cliff edge 1 tile beside water.
+                // NEVER hijack taps on walkable piers, wooden docks, bridges, or beach floor!
                 bool tapIsWater = loc.isWaterTile(tappedTile.X, tappedTile.Y);
                 if (!tapIsWater)
                 {
-                    // Forgive slight tap miss on shoreline bank (check 4-neighbors of tapped tile)
+                    if (PathFinder.IsTileWalkable(loc, tappedTile.X, tappedTile.Y, Game1.player))
+                        return false;
+
                     tapIsWater = loc.isWaterTile(tappedTile.X + 1, tappedTile.Y) ||
                                  loc.isWaterTile(tappedTile.X - 1, tappedTile.Y) ||
                                  loc.isWaterTile(tappedTile.X, tappedTile.Y + 1) ||
@@ -3913,10 +3946,45 @@ namespace SDVMobileControls
             return false;
         }
 
+        // For unwalkable/out-of-bounds door warps (e.g. FarmHouse exit (3,12) or Building humanDoor),
+        // pick the walkable CARDINAL tile directly in front of the door (e.g. rug (3,11)) so A* walks
+        // squarely onto the rug instead of stopping diagonally against the wall!
+        private static Point FindWarpApproachTile(GameLocation loc, Point warpGoal, Point playerTile, Farmer who)
+        {
+            if (loc == null || PathFinder.IsTileWalkable(loc, warpGoal.X, warpGoal.Y, who))
+                return warpGoal;
+
+            Point[] cardinals =
+            {
+                new Point(warpGoal.X, warpGoal.Y - 1),
+                new Point(warpGoal.X, warpGoal.Y + 1),
+                new Point(warpGoal.X - 1, warpGoal.Y),
+                new Point(warpGoal.X + 1, warpGoal.Y)
+            };
+
+            Point best = warpGoal;
+            int bestDistSq = int.MaxValue;
+            for (int i = 0; i < cardinals.Length; i++)
+            {
+                Point c = cardinals[i];
+                if (!PathFinder.IsTileWalkable(loc, c.X, c.Y, who))
+                    continue;
+                int dx = c.X - playerTile.X;
+                int dy = c.Y - playerTile.Y;
+                int dSq = dx * dx + dy * dy;
+                if (dSq < bestDistSq)
+                {
+                    bestDistSq = dSq;
+                    best = c;
+                }
+            }
+            return best;
+        }
+
         private static bool TryFindNearbyWarp(GameLocation loc, Point tappedTile, out Point warpTile)
         {
             warpTile = tappedTile;
-            if (loc?.warps == null || loc.warps.Count == 0)
+            if (loc == null)
                 return false;
 
             try
@@ -3925,27 +3993,72 @@ namespace SDVMobileControls
                 int mapH = loc.Map?.Layers?[0]?.LayerHeight ?? 0;
                 bool tapOutOrBlocked = tappedTile.X < 0 || tappedTile.Y < 0 || tappedTile.X >= mapW || tappedTile.Y >= mapH ||
                                        !PathFinder.IsTileWalkable(loc, tappedTile.X, tappedTile.Y, Game1.player);
-                int maxDist = tapOutOrBlocked ? 2 : 1;
 
                 int bestDistSq = int.MaxValue;
                 bool found = false;
-                for (int i = 0; i < loc.warps.Count; i++)
+
+                if (loc.warps != null)
                 {
-                    Warp w = loc.warps[i];
-                    if (w == null || w.npcOnly.Value)
-                        continue;
-                    int dx = Math.Abs(w.X - tappedTile.X);
-                    int dy = Math.Abs(w.Y - tappedTile.Y);
-                    if (Math.Max(dx, dy) > maxDist)
-                        continue;
-                    int dSq = dx * dx + dy * dy;
-                    if (dSq < bestDistSq)
+                    for (int i = 0; i < loc.warps.Count; i++)
                     {
-                        bestDistSq = dSq;
-                        warpTile = new Point(w.X, w.Y);
-                        found = true;
+                        Warp w = loc.warps[i];
+                        if (w == null || w.npcOnly.Value)
+                            continue;
+                        int dx = Math.Abs(w.X - tappedTile.X);
+                        int dy = Math.Abs(w.Y - tappedTile.Y);
+                        int cheb = Math.Max(dx, dy);
+
+                        bool match;
+                        if (cheb == 0)
+                        {
+                            match = true;
+                        }
+                        else if (tapOutOrBlocked)
+                        {
+                            match = (cheb <= 2);
+                        }
+                        else
+                        {
+                            // Walkable tap (e.g. FarmHouse exit rug (3,11)): ONLY match a cardinally adjacent
+                            // unwalkable/out-of-bounds warp (like (3,12)) — never accidentally trigger open road edges!
+                            match = (dx + dy == 1) && !PathFinder.IsTileWalkable(loc, w.X, w.Y, Game1.player);
+                        }
+
+                        if (!match) continue;
+                        int dSq = dx * dx + dy * dy;
+                        if (dSq < bestDistSq)
+                        {
+                            bestDistSq = dSq;
+                            warpTile = new Point(w.X, w.Y);
+                            found = true;
+                        }
                     }
                 }
+
+                // Also match outdoor Farm Building doors (Coop, Barn, Shed, Cabin, Slime Hutch, Greenhouse)
+                // which GameLocation.isCollidingWithDoors handles via Building.getPointForHumanDoor()!
+                if (!found && loc.buildings != null)
+                {
+                    for (int i = 0; i < loc.buildings.Count; i++)
+                    {
+                        var b = loc.buildings[i];
+                        if (b == null || !b.HasIndoors()) continue;
+                        Point dp = b.getPointForHumanDoor();
+                        if (dp.X < 0 || dp.Y < 0) continue;
+                        int dx = Math.Abs(dp.X - tappedTile.X);
+                        int dy = Math.Abs(dp.Y - tappedTile.Y);
+                        bool match = (dx == 0 && dy == 0) || (tapOutOrBlocked && Math.Max(dx, dy) <= 1);
+                        if (!match) continue;
+                        int dSq = dx * dx + dy * dy;
+                        if (dSq < bestDistSq)
+                        {
+                            bestDistSq = dSq;
+                            warpTile = dp;
+                            found = true;
+                        }
+                    }
+                }
+
                 return found;
             }
             catch

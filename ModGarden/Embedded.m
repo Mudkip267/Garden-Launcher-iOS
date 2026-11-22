@@ -1387,9 +1387,9 @@ __attribute__((constructor)) static void startGardenControls(void) {
             sdvBootLogFmt([NSString stringWithFormat:@"[GC] MONO_GC_PARAMS=%s", getenv("MONO_GC_PARAMS") ?: "?"]);
             sdvEnsureAudioSession("constructor");
             syncBundledLidgren(docs);
-            syncBundledSmapi(docs);
+            NSString *smapiSyncNote = syncBundledSmapi(docs);
             syncBundledMobileControls(docs);
-            sdvBootLog("[BOOT 2] Bundled Lidgren / SMAPI / SDVMobileControls synced");
+            sdvBootLogFmt([NSString stringWithFormat:@"[BOOT 2] Bundled Lidgren / SMAPI (%@) / SDVMobileControls synced", smapiSyncNote ?: @"?"]);
             [SDVRamMonitor.shared startWithDocsPath:docs];
             sdvBootLog("[BOOT 3] SDVRamMonitor started");
         } @catch (NSException *ex) {

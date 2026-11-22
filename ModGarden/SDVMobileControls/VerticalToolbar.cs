@@ -15,7 +15,11 @@ namespace SDVMobileControls
     internal sealed class VerticalToolbar
     {
         private static readonly Rectangle ToolbarFrameSrc = new Rectangle(0, 256, 60, 60);
-        private static readonly RasterizerState ScissorRasterizer = new RasterizerState { ScissorTestEnable = true };
+        private static readonly RasterizerState ScissorRasterizer = new RasterizerState
+        {
+            CullMode = CullMode.CullCounterClockwiseFace,
+            ScissorTestEnable = true
+        };
 
         private IClickableMenu _hiddenPcToolbar;
         private Rectangle _panelRect;
@@ -222,12 +226,24 @@ namespace SDVMobileControls
                 _touchDragged = false;
                 _scrollVel = 0f;
 
-                float relX = vp.X - (_panelRect.X + _pad);
-                float relY = vp.Y - (_panelRect.Y + _pad);
-                int col = Math.Clamp((int)Math.Floor(relX / rowPitch), 0, _cols - 1);
-                int row = (int)Math.Floor(_scrollRows + relY / rowPitch);
-                int idx = row * _cols + col;
-                _tappedSlot = (row >= 0 && idx >= 0 && idx < maxItems) ? idx : -1;
+                int gridW = _cols * _slotSize + Math.Max(0, _cols - 1) * _slotGap;
+                float contentLeft = _panelRect.X + _pad;
+                float contentTop = _panelRect.Y + _pad;
+                float contentBot = _panelRect.Bottom - _pad;
+                if (vp.X >= contentLeft && vp.X <= contentLeft + gridW && vp.Y >= contentTop && vp.Y <= contentBot)
+                {
+                    float relX = vp.X - contentLeft;
+                    float relY = vp.Y - contentTop;
+                    int col = Math.Clamp((int)Math.Floor(relX / rowPitch), 0, _cols - 1);
+                    int row = (int)Math.Floor(_scrollRows + relY / rowPitch);
+                    int idx = row * _cols + col;
+                    _tappedSlot = (row >= 0 && idx >= 0 && idx < maxItems) ? idx : -1;
+                }
+                else
+                {
+                    // Tapping wooden border frame or scrollbar strip still allows drag-scrolling without selecting clipped slots
+                    _tappedSlot = -1;
+                }
                 return true;
             }
 
@@ -304,22 +320,54 @@ namespace SDVMobileControls
 
             var gd = sb.GraphicsDevice;
             Rectangle prevScissor = gd != null ? gd.ScissorRectangle : Rectangle.Empty;
+            bool endedOrig = false;
             bool customBatch = false;
             if (gd != null)
             {
                 Rectangle vpBounds = gd.Viewport.Bounds;
-                Rectangle rawClip = new Rectangle(slotStartX - 2, contentTop, gridW + 4, Math.Max(1, contentBot - contentTop));
+                Rectangle rawClip = new Rectangle(vpBounds.X + slotStartX - 2, vpBounds.Y + contentTop, gridW + 4, Math.Max(1, contentBot - contentTop));
                 Rectangle clip = Rectangle.Intersect(vpBounds, rawClip);
+                if (gd.RenderTargetCount == 0 && gd.Viewport.Width > 0 && gd.Viewport.Height > 0)
+                {
+                    int bbW = gd.PresentationParameters.BackBufferWidth;
+                    int bbH = gd.PresentationParameters.BackBufferHeight;
+                    if (bbW > 0 && bbH > 0 && (bbW != gd.Viewport.Width || bbH != gd.Viewport.Height))
+                    {
+                        float sx = bbW / (float)gd.Viewport.Width;
+                        float sy = bbH / (float)gd.Viewport.Height;
+                        clip = Rectangle.Intersect(
+                            new Rectangle(0, 0, bbW, bbH),
+                            new Rectangle(
+                                (int)Math.Floor(clip.X * sx),
+                                (int)Math.Floor(clip.Y * sy),
+                                Math.Max(1, (int)Math.Ceiling(clip.Width * sx)),
+                                Math.Max(1, (int)Math.Ceiling(clip.Height * sy))));
+                    }
+                }
                 if (clip.Width > 0 && clip.Height > 0)
                 {
                     try
                     {
                         sb.End();
+                        endedOrig = true;
                         gd.ScissorRectangle = clip;
                         sb.Begin(SpriteSortMode.Deferred, BlendState.AlphaBlend, SamplerState.PointClamp, null, ScissorRasterizer, null, slotMatrix);
                         customBatch = true;
                     }
-                    catch { customBatch = false; }
+                    catch
+                    {
+                        customBatch = false;
+                        if (endedOrig)
+                        {
+                            try
+                            {
+                                gd.ScissorRectangle = prevScissor;
+                                sb.Begin(SpriteSortMode.Deferred, BlendState.AlphaBlend, SamplerState.PointClamp, null, null);
+                                endedOrig = false;
+                            }
+                            catch { }
+                        }
+                    }
                 }
             }
 
@@ -391,11 +439,11 @@ namespace SDVMobileControls
             }
             finally
             {
-                if (customBatch && gd != null)
+                if ((customBatch || endedOrig) && gd != null)
                 {
                     try
                     {
-                        sb.End();
+                        if (customBatch) sb.End();
                         gd.ScissorRectangle = prevScissor;
                         sb.Begin(SpriteSortMode.Deferred, BlendState.AlphaBlend, SamplerState.PointClamp, null, null);
                     }

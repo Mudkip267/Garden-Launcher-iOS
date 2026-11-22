@@ -43,6 +43,20 @@ namespace SDVMobileControls
         public float UiScaleOverride { get; set; } = 0.0f;  // 0 = game default, or 0.75..1.50 live UI scale for PC mod menus
         public float ButtonScale { get; set; } = 1.0f;
 
+        // v7.11 Mobile Pro toggles (all cleanly switchable in Mod Garden!)
+        public bool ShowEmoteButton { get; set; } = true;         // Smiley-face pixel Emote button in top utility bar
+        public bool AutoRepeat { get; set; } = true;              // 1-tap auto-repeat chop/mine until broken
+        public bool RestoreToolAfterAuto { get; set; } = false;   // Optional: restore previous slot after Auto-Tool finishes
+        public bool ShowSpecButton { get; set; } = true;          // Context SPEC (Parry/Slam) button when holding MeleeWeapon
+        public bool AutoCombatMode { get; set; } = false;         // Auto-switch to Joystick in Mines/Volcano + quick CTL toggle pill
+        public bool AutoHideOnGamepad { get; set; } = true;       // Auto-hide touch buttons when Bluetooth controller is active
+        public bool AutoPauseOnBackground { get; set; } = true;   // Auto-pause when Notification/Control Center or switching apps
+        public bool FishingHaptic { get; set; } = true;           // Light iOS haptic tap when fish bites
+        public int SafePaddingPx { get; set; } = -1;              // -1 = Auto from iOS safeAreaInsets, or 0..80 manual px
+        public bool SafeDialogueAndTooltip { get; set; } = true;  // Fixed compact item tooltip + 2-tap safe dialogue choice confirmation
+        public bool VerticalToolbar { get; set; } = false;        // Optional Mobile-style left vertical 36-slot scrollable toolbar
+        public bool BatterySaver30Fps { get; set; } = false;      // Optional 30 FPS render cap (keeps full 60Hz game logic speed!)
+
         // Normalized layout (0..1 of viewport) for Invisible Mode: Left Joystick Rect + 2 Right Vertical Rectangular Bars
         public float InvJoyX { get; set; }
         public float InvJoyY { get; set; }
@@ -82,10 +96,19 @@ namespace SDVMobileControls
         private readonly string _path;
         private readonly string _editFlagPath;
         private readonly string _ramAlertPath;
+        private readonly string _pauseFlagPath;
+        private readonly string _hapticBiteFlagPath;
+        private readonly string _safeAreaPath;
         private DateTime _lastWriteUtc = DateTime.MinValue;
+        private DateTime _lastSafeAreaUtc = DateTime.MinValue;
         private int _pollCounter;
         private int _flagCounter;
         private int _ramAlertCounter;
+        private int _pauseCounter;
+        private int _safeAreaCounter;
+
+        public float NativeSafeLeftFrac { get; private set; }
+        public float NativeSafeRightFrac { get; private set; }
 
         public MobileConfig()
         {
@@ -93,8 +116,12 @@ namespace SDVMobileControls
             _path = Path.Combine(docs, "sdv_mobile_ctrl.cfg");
             _editFlagPath = Path.Combine(docs, "sdv_mobile_edit.flag");
             _ramAlertPath = Path.Combine(docs, "sdv_ram_alert.txt");
+            _pauseFlagPath = Path.Combine(docs, "sdv_pause_now.flag");
+            _hapticBiteFlagPath = Path.Combine(docs, "sdv_haptic_bite.flag");
+            _safeAreaPath = Path.Combine(docs, "sdv_safe_area.cfg");
             ResetLayoutDefaults();
             Reload(force: true);
+            PollNativeSafeArea(force: true);
         }
 
         public void ResetLayoutDefaults()
@@ -221,8 +248,52 @@ namespace SDVMobileControls
             }
         }
 
+        public bool ConsumePauseFlag()
+        {
+            if (++_pauseCounter < 6)
+                return false;
+            _pauseCounter = 0;
+            try
+            {
+                if (!File.Exists(_pauseFlagPath))
+                    return false;
+                File.Delete(_pauseFlagPath);
+                return true;
+            }
+            catch { return false; }
+        }
+
+        public void TriggerFishBiteHaptic()
+        {
+            try { File.WriteAllText(_hapticBiteFlagPath, "1"); } catch { }
+        }
+
+        public void PollNativeSafeArea(bool force = false)
+        {
+            if (!force && ++_safeAreaCounter < 45)
+                return;
+            _safeAreaCounter = 0;
+            try
+            {
+                if (!File.Exists(_safeAreaPath)) return;
+                DateTime mt = File.GetLastWriteTimeUtc(_safeAreaPath);
+                if (!force && mt == _lastSafeAreaUtc) return;
+                _lastSafeAreaUtc = mt;
+                string raw = File.ReadAllText(_safeAreaPath)?.Trim();
+                if (string.IsNullOrEmpty(raw)) return;
+                string[] parts = raw.Split(',');
+                if (parts.Length >= 2)
+                {
+                    NativeSafeLeftFrac = ParseFloat(parts[0], 0f, 0f, 0.14f);
+                    NativeSafeRightFrac = ParseFloat(parts[1], 0f, 0f, 0.14f);
+                }
+            }
+            catch { }
+        }
+
         public void PollReload()
         {
+            PollNativeSafeArea(force: false);
             if (++_pollCounter < 25)
                 return;
             _pollCounter = 0;
@@ -287,6 +358,21 @@ namespace SDVMobileControls
                             UiScaleOverride = (us >= 0.70f) ? Math.Clamp(us, 0.75f, 1.50f) : 0.0f;
                             break;
                         case "buttonscale": ButtonScale = ParseFloat(v, 1.0f, 0.75f, 1.45f); break;
+                        case "emotebtn": ShowEmoteButton = ParseBool(v, true); break;
+                        case "autorepeat": AutoRepeat = ParseBool(v, true); break;
+                        case "restoretool": RestoreToolAfterAuto = ParseBool(v, false); break;
+                        case "specbtn": ShowSpecButton = ParseBool(v, true); break;
+                        case "autocombatmode": AutoCombatMode = ParseBool(v, false); break;
+                        case "autohidegp": AutoHideOnGamepad = ParseBool(v, true); break;
+                        case "autopause": AutoPauseOnBackground = ParseBool(v, true); break;
+                        case "fishhaptic": FishingHaptic = ParseBool(v, true); break;
+                        case "safepadding":
+                            if (int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out int sp))
+                                SafePaddingPx = sp < 0 ? -1 : Math.Clamp(sp, 0, 80);
+                            break;
+                        case "safedialogue": SafeDialogueAndTooltip = ParseBool(v, true); break;
+                        case "verticaltb": VerticalToolbar = ParseBool(v, false); break;
+                        case "saver30fps": BatterySaver30Fps = ParseBool(v, false); break;
 
                         case "inv_joy_x": InvJoyX = ParseFloat(v, InvJoyX, 0.0f, 0.90f); break;
                         case "inv_joy_y": InvJoyY = ParseFloat(v, InvJoyY, 0.0f, 0.90f); break;
@@ -377,6 +463,18 @@ namespace SDVMobileControls
                 sb.AppendLine($"reduceweather={(ReduceWeather ? 1 : 0)}");
                 sb.AppendLine($"uiscale={UiScaleOverride.ToString("0.00", CultureInfo.InvariantCulture)}");
                 sb.AppendLine($"buttonscale={ButtonScale.ToString("0.00", CultureInfo.InvariantCulture)}");
+                sb.AppendLine($"emotebtn={(ShowEmoteButton ? 1 : 0)}");
+                sb.AppendLine($"autorepeat={(AutoRepeat ? 1 : 0)}");
+                sb.AppendLine($"restoretool={(RestoreToolAfterAuto ? 1 : 0)}");
+                sb.AppendLine($"specbtn={(ShowSpecButton ? 1 : 0)}");
+                sb.AppendLine($"autocombatmode={(AutoCombatMode ? 1 : 0)}");
+                sb.AppendLine($"autohidegp={(AutoHideOnGamepad ? 1 : 0)}");
+                sb.AppendLine($"autopause={(AutoPauseOnBackground ? 1 : 0)}");
+                sb.AppendLine($"fishhaptic={(FishingHaptic ? 1 : 0)}");
+                sb.AppendLine($"safepadding={SafePaddingPx}");
+                sb.AppendLine($"safedialogue={(SafeDialogueAndTooltip ? 1 : 0)}");
+                sb.AppendLine($"verticaltb={(VerticalToolbar ? 1 : 0)}");
+                sb.AppendLine($"saver30fps={(BatterySaver30Fps ? 1 : 0)}");
                 sb.AppendLine($"inv_joy_x={F(InvJoyX)}");
                 sb.AppendLine($"inv_joy_y={F(InvJoyY)}");
                 sb.AppendLine($"inv_joy_w={F(InvJoyW)}");

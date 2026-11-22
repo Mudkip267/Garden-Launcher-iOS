@@ -20,6 +20,7 @@ namespace SDVMobileControls
         private readonly MobileSaveSlotManager _saveSlots;
         private readonly MobileInventoryShopHelper _invShop = new MobileInventoryShopHelper();
         private readonly MobileMinigamePad _minigamePad = new MobileMinigamePad();
+        private readonly VerticalToolbar _verticalToolbar = new VerticalToolbar();
         private PadBridge _bridge;
         private bool _loggedFirstIntercept;
 
@@ -40,6 +41,8 @@ namespace SDVMobileControls
         private Rectangle _btnQuestRect;
         private Rectangle _btnSaveRect;
         private Rectangle _btnKeyRect;
+        private Rectangle _btnEmoteRect;
+        private Rectangle _btnCtlModeRect;
         private Rectangle _btnEditRect;
         private Rectangle _btnCollapseRect;
         private Rectangle _topBarGroupRect;
@@ -153,24 +156,44 @@ namespace SDVMobileControls
         private bool _menuTapImmediateDrag;
         private bool _menuTapCameraPan;
 
-        // Hover-first safe crafting & Community Center bundle state
+        // Hover-first safe crafting, Community Center bundle & safe 2-tap Dialogue state
         private CraftingPage _craftHoverMenu;
         private ClickableTextureComponent _craftHoveredBtn;
         private JunimoNoteMenu _junimoHoverMenu;
         private ClickableComponent _junimoHoveredSlot;
+        private DialogueBox _dlgHoverMenu;
+        private int _dlgHoveredIdx = -1;
         private int _weatherTickCounter;
 
         // Auto iOS keyboard on TextBox focus
         private IKeyboardSubscriber _lastKbSubscriber;
         private double _lastAutoKbSec;
 
-        // Toolbar tap/swipe + ROW quick-switch + Furniture ROT button
+        // Toolbar tap/swipe + ROW quick-switch + Furniture ROT + Weapon SPEC button
         private int _toolbarTouchId = -1;
         private Vector2 _toolbarStartVp;
         private int _toolbarTappedSlot = -1;
         private bool _toolbarSwiped;
         private Rectangle _btnToolbarRowRect;
         private Rectangle _btnRotateRect;
+        private Rectangle _btnSpecRect;
+
+        // Auto-Repeat 1-tap chop/mine + Optional restore previous slot after Auto-Tool
+        private bool _repeatActive;
+        private Point _repeatTile;
+        private int _repeatCooldown;
+        private int _autoToolPrevSlot = -1;
+        private int _autoToolRestoreTimer;
+
+        // Auto-Combat Mode (Mines/Volcano) + Bluetooth GamePad auto-hide + Haptic + SafeArea + 30fps saver
+        private bool _inCombatAutoSwitched;
+        private MobileControlMode _preCombatMode = MobileControlMode.TapToMove;
+        private bool _gamepadHideHud;
+        private int _gamepadPollCounter;
+        private bool _wasFishNibbling;
+        private int _safeLeftPx;
+        private int _safeRightPx;
+        private bool _saverFrameParity;
 
         // Safe periodic AutoSave state (default OFF, skips combat/mines/moving)
         private double _lastAutoSaveSec = -1;
@@ -436,6 +459,9 @@ namespace SDVMobileControls
             _toolbarTouchId = -1;
             _toolbarTappedSlot = -1;
             _toolbarSwiped = false;
+            _verticalToolbar.ResetTouch();
+            _repeatActive = false;
+            _repeatCooldown = 0;
             _minigamePad.Reset();
             ClearPath();
         }
@@ -466,6 +492,8 @@ namespace SDVMobileControls
             _hasTargetTile = false;
             _pendingIntent = default;
             _stuckFrames = 0;
+            _repeatActive = false;
+            _repeatCooldown = 0;
         }
 
         private bool IsInventoryContextMenu()
@@ -575,10 +603,195 @@ namespace SDVMobileControls
             return null;
         }
 
+        private MeleeWeapon GetHeldSpecialWeapon()
+        {
+            if (!_cfg.ShowSpecButton || Game1.player?.CurrentTool is not MeleeWeapon mw || mw.isScythe())
+                return null;
+
+            bool combatCtx = (_cfg.Mode == MobileControlMode.TapToMove || _cfg.Mode == MobileControlMode.TapAndJoystick) ||
+                             Game1.currentLocation is MineShaft ||
+                             Game1.currentLocation is VolcanoDungeon ||
+                             AutoToolAndCombat.FindMonsterNear(Game1.currentLocation, Game1.player.GetBoundingBox().Center.ToVector2(), 360f) != null;
+            return combatCtx ? mw : null;
+        }
+
+        private static bool IsWeaponSpecialOnCooldown(MeleeWeapon mw)
+        {
+            if (mw == null) return true;
+            if (mw.isOnSpecial) return true;
+            if (mw.type.Value == MeleeWeapon.dagger) return MeleeWeapon.daggerCooldown > 0;
+            if (mw.type.Value == MeleeWeapon.club) return MeleeWeapon.clubCooldown > 0;
+            return MeleeWeapon.defenseCooldown > 0;
+        }
+
+        public void OnUpdateTickedGlobal()
+        {
+            _cfg.PollReload();
+            ApplyLiveUiScaleAndWeather();
+
+            // 1. Auto-Pause when user pulls Notification/Control Center or switches app (singleplayer only!)
+            if (_cfg.AutoPauseOnBackground && _cfg.ConsumePauseFlag())
+            {
+                if (Context.IsWorldReady && !Context.IsMultiplayer &&
+                    Game1.activeClickableMenu == null && !Game1.paused && !Game1.eventUp &&
+                    Game1.currentMinigame == null && !_editMode && !_saveMenuOpen)
+                {
+                    try { Game1.activeClickableMenu = new GameMenu(false); } catch { }
+                }
+            }
+
+            // 2. Optional light iOS Haptic tap on fish bite edge (FishingRod.isNibbling false -> true)
+            bool nibblingNow = Context.IsWorldReady && Game1.player?.CurrentTool is FishingRod fr && fr.isNibbling;
+            if (nibblingNow && !_wasFishNibbling && _cfg.FishingHaptic)
+                _cfg.TriggerFishBiteHaptic();
+            _wasFishNibbling = nibblingNow;
+
+            // 3. Vertical Scrollable Toolbar visibility sync (restores PC horizontal Toolbar immediately when OFF)
+            if (Context.IsWorldReady)
+                _verticalToolbar.SyncHorizontalToolbarVisibility(IsMobileModeActive && _cfg.VerticalToolbar);
+
+            // 4. Safe Area Notch/Dynamic Island padding for DayTimeMoneyBox
+            ApplySafeAreaToDayTimeMoneyBox();
+
+            // 5. Optional Battery Saver 30 FPS render cap (preserves 100% 60Hz logic speed; auto-suspends for BobberBar/minigames/fades!)
+            if (_cfg.BatterySaver30Fps &&
+                !_editMode && !_saveMenuOpen &&
+                Game1.currentMinigame == null &&
+                !(Game1.activeClickableMenu is BobberBar) &&
+                !Game1.fadeToBlack)
+            {
+                _saverFrameParity = !_saverFrameParity;
+                if (_saverFrameParity)
+                {
+                    try { GameRunner.instance?.SuppressDraw(); } catch { }
+                }
+            }
+            else
+            {
+                _saverFrameParity = false;
+            }
+        }
+
+        private void ApplySafeAreaToDayTimeMoneyBox()
+        {
+            if (!Context.IsWorldReady || Game1.dayTimeMoneyBox == null || _vpW <= 0)
+                return;
+            int rightPadVp = ComputeSafeRightPx();
+            if (rightPadVp <= 0)
+                return;
+            try
+            {
+                int uiW = Game1.uiViewport.Width;
+                if (uiW <= 0) return;
+                float padUi = rightPadVp * (uiW / (float)_vpW);
+                float maxX = uiW - 300f - padUi;
+                if (Game1.dayTimeMoneyBox.position.X > maxX)
+                    Game1.dayTimeMoneyBox.position.X = Math.Max(0f, maxX);
+            }
+            catch { }
+        }
+
+        private int ComputeSafeLeftPx()
+        {
+            if (_cfg.SafePaddingPx >= 0) return _cfg.SafePaddingPx;
+            return (int)Math.Round(_cfg.NativeSafeLeftFrac * _vpW);
+        }
+
+        private int ComputeSafeRightPx()
+        {
+            if (_cfg.SafePaddingPx >= 0) return _cfg.SafePaddingPx;
+            return (int)Math.Round(_cfg.NativeSafeRightFrac * _vpW);
+        }
+
+        private void CycleControlMode(double nowSec)
+        {
+            MobileControlMode next = _cfg.Mode switch
+            {
+                MobileControlMode.InvisibleJoystick2Btn => MobileControlMode.VisibleJoystick2Btn,
+                MobileControlMode.VisibleJoystick2Btn => MobileControlMode.TapToMove,
+                MobileControlMode.TapToMove => MobileControlMode.TapAndJoystick,
+                _ => MobileControlMode.InvisibleJoystick2Btn
+            };
+            _cfg.Mode = next;
+            _inCombatAutoSwitched = false;
+            _cfg.Save();
+            string name = next switch
+            {
+                MobileControlMode.InvisibleJoystick2Btn => "VO HINH",
+                MobileControlMode.VisibleJoystick2Btn => "2 NUT",
+                MobileControlMode.TapToMove => "CHAM DI",
+                _ => "KET HOP"
+            };
+            ShowSaveToast("DIEU KHIEN: " + name, nowSec);
+            try { Game1.playSound("smallSelect"); } catch { }
+        }
+
+        private void UpdateAutoCombatMode(double nowSec)
+        {
+            if (!_cfg.AutoCombatMode)
+            {
+                _inCombatAutoSwitched = false;
+                return;
+            }
+            bool isDungeon = Game1.currentLocation is MineShaft || Game1.currentLocation is VolcanoDungeon;
+            if (isDungeon && !_inCombatAutoSwitched && _cfg.Mode == MobileControlMode.TapToMove)
+            {
+                _preCombatMode = _cfg.Mode;
+                _cfg.Mode = MobileControlMode.InvisibleJoystick2Btn;
+                _inCombatAutoSwitched = true;
+                ShowSaveToast("VAO MO: TU DONG JOYSTICK", nowSec);
+            }
+            else if (!isDungeon && _inCombatAutoSwitched)
+            {
+                _cfg.Mode = _preCombatMode;
+                _inCombatAutoSwitched = false;
+                ShowSaveToast("RA NGOAI: CHE DO CU", nowSec);
+            }
+        }
+
+        private void PollGamepadAutoHide(int touchCount)
+        {
+            if (!_cfg.AutoHideOnGamepad)
+            {
+                _gamepadHideHud = false;
+                return;
+            }
+            if (touchCount > 0)
+            {
+                _gamepadHideHud = false;
+                return;
+            }
+            if (++_gamepadPollCounter < 10)
+                return;
+            _gamepadPollCounter = 0;
+            try
+            {
+                var caps = GamePad.GetCapabilities(PlayerIndex.One);
+                if (!caps.IsConnected)
+                {
+                    _gamepadHideHud = false;
+                    return;
+                }
+                var gs = GamePad.GetState(PlayerIndex.One);
+                bool used =
+                    gs.ThumbSticks.Left.LengthSquared() > 0.08f ||
+                    gs.ThumbSticks.Right.LengthSquared() > 0.08f ||
+                    gs.Triggers.Left > 0.2f || gs.Triggers.Right > 0.2f ||
+                    gs.Buttons.A == ButtonState.Pressed || gs.Buttons.B == ButtonState.Pressed ||
+                    gs.Buttons.X == ButtonState.Pressed || gs.Buttons.Y == ButtonState.Pressed ||
+                    gs.Buttons.LeftShoulder == ButtonState.Pressed || gs.Buttons.RightShoulder == ButtonState.Pressed ||
+                    gs.DPad.Up == ButtonState.Pressed || gs.DPad.Down == ButtonState.Pressed ||
+                    gs.DPad.Left == ButtonState.Pressed || gs.DPad.Right == ButtonState.Pressed;
+                if (used)
+                    _gamepadHideHud = true;
+            }
+            catch { }
+        }
+
         private static bool IsEscOnlyMenu(IClickableMenu menu)
         {
             if (menu == null) return false;
-            if (menu is DialogueBox || menu is LetterViewerMenu || menu is BobberBar || menu is TitleMenu)
+            if (menu is DialogueBox || menu is LetterViewerMenu || menu is BobberBar || menu is TitleMenu || menu is EmoteMenu)
                 return false;
             // Show top-left ESC pill on ALL PC/Mod menus (GMCM, CJB, Lookup Anything, Forge, Tailoring, Museum, Carpenter, QuestLog, etc.)!
             return true;
@@ -782,6 +995,33 @@ namespace SDVMobileControls
             {
                 _junimoHoverMenu = null;
                 _junimoHoveredSlot = null;
+            }
+            if (!ReferenceEquals(_dlgHoverMenu, activeMenu as DialogueBox))
+            {
+                _dlgHoverMenu = null;
+                _dlgHoveredIdx = -1;
+            }
+
+            // Native EmoteMenu radial wheel: uses raw viewport coordinates (internally calls ModifyCoordinateFromUIScale!)
+            if (activeMenu is EmoteMenu em)
+            {
+                em.gamepadMode = false;
+                for (int i = 0; i < touches.Count; i++)
+                {
+                    TouchLocation tl = touches[i];
+                    Vector2 vp = MapRawToViewport(tl.Position);
+                    if (tl.State == TouchLocationState.Pressed || tl.State == TouchLocationState.Moved)
+                    {
+                        try { em.performHoverAction((int)vp.X, (int)vp.Y); } catch { }
+                    }
+                    else if (tl.State == TouchLocationState.Released)
+                    {
+                        try { em.performHoverAction((int)vp.X, (int)vp.Y); } catch { }
+                        try { em.receiveLeftClick((int)vp.X, (int)vp.Y, true); } catch { }
+                    }
+                }
+                ApplyToPad(pad, Vector2.Zero, false, false, false);
+                return true;
             }
 
             // Always consume lingering tap release from BAG/MAP/QST or HUD Quest button
@@ -1056,12 +1296,22 @@ namespace SDVMobileControls
                             _junimoHoverMenu = null;
                             _junimoHoveredSlot = null;
                         }
+                        else if (activeMenu is MineElevatorMenu mem && mem.elevators != null && TryClickExpandedElevator(mem, ui))
+                        {
+                            // Expanded touch target for Mine Elevator floor buttons!
+                        }
+                        else if (_cfg.SafeDialogueAndTooltip && activeMenu is DialogueBox db && db.isQuestion && !db.transitioning && db.safetyTimer <= 0 && db.responseCC != null && db.responseCC.Count > 0 && TrySafeDialogueResponseTap(db, ui))
+                        {
+                            // 1st tap highlights choice, 2nd tap confirms cleanly (prevents Heart Event mis-taps!)
+                        }
                         else
                         {
                             _craftHoverMenu = null;
                             _craftHoveredBtn = null;
                             _junimoHoverMenu = null;
                             _junimoHoveredSlot = null;
+                            _dlgHoverMenu = null;
+                            _dlgHoveredIdx = -1;
                             try { activeMenu.performHoverAction(ui.X, ui.Y); } catch { }
                             try { activeMenu.receiveLeftClick(ui.X, ui.Y, true); } catch { }
                             try { activeMenu.releaseLeftClick(ui.X, ui.Y); } catch { }
@@ -1072,6 +1322,73 @@ namespace SDVMobileControls
             }
 
             ApplyToPad(pad, Vector2.Zero, false, false, false);
+            return true;
+        }
+
+        private static bool TryClickExpandedElevator(MineElevatorMenu mem, Point ui)
+        {
+            ClickableComponent best = null;
+            float bestDistSq = float.MaxValue;
+            const int pad = 16;
+            for (int i = 0; i < mem.elevators.Count; i++)
+            {
+                var cc = mem.elevators[i];
+                if (cc == null) continue;
+                var expanded = new Rectangle(cc.bounds.X - pad, cc.bounds.Y - pad, cc.bounds.Width + pad * 2, cc.bounds.Height + pad * 2);
+                if (expanded.Contains(ui))
+                {
+                    float dx = cc.bounds.Center.X - ui.X;
+                    float dy = cc.bounds.Center.Y - ui.Y;
+                    float dSq = dx * dx + dy * dy;
+                    if (dSq < bestDistSq)
+                    {
+                        bestDistSq = dSq;
+                        best = cc;
+                    }
+                }
+            }
+            if (best == null) return false;
+            try { mem.performHoverAction(best.bounds.Center.X, best.bounds.Center.Y); } catch { }
+            try { mem.receiveLeftClick(best.bounds.Center.X, best.bounds.Center.Y, true); } catch { }
+            return true;
+        }
+
+        private bool TrySafeDialogueResponseTap(DialogueBox db, Point ui)
+        {
+            int hitIdx = -1;
+            for (int i = 0; i < db.responseCC.Count; i++)
+            {
+                var cc = db.responseCC[i];
+                if (cc != null && cc.bounds.Contains(ui))
+                {
+                    hitIdx = i;
+                    break;
+                }
+            }
+            if (hitIdx < 0)
+            {
+                _dlgHoverMenu = null;
+                _dlgHoveredIdx = -1;
+                return false;
+            }
+
+            if (!ReferenceEquals(_dlgHoverMenu, db) || _dlgHoveredIdx != hitIdx)
+            {
+                _dlgHoverMenu = db;
+                _dlgHoveredIdx = hitIdx;
+                db.selectedResponse = hitIdx;
+                try { db.performHoverAction(ui.X, ui.Y); } catch { }
+                try { Game1.playSound("smallSelect"); } catch { }
+                return true;
+            }
+
+            // 2nd tap on the same highlighted response -> confirm!
+            _dlgHoverMenu = null;
+            _dlgHoveredIdx = -1;
+            db.selectedResponse = hitIdx;
+            try { db.performHoverAction(ui.X, ui.Y); } catch { }
+            try { db.receiveLeftClick(ui.X, ui.Y, true); } catch { }
+            try { db.releaseLeftClick(ui.X, ui.Y); } catch { }
             return true;
         }
 
@@ -1174,7 +1491,8 @@ namespace SDVMobileControls
             bool showInvShop = _cfg.MobileShopAndDrag && (_invShop.IsPopupOpen || _invShop.IsDraggingItem || _invShop.HasSelectedSlot);
             bool showCraftHint = _cfg.SafeCrafting && _craftHoveredBtn != null && ReferenceEquals(_craftHoverMenu, GetActiveCraftingPage(Game1.activeClickableMenu));
             bool showJunimoHint = _cfg.SafeCrafting && _junimoHoveredSlot != null && ReferenceEquals(_junimoHoverMenu, Game1.activeClickableMenu as JunimoNoteMenu);
-            if (!showInvCtx && !showKeyOnly && !showEscOnly && !allowCustomKeys && !showInvShop && !showCraftHint && !showJunimoHint)
+            bool showDlgHint = _cfg.SafeDialogueAndTooltip && _dlgHoveredIdx >= 0 && ReferenceEquals(_dlgHoverMenu, Game1.activeClickableMenu as DialogueBox) && _dlgHoverMenu.responseCC != null && _dlgHoveredIdx < _dlgHoverMenu.responseCC.Count;
+            if (!showInvCtx && !showKeyOnly && !showEscOnly && !allowCustomKeys && !showInvShop && !showCraftHint && !showJunimoHint && !showDlgHint)
                 return;
 
             EnsureTextures(sb.GraphicsDevice);
@@ -1188,41 +1506,45 @@ namespace SDVMobileControls
                 DrawMinimalPill(sb, _ctxHalfRect, "1/2", br != null && br.GetHalfStackMode(pad));
                 DrawMinimalPill(sb, _ctxXferRect, "XFER", br != null && br.GetQuickTransferMode(pad));
                 DrawMinimalPill(sb, _ctxKeyRect, "KEY", false);
-                DrawMinimalPill(sb, _ctxEscRect, "ESC", false);
+                PixelUi.DrawPixelPill(sb, _pixel, br, _ctxEscRect, "ESC", PixelRole.Special, false, _vpH);
             }
             else if (showKeyOnly)
             {
                 DrawMinimalPill(sb, _ctxX1Rect, "KEY", false);
                 if (Game1.activeClickableMenu.readyToClose())
-                    DrawMinimalPill(sb, _ctxHalfRect, "ESC", false);
+                    PixelUi.DrawPixelPill(sb, _pixel, br, _ctxHalfRect, "ESC", PixelRole.Special, false, _vpH);
             }
             else if (showEscOnly)
             {
-                DrawMinimalPill(sb, _ctxQuestEscRect, "ESC", false);
+                PixelUi.DrawPixelPill(sb, _pixel, br, _ctxQuestEscRect, "ESC", PixelRole.Special, false, _vpH);
             }
 
-            if (showCraftHint || showJunimoHint)
+            if (showCraftHint || showJunimoHint || showDlgHint)
             {
-                Rectangle rb = showCraftHint ? _craftHoveredBtn.bounds : _junimoHoveredSlot.bounds;
-                string hTxt = showCraftHint ? "CHAM LAN NUA DE CHE TAO" : "CHAM LAN NUA DE BO VAO GOI";
+                Rectangle rb = showCraftHint
+                    ? _craftHoveredBtn.bounds
+                    : (showJunimoHint ? _junimoHoveredSlot.bounds : _dlgHoverMenu.responseCC[_dlgHoveredIdx].bounds);
+                string hTxt = showCraftHint
+                    ? "CHAM LAN NUA DE CHE TAO"
+                    : (showJunimoHint ? "CHAM LAN NUA DE BO VAO GOI" : "CHAM LAN NUA DE CHON CAU TRA LOI");
                 Vector2 tl = UiToViewport(new Point(rb.X, rb.Y));
                 Vector2 brPt = UiToViewport(new Point(rb.Right, rb.Bottom));
                 var vr = new Rectangle((int)tl.X, (int)tl.Y, Math.Max(16, (int)(brPt.X - tl.X)), Math.Max(16, (int)(brPt.Y - tl.Y)));
-                DrawRectOutline(sb, vr, Math.Max(2, _vpH / 280), new Color(255, 214, 64));
+                PixelUi.DrawPixelTileTarget(sb, _pixel, vr, new Color(248, 206, 86), 0.12f);
 
-                int bw = Math.Clamp((int)(_vpW * 0.36f), 230, _vpW - 40);
-                int bh = Math.Max(30, (int)(_vpH * 0.056f));
+                int px = PixelUi.Step(_vpH);
+                int bw = Math.Clamp((int)(_vpW * 0.40f), 250, _vpW - 40);
+                int bh = Math.Max(32, (int)(_vpH * 0.058f));
                 var hintR = new Rectangle((_vpW - bw) / 2, _vpH - bh - Math.Max(14, _vpH / 34), bw, bh);
-                sb.Draw(_pixel, hintR, new Color(42, 28, 14) * 0.90f);
-                DrawRectOutline(sb, hintR, Math.Max(2, _vpH / 360), new Color(255, 214, 64));
-                br?.DrawCenteredString(sb, _pixel, hTxt, hintR, new Color(255, 238, 175), Math.Max(1, _vpH / 320));
+                PixelUi.DrawParchmentBox(sb, _pixel, hintR, px, 0.94f);
+                br?.DrawCenteredString(sb, _pixel, hTxt, hintR, new Color(74, 37, 17), Math.Max(1, _vpH / 320));
             }
 
             if (allowCustomKeys)
                 DrawCustomKeyButtons(sb);
 
             if (showInvShop)
-                _invShop.Draw(sb, _pixel, _circle, br, Game1.activeClickableMenu, UiToViewport, ViewportToUi, _vpW, _vpH);
+                _invShop.Draw(sb, _pixel, _circle, br, Game1.activeClickableMenu, UiToViewport, ViewportToUi, _vpW, _vpH, _cfg.SafeDialogueAndTooltip);
         }
 
         public void UpdateGameplay(object pad, GameTime gameTime)
@@ -1279,18 +1601,20 @@ namespace SDVMobileControls
             TickCustomButtonPulses();
 
             string curLocName = Game1.currentLocation?.NameOrUniqueName;
+            double nowSec = gameTime != null ? gameTime.TotalGameTime.TotalSeconds : Environment.TickCount64 / 1000.0;
             if (curLocName != _lastLocationName)
             {
                 _lastLocationName = curLocName;
                 ClearPath();
+                UpdateAutoCombatMode(nowSec);
             }
 
             if (_toolRippleAlpha > 0f) _toolRippleAlpha = Math.Max(0f, _toolRippleAlpha - 0.12f);
             if (_interactRippleAlpha > 0f) _interactRippleAlpha = Math.Max(0f, _interactRippleAlpha - 0.12f);
 
-            double nowSec = gameTime != null ? gameTime.TotalGameTime.TotalSeconds : Environment.TickCount64 / 1000.0;
             PollAutoKeyboard(pad, br, nowSec);
             TouchCollection touches = TouchPanel.GetState();
+            PollGamepadAutoHide(touches.Count);
 
             // --- 0. Process User Custom PC Key Buttons FIRST (never steal gameplay buttons!) ---
             if (_cfg.CustomKeys.Count > 0)
@@ -1329,8 +1653,10 @@ namespace SDVMobileControls
             bool sawSlingshot = false;
             Vector2 stickVec = Vector2.Zero;
             Furniture heldFurn = GetHeldRotatableFurniture();
+            MeleeWeapon heldSpecWeapon = GetHeldSpecialWeapon();
             bool holdingSlingshot = Game1.player?.CurrentTool is Slingshot;
             if (!holdingSlingshot) _slingshotTouchId = -1;
+            bool sawVertTb = false;
 
             for (int i = 0; i < touches.Count; i++)
             {
@@ -1402,6 +1728,29 @@ namespace SDVMobileControls
                             br?.TriggerVirtualKeyboard(pad);
                             continue;
                         }
+                        if (!_btnEmoteRect.IsEmpty && _btnEmoteRect.Contains(vpPt))
+                        {
+                            br?.SetPlayerRequestedMenuOpen(pad, true);
+                            _ctxTouchId = tl.Id;
+                            if (Game1.activeClickableMenu == null && Game1.player != null && Game1.player.CanEmote())
+                            {
+                                try
+                                {
+                                    var em = new EmoteMenu();
+                                    em.gamepadMode = false;
+                                    Game1.activeClickableMenu = em;
+                                }
+                                catch { }
+                            }
+                            ClearPath();
+                            ApplyToPad(pad, Vector2.Zero, false, false, false);
+                            return;
+                        }
+                        if (!_btnCtlModeRect.IsEmpty && _btnCtlModeRect.Contains(vpPt))
+                        {
+                            CycleControlMode(nowSec);
+                            continue;
+                        }
                         if (_btnEditRect.Contains(vpPt))
                         {
                             EnterEditLayoutMode();
@@ -1409,6 +1758,34 @@ namespace SDVMobileControls
                             continue;
                         }
                     }
+                }
+
+                // Optional Mobile Vertical Scrollable 36-Slot Toolbar (left edge)
+                if (_cfg.VerticalToolbar && _verticalToolbar.HandleTouch(tl, vp, out bool vSel))
+                {
+                    sawVertTb = true;
+                    if (vSel)
+                    {
+                        _autoToolPrevSlot = -1;
+                        _autoToolRestoreTimer = 0;
+                        _repeatActive = false;
+                    }
+                    continue;
+                }
+
+                // Auto-context Weapon Special Move Button (SPEC: Parry / Slam / Flurry)
+                if (heldSpecWeapon != null && tl.State == TouchLocationState.Pressed && _btnSpecRect.Contains(vpPt))
+                {
+                    if (!IsWeaponSpecialOnCooldown(heldSpecWeapon) && Game1.player != null && !Game1.player.UsingTool)
+                    {
+                        try { heldSpecWeapon.animateSpecialMove(Game1.player); } catch { }
+                        ClearPath();
+                    }
+                    _toolbarTouchId = tl.Id;
+                    _toolbarTappedSlot = -1;
+                    _toolbarSwiped = true;
+                    sawToolbar = true;
+                    continue;
                 }
 
                 // Auto-context Furniture Rotate Button (ROT)
@@ -1457,6 +1834,8 @@ namespace SDVMobileControls
                         if (!_toolbarSwiped && _toolbarTappedSlot >= 0 && Game1.player != null)
                         {
                             Game1.player.CurrentToolIndex = _toolbarTappedSlot;
+                            _autoToolPrevSlot = -1;
+                            _autoToolRestoreTimer = 0;
                             try { Game1.playSound("stoneStep"); } catch { }
                         }
                         _toolbarTouchId = -1;
@@ -1665,6 +2044,7 @@ namespace SDVMobileControls
             }
 
             if (!sawToolbar) { _toolbarTouchId = -1; _toolbarTappedSlot = -1; _toolbarSwiped = false; }
+            if (!sawVertTb) _verticalToolbar.ResetTouch();
             if (!sawJoy) { _joyTouchId = -1; _joyActivated = false; }
             if (!sawTool) _toolTouchId = -1;
             if (!sawInteract) _interactTouchId = -1;
@@ -1690,11 +2070,77 @@ namespace SDVMobileControls
             if (stickVec == Vector2.Zero && !_toolPressed && !_interactPressed && !sawSlingshot && _path != null)
                 stickVec = StepPathFollower();
 
-            // --- 4. Action Pulses ---
+            // --- 4. Action Pulses + Auto-Repeat 1-tap chop/mine until broken ---
             bool fireX = _toolPressed || sawSlingshot;
             bool fireA = _interactPressed;
             if (_actionPulseXFrames > 0) { _actionPulseXFrames--; fireX = true; }
             if (_actionPulseAFrames > 0) { _actionPulseAFrames--; fireA = true; }
+
+            if (_repeatActive)
+            {
+                Farmer rw = Game1.player;
+                GameLocation rloc = Game1.currentLocation;
+                if (!_cfg.AutoRepeat || rw == null || rloc == null || stickVec.LengthSquared() > 0.04f || _toolPressed || _interactPressed || sawSlingshot || rw.Stamina <= 2f)
+                {
+                    _repeatActive = false;
+                }
+                else if (!rw.UsingTool)
+                {
+                    if (_repeatCooldown > 0)
+                    {
+                        _repeatCooldown--;
+                    }
+                    else
+                    {
+                        int cheb = Math.Max(Math.Abs(rw.TilePoint.X - _repeatTile.X), Math.Abs(rw.TilePoint.Y - _repeatTile.Y));
+                        if (cheb <= 1)
+                        {
+                            TileIntent nextIntent = AutoToolAndCombat.InspectTile(rloc, _repeatTile, rw, _cfg.AutoTool);
+                            if (nextIntent.Repeatable && nextIntent.Kind == TileActionKind.UseTool)
+                            {
+                                if (nextIntent.PreferredToolSlot >= 0 && nextIntent.PreferredToolSlot < rw.Items.Count)
+                                    rw.CurrentToolIndex = nextIntent.PreferredToolSlot;
+                                rw.faceGeneralDirection(new Vector2(_repeatTile.X * 64f + 32f, _repeatTile.Y * 64f + 32f));
+                                _actionPulseXFrames = 2;
+                                fireX = true;
+                                _repeatCooldown = 7;
+                            }
+                            else
+                            {
+                                _repeatActive = false;
+                            }
+                        }
+                        else
+                        {
+                            _repeatActive = false;
+                        }
+                    }
+                }
+            }
+
+            // --- 4b. Optional restore previous item slot after Auto-Tool finishes ---
+            if (_autoToolPrevSlot >= 0)
+            {
+                Farmer fw = Game1.player;
+                if (!_cfg.RestoreToolAfterAuto || fw == null)
+                {
+                    _autoToolPrevSlot = -1;
+                    _autoToolRestoreTimer = 0;
+                }
+                else if (fw.UsingTool || _repeatActive || fireX || fireA)
+                {
+                    _autoToolRestoreTimer = 30;
+                }
+                else if (_autoToolRestoreTimer > 0)
+                {
+                    if (--_autoToolRestoreTimer == 0)
+                    {
+                        if (_autoToolPrevSlot >= 0 && _autoToolPrevSlot < fw.Items.Count)
+                            fw.CurrentToolIndex = _autoToolPrevSlot;
+                        _autoToolPrevSlot = -1;
+                    }
+                }
+            }
 
             // --- 5. Optional Auto-Attack (DEFAULT OFF) ---
             if (_cfg.AutoAttack && !fireX && !fireA && !sawSlingshot)
@@ -2371,15 +2817,32 @@ namespace SDVMobileControls
         private void TriggerTileIntent(Farmer who, Point tile, TileIntent intent)
         {
             if (intent.PreferredToolSlot >= 0 && intent.PreferredToolSlot < who.Items.Count)
+            {
+                if (_cfg.RestoreToolAfterAuto && who.CurrentToolIndex != intent.PreferredToolSlot && _autoToolPrevSlot < 0)
+                {
+                    _autoToolPrevSlot = who.CurrentToolIndex;
+                    _autoToolRestoreTimer = 36;
+                }
                 who.CurrentToolIndex = intent.PreferredToolSlot;
+            }
 
             Vector2 targetCenter = new Vector2(tile.X * 64f + 32f, tile.Y * 64f + 32f);
             who.faceGeneralDirection(targetCenter);
 
             if (intent.Kind == TileActionKind.UseTool)
+            {
                 _actionPulseXFrames = 3;
+                if (_cfg.AutoRepeat && intent.Repeatable)
+                {
+                    _repeatActive = true;
+                    _repeatTile = tile;
+                    _repeatCooldown = 8;
+                }
+            }
             else if (intent.Kind == TileActionKind.Interact)
+            {
                 _actionPulseAFrames = 3;
+            }
         }
 
         // =========================================================================
@@ -2665,20 +3128,33 @@ namespace SDVMobileControls
                 return;
             }
 
-            // 1. Tap-to-Move green target square
+            // 1. Tap-to-Move Crisp 16-Bit Pixel Target Tile Brackets (subtle, non-distracting!)
             if (_hasTargetTile && _path != null && Game1.currentLocation != null)
             {
                 Vector2 tl = WorldToViewport(new Vector2(_targetTile.X * 64f, _targetTile.Y * 64f));
                 Vector2 br = WorldToViewport(new Vector2((_targetTile.X + 1) * 64f, (_targetTile.Y + 1) * 64f));
-                int w = Math.Max(8, (int)(br.X - tl.X));
-                int h = Math.Max(8, (int)(br.Y - tl.Y));
+                int w = Math.Max(12, (int)(br.X - tl.X));
+                int h = Math.Max(12, (int)(br.Y - tl.Y));
                 var tileRect = new Rectangle((int)tl.X, (int)tl.Y, w, h);
-
-                sb.Draw(_pixel, tileRect, new Color(76, 217, 100) * 0.22f);
-                DrawRectOutline(sb, tileRect, Math.Max(2, w / 16), new Color(98, 240, 122) * 0.85f);
+                PixelUi.DrawPixelTileTarget(sb, _pixel, tileRect, new Color(118, 226, 128), 0.14f);
             }
 
-            // 2. Collapsible Top Utility Bar (BAG | MAP | QST | SAVE | KEY | EDIT | <)
+            // Optional Auto-Hide all touch buttons while physical Bluetooth GamePad is active!
+            if (_gamepadHideHud && !_saveMenuOpen)
+            {
+                double gNow = Environment.TickCount64 / 1000.0;
+                if (!string.IsNullOrEmpty(_saveToastText) && gNow < _saveToastUntil)
+                    DrawToastBanner(sb, gNow < _ramWarningUntil);
+                return;
+            }
+
+            // 1b. Optional Left-Edge Vertical Scrollable 36-Slot Pixel Toolbar
+            if (_cfg.VerticalToolbar && !_saveMenuOpen)
+            {
+                _verticalToolbar.Draw(sb, _pixel, _vpH);
+            }
+
+            // 2. Collapsible Top Utility Bar (BAG | MAP | QST | SAVE | KEY | [Smiley Emote] | [CTL] | EDIT | <)
             double nowSec = Environment.TickCount64 / 1000.0;
             bool isRamWarn = nowSec < _ramWarningUntil;
             if (_cfg.ShowTopUtility)
@@ -2692,36 +3168,30 @@ namespace SDVMobileControls
                     {
                         double rate = _ramCritical ? 6.0 : 3.0;
                         bool pulse = ((int)(nowSec * rate) % 2) == 0;
-                        Color warnBg = _ramCritical
-                            ? (pulse ? new Color(235, 24, 24) : new Color(160, 12, 12)) * 0.96f
-                            : (pulse ? new Color(230, 138, 16) : new Color(185, 86, 14)) * 0.92f;
-                        Color warnBorder = pulse ? new Color(255, 232, 96) : Color.White;
-                        sb.Draw(_pixel, _btnSaveRect, warnBg);
-                        DrawRectOutline(sb, _btnSaveRect, Math.Max(2, _vpH / 300), warnBorder);
-                        int fs = Math.Max(1, _vpH / 320);
-                        _bridge?.DrawCenteredString(sb, _pixel, "SAVE!", _btnSaveRect, Color.White, fs);
+                        PixelUi.DrawPixelPill(sb, _pixel, _bridge, _btnSaveRect, "SAVE!",
+                            _ramCritical ? PixelRole.Special : PixelRole.Warn, pulse, _vpH, -1, 0.96f);
                     }
                     else
                     {
                         DrawMinimalPill(sb, _btnSaveRect, "SAVE", _saveMenuOpen);
                     }
                     DrawMinimalPill(sb, _btnKeyRect, "KEY", false);
+                    if (!_btnEmoteRect.IsEmpty)
+                        PixelUi.DrawPixelSmileyButton(sb, _pixel, _btnEmoteRect, false, _vpH);
+                    if (!_btnCtlModeRect.IsEmpty)
+                        DrawMinimalPill(sb, _btnCtlModeRect, "CTL", _inCombatAutoSwitched);
                     DrawMinimalPill(sb, _btnEditRect, "EDIT", false);
                 }
                 DrawMinimalPill(sb, _btnCollapseRect, _topBarCollapsed ? ">" : "<", false);
             }
 
-            // 3. Mode-specific overlay (ShowTouchHint defaults OFF -> ZERO flashing in Invisible mode!)
+            // 3. Mode-specific Pixel-Art Overlay (subtle & low-opacity idle -> zero distraction!)
             if (_cfg.Mode == MobileControlMode.VisibleJoystick2Btn)
             {
-                Vector2 jCenter = (_joyTouchId >= 0 && _joyActivated) ? _joyOrigin : _visJoyCenter;
-                Vector2 jKnob = (_joyTouchId >= 0 && _joyActivated) ? _joyKnob : jCenter;
-                float alpha = (_joyTouchId >= 0 && _joyActivated) ? 0.55f : 0.30f;
-
-                DrawCircle(sb, jCenter, _visJoyRadius, Color.Black * (alpha * 0.55f));
-                DrawRing(sb, jCenter, _visJoyRadius, Color.White * alpha);
-                DrawCircle(sb, jKnob, _visJoyRadius * 0.42f, Color.White * (alpha + 0.18f));
-
+                bool joyAct = (_joyTouchId >= 0 && _joyActivated);
+                Vector2 jCenter = joyAct ? _joyOrigin : _visJoyCenter;
+                Vector2 jKnob = joyAct ? _joyKnob : jCenter;
+                PixelUi.DrawPixelJoystick(sb, jCenter, _visJoyRadius, jKnob, joyAct, _vpH, 0.92f);
                 DrawActionCircle(sb, _visToolRect, "USE", _toolPressed, isTool: true);
                 DrawActionCircle(sb, _visActRect, "ACT", _interactPressed, isTool: false);
             }
@@ -2729,47 +3199,47 @@ namespace SDVMobileControls
             {
                 if (_joyTouchId >= 0 && _joyActivated)
                 {
-                    DrawRing(sb, _joyOrigin, _activeJoyRadius, Color.White * 0.22f);
-                    DrawCircle(sb, _joyKnob, _activeJoyRadius * 0.34f, Color.White * 0.26f);
+                    PixelUi.DrawPixelJoystick(sb, _joyOrigin, _activeJoyRadius, _joyKnob, true, _vpH, 0.45f);
                 }
-                int borderT = Math.Max(2, _vpH / 340);
                 if (_toolRippleAlpha > 0.02f)
                 {
-                    sb.Draw(_pixel, _invToolRect, new Color(255, 195, 77) * (_toolRippleAlpha * 0.14f));
-                    DrawRectOutline(sb, _invToolRect, borderT, new Color(255, 214, 120) * (_toolRippleAlpha * 0.36f));
+                    PixelUi.DrawPixelTileTarget(sb, _pixel, _invToolRect, new Color(235, 186, 98) * (_toolRippleAlpha * 0.55f), 0.10f * _toolRippleAlpha);
                 }
                 if (_interactRippleAlpha > 0.02f)
                 {
-                    sb.Draw(_pixel, _invActRect, new Color(84, 214, 128) * (_interactRippleAlpha * 0.14f));
-                    DrawRectOutline(sb, _invActRect, borderT, new Color(130, 240, 165) * (_interactRippleAlpha * 0.36f));
+                    PixelUi.DrawPixelTileTarget(sb, _pixel, _invActRect, new Color(118, 212, 134) * (_interactRippleAlpha * 0.55f), 0.10f * _interactRippleAlpha);
                 }
             }
 
-            // 4. User Custom PC Key Buttons
+            // 4. User Custom PC Key Buttons (Stardew Pixel style)
             if (_cfg.CustomKeys.Count > 0)
                 DrawCustomKeyButtons(sb);
 
-            // 4b. Compact ROW button beside Toolbar (when player has > 12 inventory slots)
-            if (!_btnToolbarRowRect.IsEmpty && !_saveMenuOpen)
+            // 4b. Compact ROW button beside Horizontal PC Toolbar (hidden when Vertical Toolbar is active)
+            if (!_cfg.VerticalToolbar && !_btnToolbarRowRect.IsEmpty && !_saveMenuOpen)
             {
                 DrawMinimalPill(sb, _btnToolbarRowRect, "ROW", false);
             }
 
-            // 4c. Auto-Context Furniture Rotate Button (only visible when holding rotatable furniture!)
+            // 4c. Auto-Context Furniture Rotate Button (ROT)
             if (GetHeldRotatableFurniture() != null && !_saveMenuOpen)
             {
-                int rbt = Math.Max(2, _vpH / 340);
-                sb.Draw(_pixel, _btnRotateRect, new Color(214, 134, 34) * 0.86f);
-                DrawRectOutline(sb, _btnRotateRect, rbt, new Color(255, 232, 160));
-                _bridge?.DrawCenteredString(sb, _pixel, "ROT", _btnRotateRect, Color.White, Math.Max(1, _vpH / 290));
+                PixelUi.DrawPixelPill(sb, _pixel, _bridge, _btnRotateRect, "ROT", PixelRole.Tool, false, _vpH, Math.Max(1, _vpH / 290), 0.92f);
             }
 
-            // 4d. Slingshot Aiming Crosshair & Guide Ring while dragging
+            // 4d. Auto-Context Weapon Special Move Button (SPEC: Parry / Slam / Flurry)
+            MeleeWeapon specW = GetHeldSpecialWeapon();
+            if (specW != null && !_saveMenuOpen)
+            {
+                bool onCd = IsWeaponSpecialOnCooldown(specW);
+                PixelUi.DrawPixelPill(sb, _pixel, _bridge, _btnSpecRect, "SPEC", PixelRole.Special, false, _vpH, Math.Max(1, _vpH / 290), onCd ? 0.40f : 0.88f);
+            }
+
+            // 4e. Slingshot Pixel Aiming Reticle while dragging
             if (_slingshotTouchId >= 0 && Game1.player?.CurrentTool is Slingshot)
             {
                 float cr = Math.Max(24f, Math.Min(_vpW, _vpH) * 0.036f);
-                DrawRing(sb, _slingshotVpPos, cr, new Color(255, 92, 72) * 0.85f);
-                DrawCircle(sb, _slingshotVpPos, 4f, Color.White * 0.92f);
+                PixelUi.DrawPixelCrosshair(sb, _pixel, _slingshotVpPos, cr, _vpH);
             }
 
             // 5. Stardew-Pixel Multi-Slot Save Menu Modal
@@ -2778,39 +3248,35 @@ namespace SDVMobileControls
 
             // 6. Save Feedback & High-RAM Warning Toast Banner
             if (!string.IsNullOrEmpty(_saveToastText) && nowSec < _saveToastUntil)
-            {
-                int px = Math.Max(2, (int)Math.Round(_vpH / 320f));
-                int tw = isRamWarn
-                    ? Math.Clamp((int)(_vpW * 0.68f), 340, _vpW - 32)
-                    : Math.Clamp((int)(_vpW * 0.42f), 260, _vpW - 40);
-                int th = Math.Max(36, (int)(_vpH * 0.068f));
-                var toastR = new Rectangle((_vpW - tw) / 2, _vpH - th - Math.Max(18, _vpH / 26), tw, th);
-                Color boxFill = isRamWarn ? new Color(92, 18, 16) * 0.95f : new Color(46, 30, 16) * 0.94f;
-                Color boxOut = isRamWarn ? new Color(255, 96, 76) : new Color(246, 198, 86);
-                Color boxIn = isRamWarn ? new Color(255, 208, 92) : new Color(138, 86, 42);
-                DrawStardewPixelBox(sb, toastR, boxFill, boxOut, boxIn, px);
-                int fs = Math.Max(1, _vpH / 300);
-                _bridge?.DrawCenteredString(sb, _pixel, _saveToastText, toastR, new Color(255, 240, 190), fs);
-            }
+                DrawToastBanner(sb, isRamWarn);
+        }
+
+        private void DrawToastBanner(SpriteBatch sb, bool isRamWarn)
+        {
+            int px = Math.Max(2, (int)Math.Round(_vpH / 320f));
+            int tw = isRamWarn
+                ? Math.Clamp((int)(_vpW * 0.68f), 340, _vpW - 32)
+                : Math.Clamp((int)(_vpW * 0.42f), 260, _vpW - 40);
+            int th = Math.Max(36, (int)(_vpH * 0.068f));
+            var toastR = new Rectangle((_vpW - tw) / 2, _vpH - th - Math.Max(18, _vpH / 26), tw, th);
+            Color boxFill = isRamWarn ? new Color(92, 18, 16) * 0.95f : new Color(46, 30, 16) * 0.94f;
+            Color boxOut = isRamWarn ? new Color(255, 96, 76) : new Color(246, 198, 86);
+            Color boxIn = isRamWarn ? new Color(255, 208, 92) : new Color(138, 86, 42);
+            DrawStardewPixelBox(sb, toastR, boxFill, boxOut, boxIn, px);
+            int fs = Math.Max(1, _vpH / 300);
+            _bridge?.DrawCenteredString(sb, _pixel, _saveToastText, toastR, new Color(255, 240, 190), fs);
         }
 
         private void DrawCustomKeyButtons(SpriteBatch sb)
         {
-            int bt = Math.Max(1, _vpH / 420);
             for (int i = 0; i < _cfg.CustomKeys.Count; i++)
             {
                 var btn = _cfg.CustomKeys[i];
                 Rectangle r = GetCustomKeyRect(btn);
                 bool held = _customBtnsHeldNow.Contains(btn.Id);
-
-                Color bg = held ? new Color(10, 132, 255) * 0.72f : Color.Black * 0.44f;
-                Color border = held ? Color.White * 0.85f : Color.White * 0.34f;
-                sb.Draw(_pixel, r, bg);
-                DrawRectOutline(sb, r, bt, border);
-
                 int fontSize = Math.Max(1, Math.Min(r.Height / 18, r.Width / Math.Max(1, btn.Label.Length * 9)));
                 fontSize = Math.Clamp(fontSize, 1, Math.Max(2, _vpH / 180));
-                _bridge?.DrawCenteredString(sb, _pixel, btn.Label, r, Color.White * (held ? 1.0f : 0.92f), fontSize);
+                PixelUi.DrawPixelPill(sb, _pixel, _bridge, r, btn.Label, PixelRole.CustomKey, held, _vpH, fontSize, 0.96f);
             }
         }
 
@@ -2859,25 +3325,28 @@ namespace SDVMobileControls
                     DrawMinimalPill(sb, _btnQuestRect, "QST", false);
                     DrawMinimalPill(sb, _btnSaveRect, "SAVE", false);
                     DrawMinimalPill(sb, _btnKeyRect, "KEY", false);
+                    if (!_btnEmoteRect.IsEmpty)
+                        PixelUi.DrawPixelSmileyButton(sb, _pixel, _btnEmoteRect, false, _vpH);
+                    if (!_btnCtlModeRect.IsEmpty)
+                        DrawMinimalPill(sb, _btnCtlModeRect, "CTL", false);
                     DrawMinimalPill(sb, _btnEditRect, "EDIT", false);
                 }
                 DrawMinimalPill(sb, _btnCollapseRect, _topBarCollapsed ? ">" : "<", false);
-                Color tbBorder = _editSelected == EditTarget.TopBar ? Color.Yellow : Color.White * 0.75f;
-                DrawRectOutline(sb, _topBarGroupRect, Math.Max(2, _vpH / 320), tbBorder);
+                Color tbBorder = _editSelected == EditTarget.TopBar ? new Color(255, 224, 110) : new Color(228, 198, 150) * 0.78f;
+                PixelUi.DrawPixelTileTarget(sb, _pixel, _topBarGroupRect, tbBorder, 0.06f);
             }
 
-            // Top-center Edit Layout toolbar (+PHIM / XOA / RESET / HUY / LUU)
-            int bt = Math.Max(2, _vpH / 360);
-            sb.Draw(_pixel, _editToolbarRect, new Color(24, 24, 28) * 0.92f);
-            DrawRectOutline(sb, _editToolbarRect, bt, Color.White * 0.28f);
+            // Top-center Stardew-Pixel Edit Layout toolbar (+PHIM / XOA / RESET / HUY / LUU)
+            int px = PixelUi.Step(_vpH);
+            DrawStardewPixelBox(sb, _editToolbarRect, new Color(56, 36, 20) * 0.94f, new Color(28, 16, 8), new Color(176, 116, 54), px);
 
             int fs = Math.Max(2, _vpH / 280);
-            DrawToolbarActionButton(sb, _editAddKeyBtnRect, "+PHIM", new Color(175, 82, 222), fs);
+            DrawToolbarActionButton(sb, _editAddKeyBtnRect, "+PHIM", new Color(138, 86, 176), fs);
             bool canDel = (_editSelected == EditTarget.CustomKey && _editSelectedCustomId > 0);
-            DrawToolbarActionButton(sb, _editDelKeyBtnRect, "XOA", canDel ? new Color(255, 69, 58) : new Color(72, 72, 74), fs);
-            DrawToolbarActionButton(sb, _editResetBtnRect, "RESET", new Color(142, 142, 147), fs);
-            DrawToolbarActionButton(sb, _editCancelBtnRect, "HUY", new Color(255, 149, 0), fs);
-            DrawToolbarActionButton(sb, _editSaveBtnRect, "LUU", new Color(48, 209, 88), fs);
+            DrawToolbarActionButton(sb, _editDelKeyBtnRect, "XOA", canDel ? new Color(196, 60, 48) : new Color(92, 76, 62), fs);
+            DrawToolbarActionButton(sb, _editResetBtnRect, "RESET", new Color(132, 108, 82), fs);
+            DrawToolbarActionButton(sb, _editCancelBtnRect, "HUY", new Color(196, 126, 40), fs);
+            DrawToolbarActionButton(sb, _editSaveBtnRect, "LUU", new Color(66, 154, 74), fs);
 
             // In-Game PC Key Picker Modal
             if (_keyPickerOpen)
@@ -2886,24 +3355,21 @@ namespace SDVMobileControls
 
         private void DrawKeyPickerModal(SpriteBatch sb)
         {
-            sb.Draw(_pixel, new Rectangle(0, 0, _vpW, _vpH), Color.Black * 0.55f);
-            int bt = Math.Max(2, _vpH / 320);
-            sb.Draw(_pixel, _pickerPanelRect, new Color(28, 28, 32) * 0.96f);
-            DrawRectOutline(sb, _pickerPanelRect, bt, new Color(175, 82, 222) * 0.90f);
+            sb.Draw(_pixel, new Rectangle(0, 0, _vpW, _vpH), Color.Black * 0.56f);
+            int px = PixelUi.Step(_vpH);
+            DrawStardewPixelBox(sb, _pickerPanelRect, new Color(246, 224, 176), new Color(74, 37, 17), new Color(176, 108, 48), px * 2);
 
             int titleFs = Math.Max(2, _vpH / 250);
             var hdrRect = new Rectangle(_pickerPanelRect.X + 16, _pickerPanelRect.Y + 8, _pickerPanelRect.Width - 120, Math.Max(36, _vpH / 16));
-            _bridge?.DrawCenteredString(sb, _pixel, "CHON PHIM PC DE THEM", hdrRect, Color.White, titleFs);
-            DrawToolbarActionButton(sb, _pickerCloseRect, "X", new Color(255, 69, 58), titleFs);
+            _bridge?.DrawCenteredString(sb, _pixel, "CHON PHIM PC DE THEM", hdrRect, new Color(74, 37, 17), titleFs);
+            DrawStardewPixelButton(sb, _pickerCloseRect, "X", new Color(204, 62, 48), new Color(240, 118, 102), new Color(138, 30, 22), Color.White, titleFs, px);
 
             int cellFs = Math.Max(1, _vpH / 300);
             for (int k = 0; k < PcKeyCatalog.Length; k++)
             {
                 Rectangle cell = GetKeyPickerCellRect(k);
-                Color bg = (k < 12) ? new Color(10, 132, 255) * 0.45f : new Color(58, 58, 66) * 0.90f;
-                sb.Draw(_pixel, cell, bg);
-                DrawRectOutline(sb, cell, Math.Max(1, _vpH / 500), Color.White * 0.28f);
-                _bridge?.DrawCenteredString(sb, _pixel, PcKeyCatalog[k].Label, cell, Color.White, cellFs);
+                PixelUi.DrawPixelPill(sb, _pixel, _bridge, cell, PcKeyCatalog[k].Label,
+                    (k < 12) ? PixelRole.Tool : PixelRole.CustomKey, false, _vpH, cellFs, 0.96f);
             }
         }
 
@@ -2928,63 +3394,49 @@ namespace SDVMobileControls
 
         private void DrawEditableRectBox(SpriteBatch sb, Rectangle r, string label, Color accent, bool selected)
         {
-            int t = Math.Max(3, _vpH / 240);
-            sb.Draw(_pixel, r, accent * (selected ? 0.34f : 0.20f));
-            DrawRectOutline(sb, r, t, selected ? Color.White : accent * 0.92f);
+            int px = PixelUi.Step(_vpH);
+            Color border = selected ? new Color(255, 232, 128) : accent * 0.90f;
+            sb.Draw(_pixel, r, accent * (selected ? 0.30f : 0.16f));
+            PixelUi.DrawPixelTileTarget(sb, _pixel, r, border, 0.04f);
+            DrawRectOutline(sb, r, px, border * 0.55f);
 
             int fs = Math.Max(1, Math.Min(r.Height / 18, Math.Max(2, _vpH / 240)));
             _bridge?.DrawCenteredString(sb, _pixel, label, r, Color.White, fs);
 
             int g = Math.Clamp(Math.Min(r.Width, r.Height) / 3, 18, Math.Max(24, _vpH / 28));
             var gripRect = new Rectangle(r.Right - g, r.Bottom - g, g, g);
-            sb.Draw(_pixel, gripRect, Color.White * (selected ? 0.94f : 0.72f));
-            DrawRectOutline(sb, gripRect, Math.Max(2, t / 2), accent);
+            DrawStardewPixelButton(sb, gripRect, "+", selected ? new Color(224, 174, 62) : new Color(168, 122, 64), new Color(255, 224, 140), new Color(96, 56, 20), Color.White, Math.Max(1, fs - 1), Math.Max(1, px / 2));
         }
 
         private void DrawEditableCircleBox(SpriteBatch sb, Vector2 center, float radius, string label, Color accent, bool selected)
         {
-            DrawCircle(sb, center, radius, accent * (selected ? 0.34f : 0.22f));
-            DrawRing(sb, center, radius, selected ? Color.White : accent * 0.95f);
             int d = (int)(radius * 2f);
             var box = new Rectangle((int)(center.X - radius), (int)(center.Y - radius), d, d);
-            int fs = Math.Max(2, _vpH / 230);
-            _bridge?.DrawCenteredString(sb, _pixel, label, box, Color.White, fs);
+            PixelUi.DrawPixelMedallion(sb, _pixel, _bridge, box, label, selected ? PixelRole.Active : PixelRole.Neutral, selected, _vpH);
+            PixelUi.DrawPixelTileTarget(sb, _pixel, box, selected ? new Color(255, 232, 128) : accent * 0.85f, 0.04f);
 
-            DrawRectOutline(sb, box, Math.Max(1, _vpH / 450), Color.White * 0.35f);
+            int px = PixelUi.Step(_vpH);
             int g = Math.Max(22, _vpH / 28);
             var gripRect = new Rectangle(box.Right - g, box.Bottom - g, g, g);
-            sb.Draw(_pixel, gripRect, Color.White * (selected ? 0.92f : 0.70f));
-            DrawRectOutline(sb, gripRect, 2, accent);
+            DrawStardewPixelButton(sb, gripRect, "+", selected ? new Color(224, 174, 62) : new Color(168, 122, 64), new Color(255, 224, 140), new Color(96, 56, 20), Color.White, 1, Math.Max(1, px / 2));
         }
 
         private void DrawToolbarActionButton(SpriteBatch sb, Rectangle r, string text, Color tint, int fontSize)
         {
-            sb.Draw(_pixel, r, tint * 0.88f);
-            DrawRectOutline(sb, r, Math.Max(1, _vpH / 440), Color.White * 0.35f);
-            _bridge?.DrawCenteredString(sb, _pixel, text, r, Color.White, fontSize);
+            int px = PixelUi.Step(_vpH);
+            Color hi = new Color(Math.Min(255, tint.R + 42), Math.Min(255, tint.G + 42), Math.Min(255, tint.B + 42));
+            Color lo = new Color(Math.Max(0, tint.R - 46), Math.Max(0, tint.G - 46), Math.Max(0, tint.B - 46));
+            DrawStardewPixelButton(sb, r, text, tint * 0.92f, hi * 0.90f, lo * 0.90f, Color.White, fontSize, px);
         }
 
         private void DrawMinimalPill(SpriteBatch sb, Rectangle r, string label, bool active)
         {
-            Color bg = active ? new Color(10, 132, 255) * 0.78f : Color.Black * 0.42f;
-            sb.Draw(_pixel, r, bg);
-            DrawRectOutline(sb, r, Math.Max(1, _vpH / 420), Color.White * 0.28f);
-            int fontSize = Math.Max(1, _vpH / 320);
-            _bridge?.DrawCenteredString(sb, _pixel, label, r, Color.White * 0.92f, fontSize);
+            PixelUi.DrawPixelPill(sb, _pixel, _bridge, r, label, active ? PixelRole.Active : PixelRole.Neutral, active, _vpH);
         }
 
         private void DrawActionCircle(SpriteBatch sb, Rectangle r, string label, bool pressed, bool isTool)
         {
-            Vector2 c = r.Center.ToVector2();
-            float rad = r.Width * 0.5f;
-            Color tint = isTool ? new Color(255, 184, 77) : new Color(84, 214, 128);
-            float bgAlpha = pressed ? 0.52f : 0.24f;
-            float ringAlpha = pressed ? 0.85f : 0.46f;
-
-            DrawCircle(sb, c, rad, (pressed ? tint : Color.Black) * bgAlpha);
-            DrawRing(sb, c, rad, Color.White * ringAlpha);
-            int fontSize = Math.Max(2, (int)(rad / 24f));
-            _bridge?.DrawCenteredString(sb, _pixel, label, r, Color.White * (pressed ? 1.0f : 0.86f), fontSize);
+            PixelUi.DrawPixelMedallion(sb, _pixel, _bridge, r, label, isTool ? PixelRole.Tool : PixelRole.Action, pressed, _vpH);
         }
 
         private void DrawCircle(SpriteBatch sb, Vector2 center, float radius, Color color)
@@ -3064,25 +3516,40 @@ namespace SDVMobileControls
             if (_cfg.SwapRightButtons) { _visToolRect = visAct; _visActRect = visTool; }
             else { _visToolRect = visTool; _visActRect = visAct; }
 
-            // 3. Collapsible Top Utility Bar
-            int leftX = (int)(_cfg.TopBarX * _vpW);
+            // 3. Collapsible Top Utility Bar (respects Dynamic Island / Notch Safe Area!)
+            _safeLeftPx = ComputeSafeLeftPx();
+            _safeRightPx = ComputeSafeRightPx();
+            int leftX = Math.Max(_safeLeftPx + 8, (int)(_cfg.TopBarX * _vpW));
             int topY = (int)(_cfg.TopBarY * _vpH);
             int pillH = (int)Math.Clamp(unit * 0.056f, 28f, unit * 0.08f);
             int pillW = (int)(pillH * 1.85f);
             int modsW = (int)(pillH * 2.15f);
             int colW = (int)(pillH * 1.10f);
+            int emoteW = (int)(pillH * 1.25f);
             int pillGap = Math.Max(6, pillH / 5);
 
             int cx = leftX;
             _btnBagRect = new Rectangle(cx, topY, pillW, pillH);
             cx += pillW + pillGap;
 
+            _btnEmoteRect = Rectangle.Empty;
+            _btnCtlModeRect = Rectangle.Empty;
             if (!_topBarCollapsed)
             {
                 _btnMapRect = new Rectangle(cx, topY, pillW, pillH); cx += pillW + pillGap;
                 _btnQuestRect = new Rectangle(cx, topY, pillW, pillH); cx += pillW + pillGap;
                 _btnSaveRect = new Rectangle(cx, topY, modsW, pillH); cx += modsW + pillGap;
                 _btnKeyRect = new Rectangle(cx, topY, pillW, pillH); cx += pillW + pillGap;
+                if (_cfg.ShowEmoteButton)
+                {
+                    _btnEmoteRect = new Rectangle(cx, topY, emoteW, pillH);
+                    cx += emoteW + pillGap;
+                }
+                if (_cfg.AutoCombatMode)
+                {
+                    _btnCtlModeRect = new Rectangle(cx, topY, pillW, pillH);
+                    cx += pillW + pillGap;
+                }
                 _btnEditRect = new Rectangle(cx, topY, modsW, pillH); cx += modsW + pillGap;
             }
             else
@@ -3093,26 +3560,34 @@ namespace SDVMobileControls
             _btnCollapseRect = new Rectangle(cx, topY, colW, pillH);
             _topBarGroupRect = new Rectangle(leftX - 4, topY - 4, (_btnCollapseRect.Right - leftX) + 8, pillH + 8);
 
-            // Auto-Context Furniture Rotate button (cleanly above right action area)
+            // Optional Left-Edge Vertical Scrollable Toolbar (cleanly below Top Bar & clear of Dynamic Island!)
+            if (_cfg.VerticalToolbar)
+            {
+                _verticalToolbar.ComputeLayout(_vpW, _vpH, _safeLeftPx, topY + pillH + Math.Max(10, pillH / 3));
+            }
+
+            // Auto-Context Furniture Rotate (ROT) & Weapon Special Move (SPEC) buttons (clear of right Notch/Dynamic Island!)
             int rotW = (int)(pillH * 2.15f);
             int rotH = (int)(pillH * 1.18f);
-            _btnRotateRect = new Rectangle(_vpW - rotW - Math.Max(16, (int)(_vpW * 0.025f)), (int)(_vpH * 0.34f), rotW, rotH);
+            int rightEdgePad = Math.Max(_safeRightPx + 12, Math.Max(16, (int)(_vpW * 0.025f)));
+            _btnRotateRect = new Rectangle(_vpW - rotW - rightEdgePad, (int)(_vpH * 0.34f), rotW, rotH);
+            _btnSpecRect = new Rectangle(_vpW - rotW - rightEdgePad, (int)(_vpH * 0.34f), rotW, rotH);
 
-            // Compact ROW quick-switch pill right beside Toolbar (only when player has > 12 inventory slots!)
+            // Compact ROW quick-switch pill right beside Toolbar (only when player has > 12 inventory slots & Horizontal PC Toolbar!)
             _btnToolbarRowRect = Rectangle.Empty;
-            if (Game1.player != null && Game1.player.MaxItems > 12 && TryGetToolbarViewportBounds(out Rectangle tbR))
+            if (!_cfg.VerticalToolbar && Game1.player != null && Game1.player.MaxItems > 12 && TryGetToolbarViewportBounds(out Rectangle tbR))
             {
                 int rowW = Math.Max(42, (int)(tbR.Height * 0.92f));
                 int rowH = Math.Max(30, (int)(tbR.Height * 0.78f));
                 int rx = tbR.Right + Math.Max(6, rowW / 7);
-                if (rx + rowW > _vpW - 8)
-                    rx = Math.Max(8, tbR.X - rowW - Math.Max(6, rowW / 7));
+                if (rx + rowW > _vpW - _safeRightPx - 8)
+                    rx = Math.Max(_safeLeftPx + 8, tbR.X - rowW - Math.Max(6, rowW / 7));
                 int ry = tbR.Y + (tbR.Height - rowH) / 2;
                 _btnToolbarRowRect = new Rectangle(rx, ry, rowW, rowH);
             }
 
-            // Context Menu Helper Bar
-            int mx0 = (int)Math.Max(_vpW * 0.048f, unit * 0.06f);
+            // Context Menu Helper Bar (clear of left Dynamic Island / Notch!)
+            int mx0 = Math.Max(_safeLeftPx + 10, (int)Math.Max(_vpW * 0.048f, unit * 0.06f));
             int mx = mx0;
             int my = (int)Math.Max(unit * 0.022f, 12f);
             _ctxQuestEscRect = new Rectangle(mx0, my, pillW, pillH);

@@ -78,6 +78,7 @@ namespace SDVMobileControls
 
         private void OnUpdateTicked(object sender, UpdateTickedEventArgs e)
         {
+            try { Engine?.OnUpdateTickedGlobal(); } catch { }
             try { RamOptimizer?.PollManualPruneFlag(); } catch { }
             if (!_audioDiagRanLaunch && ++_audioDiagTicks >= 120)
             {

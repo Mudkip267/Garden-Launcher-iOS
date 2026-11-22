@@ -1008,9 +1008,20 @@ static NSString *sdvProbeLocalNetwork(void) {
             [mcRows addObject:[self mkSettingsSwitchRow:@"Chớp vòng mờ khi chạm (chế độ Vô hình)" icon:@"circle.dashed" color:kTintIndigo on:_mobileCfg.showTouchHint tag:33]];
         }
         [mcRows addObject:[self mkSettingsSwitchRow:@"Hiện thanh tiện ích (BAG · MAP · QST · SAVE · KEY · EDIT)" icon:@"rectangle.topthird.inset.filled" color:kTintGreen on:_mobileCfg.showTopUtility tag:34]];
+        [mcRows addObject:[self mkSettingsSwitchRow:@"Hiện nút thả biểu cảm mặt cười (Emote)" icon:@"face.smiling.fill" color:kTintOrange on:_mobileCfg.showEmoteButton tag:40]];
         if (_mobileCfg.mode != 3) {
             [mcRows addObject:[self mkSettingsSwitchRow:@"Đổi vị trí 2 nút phải (Đánh ↔ Tương tác)" icon:@"arrow.left.arrow.right" color:kTintPurple on:_mobileCfg.swapRightButtons tag:35]];
         }
+        [mcRows addObject:[self mkSettingsSwitchRow:@"Tự bổ/đào liên tục 1 chạm (Auto-Repeat cây & đá)" icon:@"repeat.circle.fill" color:kTintOrange on:_mobileCfg.autoRepeat tag:41]];
+        [mcRows addObject:[self mkSettingsSwitchRow:@"Tự trả về đồ cầm cũ sau khi Auto-Tool xong" icon:@"arrow.uturn.backward.circle.fill" color:kTintIndigo on:_mobileCfg.restoreToolAfterAuto tag:42]];
+        [mcRows addObject:[self mkSettingsSwitchRow:@"Hiện nút chiêu đặc biệt SPEC (đỡ Kiếm / đập Búa)" icon:@"shield.lefthalf.filled" color:kTintRed on:_mobileCfg.showSpecButton tag:43]];
+        [mcRows addObject:[self mkSettingsSwitchRow:@"Tự sang Joystick khi vào Mỏ/Núi lửa + nút đổi nhanh CTL" icon:@"flame.fill" color:kTintRed on:_mobileCfg.autoCombatMode tag:44]];
+        [mcRows addObject:[self mkSettingsSwitchRow:@"Thanh công cụ dọc cạnh trái 36 ô (cuộn mượt kiểu Mobile)" icon:@"sidebar.left" color:kTintBlue on:_mobileCfg.verticalToolbar tag:48]];
+        [mcRows addObject:[self mkSettingsSwitchRow:@"Mô tả đồ cố định + Chạm 2 lần chọn Hội thoại an toàn" icon:@"text.bubble.fill" color:kTintTeal on:_mobileCfg.safeDialogueAndTooltip tag:47]];
+        [mcRows addObject:[self mkSettingsSwitchRow:@"Rung nhẹ Haptic khi cá cắn câu" icon:@"waveform.path" color:kTintBlue on:_mobileCfg.fishingHaptic tag:46]];
+        [mcRows addObject:[self mkSettingsSwitchRow:@"Tự tạm dừng game khi vuốt Thông báo / chuyển app" icon:@"pause.circle.fill" color:kTintIndigo on:_mobileCfg.autoPauseOnBackground tag:45]];
+        [mcRows addObject:[self mkSettingsSwitchRow:@"Tự ẩn nút cảm ứng khi dùng tay cầm Bluetooth" icon:@"gamecontroller.fill" color:kTintPurple on:_mobileCfg.autoHideOnGamepad tag:50]];
+        [mcRows addObject:[self mkSettingsSwitchRow:@"Tiết kiệm pin / Giảm nóng máy (30 FPS, logic vẫn chuẩn 60Hz)" icon:@"battery.75" color:kTintGreen on:_mobileCfg.batterySaver30Fps tag:49]];
 
         // Optional Periodic Auto-Save row (Default OFF -> zero stutter; skips mines/combat/moving)
         UIStackView *asRow = mkVStack(6);
@@ -1036,6 +1047,11 @@ static NSString *sdvProbeLocalNetwork(void) {
             ? [NSString stringWithFormat:@"%d%%", (int)roundf(_mobileCfg.uiScaleOverride * 100)]
             : @"Mặc định";
         float uiScVal = (_mobileCfg.uiScaleOverride >= 0.73f) ? _mobileCfg.uiScaleOverride : 0.70f;
+        NSString *safePadTxt = (_mobileCfg.safePaddingPx < 0)
+            ? @"Tự động"
+            : [NSString stringWithFormat:@"%ld px", (long)_mobileCfg.safePaddingPx];
+        float safePadVal = (_mobileCfg.safePaddingPx < 0) ? -4.0f : (float)_mobileCfg.safePaddingPx;
+        [mcRows addObject:[self mkSliderRow:@"Đệm lề né Tai thỏ / Dynamic Island" min:-4.0f max:80.0f val:safePadVal valText:safePadTxt tag:19]];
         [mcRows addObject:[self mkSliderRow:@"Cỡ chữ & Menu PC / Mod (UI Scale)" min:0.70f max:1.50f val:uiScVal valText:uiScTxt tag:18]];
         [mcRows addObject:[self mkSliderRow:@"Kích thước nút / vùng chạm" min:0.75f max:1.45f val:_mobileCfg.buttonScale valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_mobileCfg.buttonScale * 100)] tag:17]];
     }
@@ -1356,7 +1372,10 @@ static NSString *sdvProbeLocalNetwork(void) {
         @17: [NSString stringWithFormat:@"%d%%", (int)roundf((_mobileCfg ? _mobileCfg.buttonScale : 1.0f) * 100)],
         @18: (_mobileCfg && _mobileCfg.uiScaleOverride >= 0.73f)
             ? [NSString stringWithFormat:@"%d%%", (int)roundf(_mobileCfg.uiScaleOverride * 100)]
-            : @"Mặc định"
+            : @"Mặc định",
+        @19: (!_mobileCfg || _mobileCfg.safePaddingPx < 0)
+            ? @"Tự động"
+            : [NSString stringWithFormat:@"%ld px", (long)_mobileCfg.safePaddingPx]
     };
     for (NSNumber *k in txt) {
         UILabel *l = _sliderLabels[k];
@@ -1412,6 +1431,18 @@ static NSString *sdvProbeLocalNetwork(void) {
                 }
             }
             return;
+        case 19:
+            if (!_mobileCfg) _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
+            _mobileCfg.safePaddingPx = (sl.value < 0.0f) ? -1 : MAX(0, MIN(80, (NSInteger)roundf(sl.value)));
+            [self syncLiveLabels];
+            {
+                NSTimeInterval nowM = NSDate.date.timeIntervalSinceReferenceDate;
+                if (nowM - _lastLiveSave > 0.10) {
+                    _lastLiveSave = nowM;
+                    [_mobileCfg saveToDocuments:_root.path];
+                }
+            }
+            return;
     }
     [self syncLiveLabels];
     NSTimeInterval now = NSDate.date.timeIntervalSinceReferenceDate;
@@ -1422,7 +1453,7 @@ static NSString *sdvProbeLocalNetwork(void) {
 }
 
 -(void)sliderEnded:(UISlider *)sl {
-    if (sl.tag == 17 || sl.tag == 18) {
+    if (sl.tag == 17 || sl.tag == 18 || sl.tag == 19) {
         [_mobileCfg saveToDocuments:_root.path];
         return;
     }
@@ -1537,7 +1568,7 @@ static NSString *sdvProbeLocalNetwork(void) {
         [self renderAll:NO];
         return;
     }
-    if (sw.tag >= 30 && sw.tag <= 39) {
+    if (sw.tag >= 30 && sw.tag <= 50) {
         _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
         switch (sw.tag) {
             case 30: _mobileCfg.autoTool = sw.isOn; break;
@@ -1550,6 +1581,17 @@ static NSString *sdvProbeLocalNetwork(void) {
             case 37: _mobileCfg.autoKeyboard = sw.isOn; break;
             case 38: _mobileCfg.safeCrafting = sw.isOn; break;
             case 39: _mobileCfg.reduceWeather = sw.isOn; break;
+            case 40: _mobileCfg.showEmoteButton = sw.isOn; break;
+            case 41: _mobileCfg.autoRepeat = sw.isOn; break;
+            case 42: _mobileCfg.restoreToolAfterAuto = sw.isOn; break;
+            case 43: _mobileCfg.showSpecButton = sw.isOn; break;
+            case 44: _mobileCfg.autoCombatMode = sw.isOn; break;
+            case 45: _mobileCfg.autoPauseOnBackground = sw.isOn; break;
+            case 46: _mobileCfg.fishingHaptic = sw.isOn; break;
+            case 47: _mobileCfg.safeDialogueAndTooltip = sw.isOn; break;
+            case 48: _mobileCfg.verticalToolbar = sw.isOn; break;
+            case 49: _mobileCfg.batterySaver30Fps = sw.isOn; break;
+            case 50: _mobileCfg.autoHideOnGamepad = sw.isOn; break;
         }
         [_mobileCfg saveToDocuments:_root.path];
         [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];

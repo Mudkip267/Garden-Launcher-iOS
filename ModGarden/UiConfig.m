@@ -268,6 +268,18 @@ static long long sdvNextRev(void) {
 @property(nonatomic, assign) BOOL reduceWeather;
 @property(nonatomic, assign) float uiScaleOverride; // 0 = game default, 0.75..1.50
 @property(nonatomic, assign) float buttonScale;
+@property(nonatomic, assign) BOOL showEmoteButton;
+@property(nonatomic, assign) BOOL autoRepeat;
+@property(nonatomic, assign) BOOL restoreToolAfterAuto;
+@property(nonatomic, assign) BOOL showSpecButton;
+@property(nonatomic, assign) BOOL autoCombatMode;
+@property(nonatomic, assign) BOOL autoHideOnGamepad;
+@property(nonatomic, assign) BOOL autoPauseOnBackground;
+@property(nonatomic, assign) BOOL fishingHaptic;
+@property(nonatomic, assign) NSInteger safePaddingPx; // -1 = Auto, 0..80 px
+@property(nonatomic, assign) BOOL safeDialogueAndTooltip;
+@property(nonatomic, assign) BOOL verticalToolbar;
+@property(nonatomic, assign) BOOL batterySaver30Fps;
 @property(nonatomic, strong) NSMutableArray<SDVCustomKeyEntry *> *customKeys;
 
 +(instancetype)defaults;
@@ -296,6 +308,18 @@ static long long sdvNextRev(void) {
     c.reduceWeather = YES;
     c.uiScaleOverride = 0.0f; // 0 = game default
     c.buttonScale = 1.00f;
+    c.showEmoteButton = YES;
+    c.autoRepeat = YES;
+    c.restoreToolAfterAuto = NO;
+    c.showSpecButton = YES;
+    c.autoCombatMode = NO;
+    c.autoHideOnGamepad = YES;
+    c.autoPauseOnBackground = YES;
+    c.fishingHaptic = YES;
+    c.safePaddingPx = -1; // -1 = Auto from iOS safeAreaInsets
+    c.safeDialogueAndTooltip = YES;
+    c.verticalToolbar = NO;
+    c.batterySaver30Fps = NO;
     c.customKeys = [NSMutableArray array];
     return c;
 }
@@ -342,6 +366,31 @@ static long long sdvNextRev(void) {
             c.uiScaleOverride = (us >= 0.70f) ? sdvClampf(us, 0.75f, 1.50f) : 0.0f;
         } else if ([k isEqualToString:@"buttonscale"]) {
             c.buttonScale = sdvClampf(v.floatValue, 0.75f, 1.45f);
+        } else if ([k isEqualToString:@"emotebtn"]) {
+            c.showEmoteButton = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
+        } else if ([k isEqualToString:@"autorepeat"]) {
+            c.autoRepeat = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
+        } else if ([k isEqualToString:@"restoretool"]) {
+            c.restoreToolAfterAuto = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
+        } else if ([k isEqualToString:@"specbtn"]) {
+            c.showSpecButton = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
+        } else if ([k isEqualToString:@"autocombatmode"]) {
+            c.autoCombatMode = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
+        } else if ([k isEqualToString:@"autohidegp"]) {
+            c.autoHideOnGamepad = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
+        } else if ([k isEqualToString:@"autopause"]) {
+            c.autoPauseOnBackground = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
+        } else if ([k isEqualToString:@"fishhaptic"]) {
+            c.fishingHaptic = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
+        } else if ([k isEqualToString:@"safepadding"]) {
+            NSInteger sp = v.integerValue;
+            c.safePaddingPx = (sp < 0) ? -1 : MAX(0, MIN(80, sp));
+        } else if ([k isEqualToString:@"safedialogue"]) {
+            c.safeDialogueAndTooltip = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
+        } else if ([k isEqualToString:@"verticaltb"]) {
+            c.verticalToolbar = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
+        } else if ([k isEqualToString:@"saver30fps"]) {
+            c.batterySaver30Fps = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
         } else if ([k isEqualToString:@"ckey"] && c.customKeys.count < 16) {
             NSArray<NSString *> *pts = [v componentsSeparatedByString:@"|"];
             if (pts.count >= 7 && pts[2].integerValue > 0) {
@@ -430,7 +479,7 @@ static long long sdvNextRev(void) {
     }
 
     NSMutableString *s = [NSMutableString stringWithFormat:
-        @"mode=%ld\nautotool=%d\nautoattack=%d\npinchzoom=%d\ntouchhint2=%d\ntoputility=%d\nswapbuttons=%d\nmobileshopdrag=%d\nautokeyboard=%d\nsafecrafting=%d\nautosavemin=%ld\nreduceweather=%d\nuiscale=%.2f\nbuttonscale=%.2f\n",
+        @"mode=%ld\nautotool=%d\nautoattack=%d\npinchzoom=%d\ntouchhint2=%d\ntoputility=%d\nswapbuttons=%d\nmobileshopdrag=%d\nautokeyboard=%d\nsafecrafting=%d\nautosavemin=%ld\nreduceweather=%d\nuiscale=%.2f\nbuttonscale=%.2f\nemotebtn=%d\nautorepeat=%d\nrestoretool=%d\nspecbtn=%d\nautocombatmode=%d\nautohidegp=%d\nautopause=%d\nfishhaptic=%d\nsafepadding=%ld\nsafedialogue=%d\nverticaltb=%d\nsaver30fps=%d\n",
         (long)self.mode, self.autoTool ? 1 : 0, self.autoAttack ? 1 : 0,
         self.pinchZoom ? 1 : 0, self.showTouchHint ? 1 : 0,
         self.showTopUtility ? 1 : 0, self.swapRightButtons ? 1 : 0,
@@ -438,7 +487,13 @@ static long long sdvNextRev(void) {
         self.safeCrafting ? 1 : 0, (long)self.autoSaveMinutes,
         self.reduceWeather ? 1 : 0,
         (self.uiScaleOverride >= 0.70f) ? sdvClampf(self.uiScaleOverride, 0.75f, 1.50f) : 0.0f,
-        sdvClampf(self.buttonScale, 0.75f, 1.45f)];
+        sdvClampf(self.buttonScale, 0.75f, 1.45f),
+        self.showEmoteButton ? 1 : 0, self.autoRepeat ? 1 : 0,
+        self.restoreToolAfterAuto ? 1 : 0, self.showSpecButton ? 1 : 0,
+        self.autoCombatMode ? 1 : 0, self.autoHideOnGamepad ? 1 : 0,
+        self.autoPauseOnBackground ? 1 : 0, self.fishingHaptic ? 1 : 0,
+        (long)self.safePaddingPx, self.safeDialogueAndTooltip ? 1 : 0,
+        self.verticalToolbar ? 1 : 0, self.batterySaver30Fps ? 1 : 0];
     for (NSString *ex in extraLines) {
         [s appendFormat:@"%@\n", ex];
     }

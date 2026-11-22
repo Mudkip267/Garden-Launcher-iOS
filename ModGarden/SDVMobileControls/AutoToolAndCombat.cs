@@ -22,6 +22,7 @@ namespace SDVMobileControls
         public TileActionKind Kind;
         public int PreferredToolSlot; // -1 = keep current tool
         public bool StopAdjacent;
+        public bool Repeatable;       // Auto-repeat 1-tap chop/mine/fight until broken or defeated
     }
 
     internal static class AutoToolAndCombat
@@ -41,6 +42,7 @@ namespace SDVMobileControls
             {
                 intent.Kind = TileActionKind.UseTool;
                 intent.StopAdjacent = true;
+                intent.Repeatable = true;
                 if (autoTool)
                     intent.PreferredToolSlot = FindBestWeaponSlot(who);
                 return intent;
@@ -62,6 +64,58 @@ namespace SDVMobileControls
                 }
             }
 
+            // 2b. FarmAnimal near tapped tile -> pet first, then auto-select Milk Pail / Shears if ready!
+            try
+            {
+                if (loc.Animals != null && loc.Animals.Length > 0)
+                {
+                    FarmAnimal hitAnimal = null;
+                    float bestD = 76f;
+                    foreach (FarmAnimal animal in loc.Animals.Values)
+                    {
+                        if (animal == null) continue;
+                        Rectangle bb = animal.GetBoundingBox();
+                        float d = bb.Contains((int)tileCenter.X, (int)tileCenter.Y)
+                            ? 0f
+                            : Vector2.Distance(bb.Center.ToVector2(), tileCenter);
+                        if (d < bestD)
+                        {
+                            bestD = d;
+                            hitAnimal = animal;
+                        }
+                    }
+                    if (hitAnimal != null)
+                    {
+                        intent.StopAdjacent = true;
+                        if (!hitAnimal.wasPet.Value)
+                        {
+                            intent.Kind = TileActionKind.Interact;
+                            return intent;
+                        }
+                        if (autoTool && !string.IsNullOrEmpty(hitAnimal.currentProduce.Value))
+                        {
+                            int mpSlot = FindToolSlot<MilkPail>(who);
+                            if (mpSlot >= 0 && who.Items[mpSlot] is MilkPail mp && hitAnimal.CanGetProduceWithTool(mp))
+                            {
+                                intent.Kind = TileActionKind.UseTool;
+                                intent.PreferredToolSlot = mpSlot;
+                                return intent;
+                            }
+                            int shSlot = FindToolSlot<Shears>(who);
+                            if (shSlot >= 0 && who.Items[shSlot] is Shears sh && hitAnimal.CanGetProduceWithTool(sh))
+                            {
+                                intent.Kind = TileActionKind.UseTool;
+                                intent.PreferredToolSlot = shSlot;
+                                return intent;
+                            }
+                        }
+                        intent.Kind = TileActionKind.Interact;
+                        return intent;
+                    }
+                }
+            }
+            catch { }
+
             // 3. ResourceClump (stump, hollow log, boulder, meteorite, mine rock)
             if (loc.resourceClumps != null)
             {
@@ -71,6 +125,7 @@ namespace SDVMobileControls
                     {
                         intent.Kind = TileActionKind.UseTool;
                         intent.StopAdjacent = true;
+                        intent.Repeatable = true;
                         if (autoTool)
                         {
                             int idx = rc.parentSheetIndex.Value;
@@ -108,6 +163,7 @@ namespace SDVMobileControls
                 {
                     intent.Kind = TileActionKind.UseTool;
                     intent.StopAdjacent = true;
+                    intent.Repeatable = true;
                     if (autoTool)
                         intent.PreferredToolSlot = FindToolSlot<Pickaxe>(who);
                     return intent;
@@ -117,6 +173,7 @@ namespace SDVMobileControls
                 {
                     intent.Kind = TileActionKind.UseTool;
                     intent.StopAdjacent = true;
+                    intent.Repeatable = true;
                     if (autoTool)
                         intent.PreferredToolSlot = FindToolSlot<Axe>(who);
                     return intent;
@@ -147,6 +204,7 @@ namespace SDVMobileControls
                 {
                     intent.Kind = TileActionKind.UseTool;
                     intent.StopAdjacent = true;
+                    intent.Repeatable = true;
                     if (autoTool)
                         intent.PreferredToolSlot = FindToolSlot<Axe>(who);
                     return intent;
@@ -249,9 +307,22 @@ namespace SDVMobileControls
                 }
             }
 
-            // 7. Water tile -> fish if holding FishingRod, otherwise refill WateringCan
+            // 7. Shimmering Ore Pan Spot -> auto-select Pan, or Water tile -> FishingRod / refill WateringCan
             try
             {
+                Point panPt = loc.orePanPoint.Value;
+                if (panPt != Point.Zero && Math.Max(Math.Abs(panPt.X - tile.X), Math.Abs(panPt.Y - tile.Y)) <= 1)
+                {
+                    int panSlot = autoTool ? FindToolSlot<Pan>(who) : (who.CurrentTool is Pan ? who.CurrentToolIndex : -1);
+                    if (panSlot >= 0)
+                    {
+                        intent.Kind = TileActionKind.UseTool;
+                        intent.StopAdjacent = true;
+                        intent.PreferredToolSlot = panSlot;
+                        return intent;
+                    }
+                }
+
                 if (loc.isWaterTile(tile.X, tile.Y))
                 {
                     if (who.CurrentTool is FishingRod)

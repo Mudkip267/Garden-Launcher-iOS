@@ -184,41 +184,31 @@ namespace SDVMobileControls
                 return;
 
             ComputeLayout(vpW, vpH);
-            int bt = Math.Max(2, vpH / 360);
             int fs = Math.Max(1, vpH / 300);
 
-            // ESC button top-left
-            DrawPill(sb, pixel, br, _escBtnRect, "ESC", _escPulseFrames > 0, new Color(220, 62, 54), bt, fs);
+            // ESC pixel button top-left
+            PixelUi.DrawPixelPill(sb, pixel, br, _escBtnRect, "ESC", PixelRole.Special, _escPulseFrames > 0, vpH, fs);
 
             if (_kind == ArcadeKind.JunimoKart)
             {
-                DrawPill(sb, pixel, br, _bigActionRect, "JUMP", _activeKeys.Contains(Keys.Space), new Color(48, 209, 88), bt, Math.Max(2, vpH / 240));
+                PixelUi.DrawPixelPill(sb, pixel, br, _bigActionRect, "JUMP", PixelRole.Action, _activeKeys.Contains(Keys.Space), vpH, Math.Max(2, vpH / 240));
                 return;
             }
 
-            // Left Joystick
-            if (circle != null && ring != null)
-            {
-                int jd = (int)(_joyRadius * 2f);
-                sb.Draw(circle, new Rectangle((int)(_joyCenter.X - _joyRadius), (int)(_joyCenter.Y - _joyRadius), jd, jd), Color.Black * 0.30f);
-                sb.Draw(ring, new Rectangle((int)(_joyCenter.X - _joyRadius), (int)(_joyCenter.Y - _joyRadius), jd, jd), Color.White * 0.48f);
-                float kr = _joyRadius * 0.42f;
-                int kd = (int)(kr * 2f);
-                sb.Draw(circle, new Rectangle((int)(_joyKnob.X - kr), (int)(_joyKnob.Y - kr), kd, kd), Color.White * (_joyTouchId >= 0 ? 0.72f : 0.42f));
-            }
+            // Left Pixel Joystick
+            PixelUi.DrawPixelJoystick(sb, _joyCenter, _joyRadius, _joyKnob, _joyTouchId >= 0, vpH, 0.95f);
 
             if (_kind == ArcadeKind.PrairieKing)
             {
-                Color shootTint = new Color(255, 159, 10);
-                DrawPill(sb, pixel, br, _shootUp, "^", _activeKeys.Contains(Keys.Up), shootTint, bt, fs);
-                DrawPill(sb, pixel, br, _shootDn, "v", _activeKeys.Contains(Keys.Down), shootTint, bt, fs);
-                DrawPill(sb, pixel, br, _shootLt, "<", _activeKeys.Contains(Keys.Left), shootTint, bt, fs);
-                DrawPill(sb, pixel, br, _shootRt, ">", _activeKeys.Contains(Keys.Right), shootTint, bt, fs);
-                DrawPill(sb, pixel, br, _spcBtnRect, "ITEM", _activeKeys.Contains(Keys.Space), new Color(10, 132, 255), bt, fs);
+                PixelUi.DrawPixelPill(sb, pixel, br, _shootUp, "^", PixelRole.Tool, _activeKeys.Contains(Keys.Up), vpH, fs);
+                PixelUi.DrawPixelPill(sb, pixel, br, _shootDn, "v", PixelRole.Tool, _activeKeys.Contains(Keys.Down), vpH, fs);
+                PixelUi.DrawPixelPill(sb, pixel, br, _shootLt, "<", PixelRole.Tool, _activeKeys.Contains(Keys.Left), vpH, fs);
+                PixelUi.DrawPixelPill(sb, pixel, br, _shootRt, ">", PixelRole.Tool, _activeKeys.Contains(Keys.Right), vpH, fs);
+                PixelUi.DrawPixelPill(sb, pixel, br, _spcBtnRect, "ITEM", PixelRole.Action, _activeKeys.Contains(Keys.Space), vpH, fs);
             }
             else if (_kind == ArcadeKind.CraneGame)
             {
-                DrawPill(sb, pixel, br, _bigActionRect, "GRAB", _activeKeys.Contains(Keys.Space), new Color(255, 159, 10), bt, Math.Max(2, vpH / 240));
+                PixelUi.DrawPixelPill(sb, pixel, br, _bigActionRect, "GRAB", PixelRole.Tool, _activeKeys.Contains(Keys.Space), vpH, Math.Max(2, vpH / 240));
             }
         }
 

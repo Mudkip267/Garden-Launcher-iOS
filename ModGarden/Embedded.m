@@ -20,6 +20,10 @@ int32_t __isPlatformVersionAtLeast(uint32_t platform, uint32_t major, uint32_t m
 // ---- Native Boot & Crash Logger (always writes to Documents/ErrorLogs/ even on instant crash!) ----
 static char gSdvBootLogPath[1024] = {0};
 static char gSdvCrashLogPath[1024] = {0};
+static char gSdvPauseFlagPath[1024] = {0};
+static char gSdvHapticFlagPath[1024] = {0};
+static char gSdvSafeAreaPath[1024] = {0};
+static char gSdvLastSafeAreaBuf[64] = {0};
 static volatile sig_atomic_t gSdvCrashHandled = 0;
 
 static void sdvWriteRawFd(const char *path, const char *buf, size_t len) {
@@ -845,10 +849,64 @@ static SDVGardenGestureHost *gSdvGardenHost = nil;
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onHighRamWarning:) name:kSDVRamHighWarningNotification object:nil];
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onSceneOrAppNotification) name:UISceneDidActivateNotification object:nil];
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onSceneOrAppNotification) name:UIApplicationDidBecomeActiveNotification object:nil];
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onAppWillResignOrDeactivate) name:UIApplicationWillResignActiveNotification object:nil];
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onAppWillResignOrDeactivate) name:UISceneWillDeactivateNotification object:nil];
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onOrientationChanged) name:UIDeviceOrientationDidChangeNotification object:nil];
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onAudioInterruption:) name:AVAudioSessionInterruptionNotification object:nil];
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onAudioRouteChange:) name:AVAudioSessionRouteChangeNotification object:nil];
     }
     return self;
+}
+
+-(void)onAppWillResignOrDeactivate {
+    if (gSdvPauseFlagPath[0]) {
+        int fd = open(gSdvPauseFlagPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd >= 0) {
+            (void)write(fd, "1", 1);
+            close(fd);
+        }
+    }
+}
+
+-(void)onOrientationChanged {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self syncSafeAreaToDocs];
+    });
+}
+
+-(void)syncSafeAreaToDocs {
+    if (!gSdvSafeAreaPath[0]) return;
+    UIWindow *game = [self gameWindow];
+    if (!game) return;
+    CGSize sz = game.bounds.size;
+    if (sz.width < 100.0 || sz.height < 100.0) return;
+    UIEdgeInsets ins = game.safeAreaInsets;
+    float lf = (float)(ins.left / sz.width);
+    float rf = (float)(ins.right / sz.width);
+    if (lf < 0.0f) lf = 0.0f;
+    if (lf > 0.14f) lf = 0.14f;
+    if (rf < 0.0f) rf = 0.0f;
+    if (rf > 0.14f) rf = 0.14f;
+    char buf[64];
+    int n = snprintf(buf, sizeof(buf), "%.4f,%.4f", lf, rf);
+    if (n > 0 && strcmp(buf, gSdvLastSafeAreaBuf) != 0) {
+        strncpy(gSdvLastSafeAreaBuf, buf, sizeof(gSdvLastSafeAreaBuf) - 1);
+        int fd = open(gSdvSafeAreaPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd >= 0) {
+            (void)write(fd, buf, (size_t)n);
+            close(fd);
+        }
+    }
+}
+
+-(void)pollFishBiteHaptic {
+    if (!gSdvHapticFlagPath[0]) return;
+    if (access(gSdvHapticFlagPath, F_OK) == 0) {
+        unlink(gSdvHapticFlagPath);
+        static UIImpactFeedbackGenerator *sFishGen = nil;
+        if (!sFishGen) sFishGen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+        [sFishGen impactOccurred];
+    }
 }
 
 -(void)onAudioInterruption:(NSNotification *)n {
@@ -982,6 +1040,7 @@ static SDVGardenGestureHost *gSdvGardenHost = nil;
             UIWindow *game = [self gameWindow];
             if (game && !CGRectIsEmpty(game.frame)) self.gardenWindow.frame = game.frame;
         }
+        [self syncSafeAreaToDocs];
         [self syncRamHudVisibility];
 
         BOOL hasWindow = ([self gameWindow] != nil);
@@ -1274,6 +1333,11 @@ __attribute__((constructor)) static void startGardenControls(void) {
     @autoreleasepool {
         @try {
             NSString *docs = [fm() URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject.path;
+            if (docs.length) {
+                snprintf(gSdvPauseFlagPath, sizeof(gSdvPauseFlagPath), "%s/sdv_pause_now.flag", docs.UTF8String);
+                snprintf(gSdvHapticFlagPath, sizeof(gSdvHapticFlagPath), "%s/sdv_haptic_bite.flag", docs.UTF8String);
+                snprintf(gSdvSafeAreaPath, sizeof(gSdvSafeAreaPath), "%s/sdv_safe_area.cfg", docs.UTF8String);
+            }
             sdvInitBootAndCrashLogging(docs);
             sdvEnsureAudioSession("constructor");
             syncBundledLidgren(docs);
@@ -1294,6 +1358,10 @@ __attribute__((constructor)) static void startGardenControls(void) {
             [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer *t) {
                 (void)t;
                 [gSdvGardenHost attachToGameWindows];
+            }];
+            [NSTimer scheduledTimerWithTimeInterval:0.12 repeats:YES block:^(NSTimer *t) {
+                (void)t;
+                [gSdvGardenHost pollFishBiteHaptic];
             }];
         } @catch (NSException *ex) {
             sdvBootLogFmt([NSString stringWithFormat:@"[ERR] main init exception: %@", ex]);

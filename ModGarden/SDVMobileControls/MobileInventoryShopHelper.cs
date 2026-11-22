@@ -51,6 +51,10 @@ namespace SDVMobileControls
         private Rectangle _popBtnCancel;
         private int _popSliderTouchId = -1;
         private int _popConsumeTouchId = -1;
+        private int _popHoldTouchId = -1;
+        private int _popHoldDelta;
+        private double _popHoldStartSec;
+        private double _popHoldLastStepSec;
 
         // Touch Drag-and-Drop & Short-Tap / Long-Press state
         private int _touchId = -1;
@@ -98,6 +102,8 @@ namespace SDVMobileControls
             _popupDstInv = null;
             _popupSrcSlot = -1;
             _popSliderTouchId = -1;
+            _popHoldTouchId = -1;
+            _popHoldDelta = 0;
         }
 
         private void ResetTouch()
@@ -153,7 +159,7 @@ namespace SDVMobileControls
             if (IsPopupOpen)
             {
                 ComputePopupLayout(vpW, vpH);
-                UpdatePopupTouches(touches, rawToVp);
+                UpdatePopupTouches(touches, rawToVp, nowSec);
                 return true;
             }
 
@@ -1052,11 +1058,13 @@ namespace SDVMobileControls
         // =========================================================================
         // POPUP TOUCH & LAYOUT
         // =========================================================================
-        private void UpdatePopupTouches(TouchCollection touches, Func<Vector2, Vector2> rawToVp)
+        private void UpdatePopupTouches(TouchCollection touches, Func<Vector2, Vector2> rawToVp, double nowSec)
         {
             if (touches.Count == 0)
             {
                 _popSliderTouchId = -1;
+                _popHoldTouchId = -1;
+                _popHoldDelta = 0;
                 return;
             }
 
@@ -1075,6 +1083,36 @@ namespace SDVMobileControls
                 return;
             }
 
+            // Hold-to-repeat accelerated +/- quantity stepper
+            if (tl.Id == _popHoldTouchId && _popHoldDelta != 0)
+            {
+                if (tl.State == TouchLocationState.Moved)
+                {
+                    Rectangle holdR = _popHoldDelta == -10 ? _popBtnM10 :
+                                      _popHoldDelta == -1  ? _popBtnM1  :
+                                      _popHoldDelta == 1   ? _popBtnP1  : _popBtnP10;
+                    if (holdR.Contains(pt) && _popupMaxQty > _popupMinQty)
+                    {
+                        double held = nowSec - _popHoldStartSec;
+                        double interval = held >= 1.15 ? 0.05 : 0.11;
+                        if (held >= 0.34 && (nowSec - _popHoldLastStepSec) >= interval)
+                        {
+                            _popHoldLastStepSec = nowSec;
+                            int next = Math.Clamp(_popupQty + _popHoldDelta, _popupMinQty, _popupMaxQty);
+                            if (next != _popupQty)
+                            {
+                                _popupQty = next;
+                                TryClickSound();
+                            }
+                        }
+                    }
+                    return;
+                }
+                _popHoldTouchId = -1;
+                _popHoldDelta = 0;
+                return;
+            }
+
             if (tl.State != TouchLocationState.Pressed)
                 return;
 
@@ -1088,10 +1126,22 @@ namespace SDVMobileControls
 
             if (_popupMaxQty > _popupMinQty)
             {
-                if (_popBtnM10.Contains(pt)) { _popupQty = Math.Clamp(_popupQty - 10, _popupMinQty, _popupMaxQty); TryClickSound(); return; }
-                if (_popBtnM1.Contains(pt))  { _popupQty = Math.Clamp(_popupQty - 1, _popupMinQty, _popupMaxQty); TryClickSound(); return; }
-                if (_popBtnP1.Contains(pt))  { _popupQty = Math.Clamp(_popupQty + 1, _popupMinQty, _popupMaxQty); TryClickSound(); return; }
-                if (_popBtnP10.Contains(pt)) { _popupQty = Math.Clamp(_popupQty + 10, _popupMinQty, _popupMaxQty); TryClickSound(); return; }
+                int stepDelta = 0;
+                if (_popBtnM10.Contains(pt)) stepDelta = -10;
+                else if (_popBtnM1.Contains(pt)) stepDelta = -1;
+                else if (_popBtnP1.Contains(pt)) stepDelta = 1;
+                else if (_popBtnP10.Contains(pt)) stepDelta = 10;
+
+                if (stepDelta != 0)
+                {
+                    _popupQty = Math.Clamp(_popupQty + stepDelta, _popupMinQty, _popupMaxQty);
+                    _popHoldTouchId = tl.Id;
+                    _popHoldDelta = stepDelta;
+                    _popHoldStartSec = nowSec;
+                    _popHoldLastStepSec = nowSec;
+                    TryClickSound();
+                    return;
+                }
                 if (_popBtnMax.Contains(pt))
                 {
                     _popupQty = (_popupKind == PopupKind.BagSplit) ? Math.Clamp((_popupMaxQty + 1) / 2, _popupMinQty, _popupMaxQty) : _popupMaxQty;
@@ -1172,11 +1222,12 @@ namespace SDVMobileControls
             IClickableMenu activeMenu,
             Func<Point, Vector2> uiToVp,
             Func<Vector2, Point> vpToUi,
-            int vpW, int vpH)
+            int vpW, int vpH,
+            bool showFixedTooltip = true)
         {
             if (sb == null || pixel == null) return;
 
-            // 0. Draw golden pixel highlight on Tap-Selected Backpack slot + DROP button below Trash Can
+            // 0. Draw golden pixel highlight on Tap-Selected Backpack slot + DROP button + Fixed Non-Obstructive Item Tooltip
             if (_selectedBagSlot >= 0 && _selectedBagInv != null && activeMenu is GameMenu gm && gm.GetCurrentPage() is InventoryPage invP)
             {
                 if (_selectedBagInv.inventory != null && _selectedBagSlot < _selectedBagInv.inventory.Count)
@@ -1186,12 +1237,17 @@ namespace SDVMobileControls
                     DrawBorder(sb, pixel, selVp, Math.Max(3, vpH / 260), new Color(255, 200, 40));
 
                     Item selItem = GetItemAt(_selectedBagInv, _selectedBagSlot);
-                    if (selItem != null && selItem.canBeDropped() && invP.trashCan != null)
+                    if (selItem != null)
                     {
-                        Rectangle dropVp = UiRectToVp(ComputeDropBtnUiRect(invP.trashCan), uiToVp);
-                        sb.Draw(pixel, dropVp, new Color(186, 102, 28) * 0.92f);
-                        DrawBorder(sb, pixel, dropVp, Math.Max(2, vpH / 340), new Color(255, 224, 148));
-                        bridge?.DrawCenteredString(sb, pixel, "DROP", dropVp, Color.White, Math.Max(1, vpH / 300));
+                        if (selItem.canBeDropped() && invP.trashCan != null)
+                        {
+                            Rectangle dropVp = UiRectToVp(ComputeDropBtnUiRect(invP.trashCan), uiToVp);
+                            PixelUi.DrawPixelPill(sb, pixel, bridge, dropVp, "DROP", PixelRole.Tool, false, vpH, Math.Max(1, vpH / 300), 0.94f);
+                        }
+                        if (showFixedTooltip && !IsPopupOpen && !IsDraggingItem)
+                        {
+                            DrawFixedItemTooltipBanner(sb, pixel, selItem, vpW, vpH);
+                        }
                     }
                 }
             }
@@ -1402,6 +1458,58 @@ namespace SDVMobileControls
                 Vector2 sz = Game1.smallFont.MeasureString(text) * scale;
                 Vector2 pos = new Vector2(r.X + (r.Width - sz.X) * 0.5f, r.Y + (r.Height - sz.Y) * 0.5f + 2f);
                 Utility.drawTextWithShadow(sb, text, Game1.smallFont, pos, Game1.textColor, scale);
+            }
+            catch { }
+        }
+
+        private static void DrawFixedItemTooltipBanner(SpriteBatch sb, Texture2D pixel, Item item, int vpW, int vpH)
+        {
+            if (item == null || Game1.smallFont == null) return;
+            try
+            {
+                int px = PixelUi.Step(vpH);
+                float fScale = Math.Clamp(vpH / 980f, 0.70f, 1.25f);
+                string title = item.DisplayName ?? item.Name ?? "";
+                string stats = "";
+                if (item is StardewValley.Object obj)
+                {
+                    if (obj.Edibility > 0)
+                    {
+                        int energy = obj.staminaRecoveredOnConsumption();
+                        int health = obj.healthRecoveredOnConsumption();
+                        stats = $"+{energy} NL  +{health} Mau";
+                    }
+                    int sell = 0;
+                    try { sell = obj.sellToStorePrice(); } catch { }
+                    if (sell > 0)
+                        stats = string.IsNullOrEmpty(stats) ? $"{sell:N0}g" : $"{stats}  ·  {sell:N0}g";
+                }
+                string desc = "";
+                try { desc = (item.getDescription() ?? "").Replace("\r", " ").Replace("\n", " ").Trim(); } catch { }
+                if (desc.Length > 68) desc = desc.Substring(0, 65) + "...";
+
+                int bw = Math.Clamp((int)(vpW * 0.36f), 260, Math.Min(540, vpW - 40));
+                int lineH = Math.Max(18, (int)(26f * fScale));
+                int lines = 1 + (string.IsNullOrEmpty(stats) ? 0 : 1) + (string.IsNullOrEmpty(desc) ? 0 : 1);
+                int bh = lines * lineH + px * 8;
+                int bx = vpW - bw - Math.Max(18, (int)(vpW * 0.045f));
+                int by = Math.Max(12, (int)(vpH * 0.022f));
+                var box = new Rectangle(bx, by, bw, bh);
+
+                PixelUi.DrawParchmentBox(sb, pixel, box, px, 0.94f);
+                float tx = box.X + px * 4;
+                float ty = box.Y + px * 3;
+                DrawStardewText(sb, title, new Vector2(tx, ty), Game1.textColor, fScale * 0.96f);
+                ty += lineH;
+                if (!string.IsNullOrEmpty(stats))
+                {
+                    DrawStardewText(sb, stats, new Vector2(tx, ty), new Color(36, 118, 42), fScale * 0.84f);
+                    ty += lineH;
+                }
+                if (!string.IsNullOrEmpty(desc))
+                {
+                    DrawStardewText(sb, desc, new Vector2(tx, ty), new Color(92, 48, 22), fScale * 0.78f);
+                }
             }
             catch { }
         }

@@ -499,9 +499,12 @@ static NSString *sdvProbeLocalNetwork(void) {
         b.tag = i;
         b.layer.cornerRadius = 9.5;
         b.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeading;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
         b.contentEdgeInsets = UIEdgeInsetsMake(0, 10, 0, 10);
         b.imageEdgeInsets = UIEdgeInsetsMake(0, 0, 0, 8);
         b.titleEdgeInsets = UIEdgeInsetsMake(0, 8, 0, -8);
+#pragma clang diagnostic pop
         [b.heightAnchor constraintEqualToConstant:31.5].active = YES;
         [b addTarget:self action:@selector(selectTab:) forControlEvents:UIControlEventTouchUpInside];
         [_sidebarTabs addArrangedSubview:b];
@@ -1011,6 +1014,7 @@ static NSString *sdvProbeLocalNetwork(void) {
         [mcRows addObject:[self mkSettingsSwitchRow:@"Hiện nút thả biểu cảm mặt cười (Emote)" icon:@"face.smiling.fill" color:kTintOrange on:_mobileCfg.showEmoteButton tag:40]];
         if (_mobileCfg.mode != 3) {
             [mcRows addObject:[self mkSettingsSwitchRow:@"Đổi vị trí 2 nút phải (Đánh ↔ Tương tác)" icon:@"arrow.left.arrow.right" color:kTintPurple on:_mobileCfg.swapRightButtons tag:35]];
+            [mcRows addObject:[self mkSettingsSwitchRow:@"Đảo bố cục tay trái 1 chạm (Joystick phải · Nút trái)" icon:@"hand.raised.fingers.spread.fill" color:kTintPurple on:_mobileCfg.leftHandedMobile tag:51]];
         }
         [mcRows addObject:[self mkSettingsSwitchRow:@"Tự bổ/đào liên tục 1 chạm (Auto-Repeat cây & đá)" icon:@"repeat.circle.fill" color:kTintOrange on:_mobileCfg.autoRepeat tag:41]];
         [mcRows addObject:[self mkSettingsSwitchRow:@"Tự trả về đồ cầm cũ sau khi Auto-Tool xong" icon:@"arrow.uturn.backward.circle.fill" color:kTintIndigo on:_mobileCfg.restoreToolAfterAuto tag:42]];
@@ -1019,6 +1023,7 @@ static NSString *sdvProbeLocalNetwork(void) {
         [mcRows addObject:[self mkSettingsSwitchRow:@"Thanh công cụ dọc cạnh trái 36 ô (cuộn mượt kiểu Mobile)" icon:@"sidebar.left" color:kTintBlue on:_mobileCfg.verticalToolbar tag:48]];
         [mcRows addObject:[self mkSettingsSwitchRow:@"Mô tả đồ cố định + Chạm 2 lần chọn Hội thoại an toàn" icon:@"text.bubble.fill" color:kTintTeal on:_mobileCfg.safeDialogueAndTooltip tag:47]];
         [mcRows addObject:[self mkSettingsSwitchRow:@"Rung nhẹ Haptic khi cá cắn câu" icon:@"waveform.path" color:kTintBlue on:_mobileCfg.fishingHaptic tag:46]];
+        [mcRows addObject:[self mkSettingsSwitchRow:@"Tôn trọng nút gạt im lặng iPhone (tắt tiếng khi gạt)" icon:@"bell.slash.fill" color:kTintOrange on:_mobileCfg.respectMuteSwitch tag:52]];
         [mcRows addObject:[self mkSettingsSwitchRow:@"Tự tạm dừng game khi vuốt Thông báo / chuyển app" icon:@"pause.circle.fill" color:kTintIndigo on:_mobileCfg.autoPauseOnBackground tag:45]];
         [mcRows addObject:[self mkSettingsSwitchRow:@"Tự ẩn nút cảm ứng khi dùng tay cầm Bluetooth" icon:@"gamecontroller.fill" color:kTintPurple on:_mobileCfg.autoHideOnGamepad tag:50]];
         [mcRows addObject:[self mkSettingsSwitchRow:@"Tiết kiệm pin / Giảm nóng máy (30 FPS, logic vẫn chuẩn 60Hz)" icon:@"battery.75" color:kTintGreen on:_mobileCfg.batterySaver30Fps tag:49]];
@@ -1054,6 +1059,8 @@ static NSString *sdvProbeLocalNetwork(void) {
         [mcRows addObject:[self mkSliderRow:@"Đệm lề né Tai thỏ / Dynamic Island" min:-4.0f max:80.0f val:safePadVal valText:safePadTxt tag:19]];
         [mcRows addObject:[self mkSliderRow:@"Cỡ chữ & Menu PC / Mod (UI Scale)" min:0.70f max:1.50f val:uiScVal valText:uiScTxt tag:18]];
         [mcRows addObject:[self mkSliderRow:@"Kích thước nút / vùng chạm" min:0.75f max:1.45f val:_mobileCfg.buttonScale valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_mobileCfg.buttonScale * 100)] tag:17]];
+        [mcRows addObject:[self mkSliderRow:@"Độ rõ (Opacity) bộ nút Pixel" min:0.25f max:1.00f val:_mobileCfg.pixelOpacity valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_mobileCfg.pixelOpacity * 100)] tag:20]];
+        [mcRows addObject:[self mkSliderRow:@"Vùng chết Joystick (Deadzone)" min:0.05f max:0.25f val:_mobileCfg.joyDeadzone valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_mobileCfg.joyDeadzone * 100)] tag:21]];
     }
     [_pane addArrangedSubview:mkGroupedRows(mcRows, 48)];
 
@@ -1375,7 +1382,9 @@ static NSString *sdvProbeLocalNetwork(void) {
             : @"Mặc định",
         @19: (!_mobileCfg || _mobileCfg.safePaddingPx < 0)
             ? @"Tự động"
-            : [NSString stringWithFormat:@"%ld px", (long)_mobileCfg.safePaddingPx]
+            : [NSString stringWithFormat:@"%ld px", (long)_mobileCfg.safePaddingPx],
+        @20: [NSString stringWithFormat:@"%d%%", (int)roundf((_mobileCfg ? _mobileCfg.pixelOpacity : 1.0f) * 100)],
+        @21: [NSString stringWithFormat:@"%d%%", (int)roundf((_mobileCfg ? _mobileCfg.joyDeadzone : 0.11f) * 100)]
     };
     for (NSNumber *k in txt) {
         UILabel *l = _sliderLabels[k];
@@ -1443,6 +1452,30 @@ static NSString *sdvProbeLocalNetwork(void) {
                 }
             }
             return;
+        case 20:
+            if (!_mobileCfg) _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
+            _mobileCfg.pixelOpacity = sdvClampf(q, 0.25f, 1.00f);
+            [self syncLiveLabels];
+            {
+                NSTimeInterval nowM = NSDate.date.timeIntervalSinceReferenceDate;
+                if (nowM - _lastLiveSave > 0.10) {
+                    _lastLiveSave = nowM;
+                    [_mobileCfg saveToDocuments:_root.path];
+                }
+            }
+            return;
+        case 21:
+            if (!_mobileCfg) _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
+            _mobileCfg.joyDeadzone = sdvClampf(roundf(sl.value * 100.0f) / 100.0f, 0.05f, 0.25f);
+            [self syncLiveLabels];
+            {
+                NSTimeInterval nowM = NSDate.date.timeIntervalSinceReferenceDate;
+                if (nowM - _lastLiveSave > 0.10) {
+                    _lastLiveSave = nowM;
+                    [_mobileCfg saveToDocuments:_root.path];
+                }
+            }
+            return;
     }
     [self syncLiveLabels];
     NSTimeInterval now = NSDate.date.timeIntervalSinceReferenceDate;
@@ -1453,7 +1486,7 @@ static NSString *sdvProbeLocalNetwork(void) {
 }
 
 -(void)sliderEnded:(UISlider *)sl {
-    if (sl.tag == 17 || sl.tag == 18 || sl.tag == 19) {
+    if (sl.tag == 17 || sl.tag == 18 || sl.tag == 19 || sl.tag == 20 || sl.tag == 21) {
         [_mobileCfg saveToDocuments:_root.path];
         return;
     }
@@ -1568,7 +1601,7 @@ static NSString *sdvProbeLocalNetwork(void) {
         [self renderAll:NO];
         return;
     }
-    if (sw.tag >= 30 && sw.tag <= 50) {
+    if (sw.tag >= 30 && sw.tag <= 52) {
         _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
         switch (sw.tag) {
             case 30: _mobileCfg.autoTool = sw.isOn; break;
@@ -1592,6 +1625,8 @@ static NSString *sdvProbeLocalNetwork(void) {
             case 48: _mobileCfg.verticalToolbar = sw.isOn; break;
             case 49: _mobileCfg.batterySaver30Fps = sw.isOn; break;
             case 50: _mobileCfg.autoHideOnGamepad = sw.isOn; break;
+            case 51: _mobileCfg.leftHandedMobile = sw.isOn; break;
+            case 52: _mobileCfg.respectMuteSwitch = sw.isOn; break;
         }
         [_mobileCfg saveToDocuments:_root.path];
         [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];

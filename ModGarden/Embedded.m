@@ -150,13 +150,15 @@ static void sdvInitBootAndCrashLogging(NSString *docsPath) {
     } @catch (NSException *ex) { }
 }
 
-// ---- Native iOS Audio Session Manager (guarantees Playback audio even with hardware Mute switch ON!) ----
+// ---- Native iOS Audio Session Manager (Playback by default, or Ambient if user enables Respect Mute Switch!) ----
 static void sdvEnsureAudioSession(const char *reason) {
     @try {
         AVAudioSession *s = AVAudioSession.sharedInstance;
         NSError *catErr = nil;
         NSError *actErr = nil;
-        [s setCategory:AVAudioSessionCategoryPlayback
+        BOOL respectMute = [NSUserDefaults.standardUserDefaults boolForKey:@"sdv_respect_mute_v1"];
+        AVAudioSessionCategory targetCat = respectMute ? AVAudioSessionCategoryAmbient : AVAudioSessionCategoryPlayback;
+        [s setCategory:targetCat
                   mode:AVAudioSessionModeDefault
                options:AVAudioSessionCategoryOptionMixWithOthers
                  error:&catErr];
@@ -743,7 +745,10 @@ static void sdvApplyAutoHideHomeIndicator(UIViewController *vc) {
 @property(nonatomic, strong) SDVPassThroughWindow *toastWindow;
 @property(nonatomic, assign) BOOL shownStartupToast;
 @property(nonatomic, assign) BOOL autoOpenedSetup;
+@property(nonatomic, strong) NSTimer *hapticTimer;
 -(void)attachToGameWindows;
+-(void)startHapticTimer;
+-(void)stopHapticTimer;
 @end
 
 static SDVGardenGestureHost *gSdvGardenHost = nil;
@@ -851,11 +856,35 @@ static SDVGardenGestureHost *gSdvGardenHost = nil;
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onSceneOrAppNotification) name:UIApplicationDidBecomeActiveNotification object:nil];
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onAppWillResignOrDeactivate) name:UIApplicationWillResignActiveNotification object:nil];
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onAppWillResignOrDeactivate) name:UISceneWillDeactivateNotification object:nil];
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onAppDidEnterBackground) name:UIApplicationDidEnterBackgroundNotification object:nil];
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onAppDidEnterBackground) name:UISceneDidEnterBackgroundNotification object:nil];
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onOrientationChanged) name:UIDeviceOrientationDidChangeNotification object:nil];
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onAudioModeChanged) name:@"SDVAudioModeChangedNotification" object:nil];
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onAudioInterruption:) name:AVAudioSessionInterruptionNotification object:nil];
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onAudioRouteChange:) name:AVAudioSessionRouteChangeNotification object:nil];
     }
     return self;
+}
+
+-(void)startHapticTimer {
+    if (self.hapticTimer) return;
+    self.hapticTimer = [NSTimer scheduledTimerWithTimeInterval:0.12 repeats:YES block:^(NSTimer *t) {
+        (void)t;
+        [self pollFishBiteHaptic];
+    }];
+}
+
+-(void)stopHapticTimer {
+    [self.hapticTimer invalidate];
+    self.hapticTimer = nil;
+}
+
+-(void)onAppDidEnterBackground {
+    [self stopHapticTimer];
+}
+
+-(void)onAudioModeChanged {
+    sdvEnsureAudioSession("mute-switch-pref-changed");
 }
 
 -(void)onAppWillResignOrDeactivate {
@@ -870,6 +899,10 @@ static SDVGardenGestureHost *gSdvGardenHost = nil;
 
 -(void)onOrientationChanged {
     dispatch_async(dispatch_get_main_queue(), ^{
+        [self syncSafeAreaToDocs];
+    });
+    // Re-sync after UIKit rotation animation completes so Notch/Dynamic Island insets update immediately!
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [self syncSafeAreaToDocs];
     });
 }
@@ -924,6 +957,7 @@ static SDVGardenGestureHost *gSdvGardenHost = nil;
 -(void)onSceneOrAppNotification {
     dispatch_async(dispatch_get_main_queue(), ^{
         sdvEnsureAudioSession("did-become-active");
+        [self startHapticTimer];
         [self attachToGameWindows];
     });
 }
@@ -1338,7 +1372,15 @@ __attribute__((constructor)) static void startGardenControls(void) {
                 snprintf(gSdvHapticFlagPath, sizeof(gSdvHapticFlagPath), "%s/sdv_haptic_bite.flag", docs.UTF8String);
                 snprintf(gSdvSafeAreaPath, sizeof(gSdvSafeAreaPath), "%s/sdv_safe_area.cfg", docs.UTF8String);
             }
+            // Dynamically tune Mono SGen GC heap limit based on real physical iPhone RAM (runs before main()/Mono init!)
+            uint64_t physRam = NSProcessInfo.processInfo.physicalMemory;
+            if (physRam >= 5500ULL * 1024 * 1024) {
+                setenv("MONO_GC_PARAMS", "nursery-size=8m,soft-heap-limit=640m,evacuation-threshold=66", 1);
+            } else {
+                setenv("MONO_GC_PARAMS", "nursery-size=4m,soft-heap-limit=384m,evacuation-threshold=66", 1);
+            }
             sdvInitBootAndCrashLogging(docs);
+            sdvBootLogFmt([NSString stringWithFormat:@"[GC] MONO_GC_PARAMS=%s", getenv("MONO_GC_PARAMS") ?: "?"]);
             sdvEnsureAudioSession("constructor");
             syncBundledLidgren(docs);
             syncBundledSmapi(docs);
@@ -1359,10 +1401,7 @@ __attribute__((constructor)) static void startGardenControls(void) {
                 (void)t;
                 [gSdvGardenHost attachToGameWindows];
             }];
-            [NSTimer scheduledTimerWithTimeInterval:0.12 repeats:YES block:^(NSTimer *t) {
-                (void)t;
-                [gSdvGardenHost pollFishBiteHaptic];
-            }];
+            [gSdvGardenHost startHapticTimer];
         } @catch (NSException *ex) {
             sdvBootLogFmt([NSString stringWithFormat:@"[ERR] main init exception: %@", ex]);
         }

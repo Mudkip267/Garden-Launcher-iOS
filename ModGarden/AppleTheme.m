@@ -253,6 +253,8 @@ static SDVAppleButton *mkIOSButton(NSString *title, NSString *sfSymbol, UIColor 
     [b setTitleColor:fg forState:UIControlStateNormal];
     b.titleLabel.font = iosFont(fontSize, UIFontWeightSemibold);
     b.titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
     b.contentEdgeInsets = pad;
     if (title.length) [b setTitle:title forState:UIControlStateNormal];
     if (sfSymbol.length) {
@@ -265,6 +267,7 @@ static SDVAppleButton *mkIOSButton(NSString *title, NSString *sfSymbol, UIColor 
             }
         }
     }
+#pragma clang diagnostic pop
     return b;
 }
 

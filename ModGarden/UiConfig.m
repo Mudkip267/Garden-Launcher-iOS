@@ -280,6 +280,10 @@ static long long sdvNextRev(void) {
 @property(nonatomic, assign) BOOL safeDialogueAndTooltip;
 @property(nonatomic, assign) BOOL verticalToolbar;
 @property(nonatomic, assign) BOOL batterySaver30Fps;
+@property(nonatomic, assign) float pixelOpacity; // 0.25..1.00
+@property(nonatomic, assign) BOOL leftHandedMobile;
+@property(nonatomic, assign) float joyDeadzone; // 0.05..0.25
+@property(nonatomic, assign) BOOL respectMuteSwitch;
 @property(nonatomic, strong) NSMutableArray<SDVCustomKeyEntry *> *customKeys;
 
 +(instancetype)defaults;
@@ -320,6 +324,10 @@ static long long sdvNextRev(void) {
     c.safeDialogueAndTooltip = YES;
     c.verticalToolbar = NO;
     c.batterySaver30Fps = NO;
+    c.pixelOpacity = 1.00f;
+    c.leftHandedMobile = NO;
+    c.joyDeadzone = 0.11f;
+    c.respectMuteSwitch = [NSUserDefaults.standardUserDefaults boolForKey:@"sdv_respect_mute_v1"];
     c.customKeys = [NSMutableArray array];
     return c;
 }
@@ -391,6 +399,14 @@ static long long sdvNextRev(void) {
             c.verticalToolbar = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
         } else if ([k isEqualToString:@"saver30fps"]) {
             c.batterySaver30Fps = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
+        } else if ([k isEqualToString:@"pixelopacity"]) {
+            c.pixelOpacity = sdvClampf(v.floatValue, 0.25f, 1.00f);
+        } else if ([k isEqualToString:@"lefthanded"]) {
+            c.leftHandedMobile = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
+        } else if ([k isEqualToString:@"joydeadzone"]) {
+            c.joyDeadzone = sdvClampf(v.floatValue, 0.05f, 0.25f);
+        } else if ([k isEqualToString:@"respectmute"]) {
+            c.respectMuteSwitch = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
         } else if ([k isEqualToString:@"ckey"] && c.customKeys.count < 16) {
             NSArray<NSString *> *pts = [v componentsSeparatedByString:@"|"];
             if (pts.count >= 7 && pts[2].integerValue > 0) {
@@ -478,8 +494,11 @@ static long long sdvNextRev(void) {
         }
     }
 
+    [NSUserDefaults.standardUserDefaults setBool:self.respectMuteSwitch forKey:@"sdv_respect_mute_v1"];
+    [NSNotificationCenter.defaultCenter postNotificationName:@"SDVAudioModeChangedNotification" object:nil];
+
     NSMutableString *s = [NSMutableString stringWithFormat:
-        @"mode=%ld\nautotool=%d\nautoattack=%d\npinchzoom=%d\ntouchhint2=%d\ntoputility=%d\nswapbuttons=%d\nmobileshopdrag=%d\nautokeyboard=%d\nsafecrafting=%d\nautosavemin=%ld\nreduceweather=%d\nuiscale=%.2f\nbuttonscale=%.2f\nemotebtn=%d\nautorepeat=%d\nrestoretool=%d\nspecbtn=%d\nautocombatmode=%d\nautohidegp=%d\nautopause=%d\nfishhaptic=%d\nsafepadding=%ld\nsafedialogue=%d\nverticaltb=%d\nsaver30fps=%d\n",
+        @"mode=%ld\nautotool=%d\nautoattack=%d\npinchzoom=%d\ntouchhint2=%d\ntoputility=%d\nswapbuttons=%d\nmobileshopdrag=%d\nautokeyboard=%d\nsafecrafting=%d\nautosavemin=%ld\nreduceweather=%d\nuiscale=%.2f\nbuttonscale=%.2f\nemotebtn=%d\nautorepeat=%d\nrestoretool=%d\nspecbtn=%d\nautocombatmode=%d\nautohidegp=%d\nautopause=%d\nfishhaptic=%d\nsafepadding=%ld\nsafedialogue=%d\nverticaltb=%d\nsaver30fps=%d\npixelopacity=%.2f\nlefthanded=%d\njoydeadzone=%.2f\nrespectmute=%d\n",
         (long)self.mode, self.autoTool ? 1 : 0, self.autoAttack ? 1 : 0,
         self.pinchZoom ? 1 : 0, self.showTouchHint ? 1 : 0,
         self.showTopUtility ? 1 : 0, self.swapRightButtons ? 1 : 0,
@@ -493,7 +512,9 @@ static long long sdvNextRev(void) {
         self.autoCombatMode ? 1 : 0, self.autoHideOnGamepad ? 1 : 0,
         self.autoPauseOnBackground ? 1 : 0, self.fishingHaptic ? 1 : 0,
         (long)self.safePaddingPx, self.safeDialogueAndTooltip ? 1 : 0,
-        self.verticalToolbar ? 1 : 0, self.batterySaver30Fps ? 1 : 0];
+        self.verticalToolbar ? 1 : 0, self.batterySaver30Fps ? 1 : 0,
+        sdvClampf(self.pixelOpacity, 0.25f, 1.00f), self.leftHandedMobile ? 1 : 0,
+        sdvClampf(self.joyDeadzone, 0.05f, 0.25f), self.respectMuteSwitch ? 1 : 0];
     for (NSString *ex in extraLines) {
         [s appendFormat:@"%@\n", ex];
     }

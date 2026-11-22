@@ -30,8 +30,11 @@ namespace SDVMobileControls
                 if (!loc.isTilePassable(new Location(tx, ty), Game1.viewport))
                     return false;
 
-                // Use a slightly inset 44x44 farmer foot hitbox centered on the 64x64 tile
-                var box = new Microsoft.Xna.Framework.Rectangle(tx * 64 + 10, ty * 64 + 10, 44, 44);
+                // Use a slightly inset 44x44 foot hitbox on foot, or a wider 72x48 hitbox while riding a Horse so A* avoids tight 1-tile fence traps!
+                bool riding = who != null && who.isRidingHorse();
+                var box = riding
+                    ? new Microsoft.Xna.Framework.Rectangle(tx * 64 - 4, ty * 64 + 8, 72, 48)
+                    : new Microsoft.Xna.Framework.Rectangle(tx * 64 + 10, ty * 64 + 10, 44, 44);
                 if (loc.isCollidingPosition(box, Game1.viewport, isFarmer: true, 0, glider: false, who))
                     return false;
 

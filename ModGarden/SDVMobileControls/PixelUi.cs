@@ -22,6 +22,8 @@ namespace SDVMobileControls
     /// </summary>
     internal static class PixelUi
     {
+        public static float GlobalOpacity { get; set; } = 1.0f;
+
         private static Texture2D _pxCircleFill;
         private static Texture2D _pxCircleRing;
         private static Texture2D _pxJoyTicks;
@@ -95,6 +97,7 @@ namespace SDVMobileControls
             if (sb == null || pixel == null || r.Width < 8 || r.Height < 8)
                 return;
 
+            alphaScale = Math.Clamp(alphaScale * GlobalOpacity, 0.12f, 1.0f);
             int px = Step(vpH);
             if (r.Width < px * 6 || r.Height < px * 6)
                 px = Math.Max(1, Math.Min(r.Width, r.Height) / 6);
@@ -162,8 +165,9 @@ namespace SDVMobileControls
             EnsurePixelCircleTextures(sb.GraphicsDevice);
 
             GetRolePalette(role, pressed, out Color fill, out Color outer, out Color hi, out _, out Color ink);
-            float fillAlpha = pressed ? 0.56f : 0.25f;
-            float ringAlpha = pressed ? 0.82f : 0.44f;
+            float gOp = Math.Clamp(GlobalOpacity, 0.20f, 1.0f);
+            float fillAlpha = (pressed ? 0.56f : 0.25f) * gOp;
+            float ringAlpha = (pressed ? 0.82f : 0.44f) * gOp;
 
             // Keep idle super unobtrusive
             Color baseCol = pressed ? new Color(fill.R, fill.G, fill.B) : new Color(34, 24, 16);
@@ -211,9 +215,10 @@ namespace SDVMobileControls
             var baseR = new Rectangle((int)(center.X - radius), (int)(center.Y - radius), d, d);
             var outR = new Rectangle(baseR.X - px, baseR.Y - px, baseR.Width + px * 2, baseR.Height + px * 2);
 
-            float fillA = (active ? 0.30f : 0.16f) * opacityScale;
-            float ringA = (active ? 0.56f : 0.32f) * opacityScale;
-            float tickA = (active ? 0.48f : 0.24f) * opacityScale;
+            float gOp = Math.Clamp(opacityScale * GlobalOpacity, 0.16f, 1.0f);
+            float fillA = (active ? 0.30f : 0.16f) * gOp;
+            float ringA = (active ? 0.56f : 0.32f) * gOp;
+            float tickA = (active ? 0.48f : 0.24f) * gOp;
 
             sb.Draw(_pxCircleFill, baseR, new Color(34, 24, 16) * fillA);
             sb.Draw(_pxCircleRing, outR, new Color(18, 11, 7) * (ringA * 0.75f));

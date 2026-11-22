@@ -464,7 +464,11 @@ static BOOL extractWithLibArchive(NSString *archivePath, NSString *displayName, 
                 if (rd == 0) break;
                 if (rd < 0) {
                     const char *es = api->error_string ? api->error_string(a) : NULL;
-                    if (outErr) *outErr = [NSString stringWithFormat:@"Không giải nén được '%@' trong '%@' (%s).", r.lastPathComponent, displayName, es ?: "chuẩn nén đặc biệt hoặc có mật khẩu"];
+                    BOOL isRar = [displayName.lowercaseString hasSuffix:@".rar"];
+                    NSString *hint = isRar
+                        ? @" (Gợi ý: iOS cũ có thể không hỗ trợ chuẩn nén RAR5 mới của WinRAR 6/7 — hãy đổi sang tệp .ZIP hoặc giải nén sẵn thành thư mục rồi chọn!)"
+                        : @"";
+                    if (outErr) *outErr = [NSString stringWithFormat:@"Không giải nén được '%@' trong '%@' (%s).%@", r.lastPathComponent, displayName, es ?: "chuẩn nén đặc biệt hoặc có mật khẩu", hint];
                     entryOk = NO;
                     break;
                 }

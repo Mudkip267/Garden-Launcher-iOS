@@ -568,18 +568,26 @@ namespace SDVMobileControls
                     return true;
                 }
 
-                // If user has a Tap-Selected slot in Backpack and taps an Equipment slot -> equip cleanly!
-                if (!isChestMenu && _selectedBagSlot >= 0 && _selectedBagInv != null &&
-                    equipIcons != null && ownerMenu is InventoryPage ipEq)
+                // If user taps an Equipment slot (Ring / Boots / Hat / Shirt / Pants / Trinket):
+                // - With a Backpack item selected -> equip it cleanly!
+                // - With NO Backpack item selected -> unequip straight into Backpack (NEVER leaves item stuck on CursorSlotItem!)
+                if (!isChestMenu && equipIcons != null && ownerMenu is InventoryPage ipEq)
                 {
                     for (int i = 0; i < equipIcons.Count; i++)
                     {
                         if (equipIcons[i].containsPoint(uiPt.X, uiPt.Y))
                         {
-                            Item selItem = GetItemAt(_selectedBagInv, _selectedBagSlot);
-                            if (selItem != null)
-                                TryEquipItem(ipEq, _selectedBagInv, _selectedBagSlot, selItem, uiPt);
-                            ClearSelection();
+                            if (_selectedBagSlot >= 0 && _selectedBagInv != null)
+                            {
+                                Item selItem = GetItemAt(_selectedBagInv, _selectedBagSlot);
+                                if (selItem != null)
+                                    TryEquipItem(ipEq, _selectedBagInv, _selectedBagSlot, selItem, uiPt);
+                                ClearSelection();
+                            }
+                            else
+                            {
+                                TryUnequipToBackpack(ipEq, uiPt);
+                            }
                             _popConsumeTouchId = tl.Id;
                             return true;
                         }
@@ -733,6 +741,11 @@ namespace SDVMobileControls
                     {
                         if (dstInv == srcInv && dstSlot == srcSlot)
                             return true;
+                        if (ownerMenu is ItemGrabMenu grabDrop && srcInv == playerInv && dstInv == chestInv && !grabDrop.reverseGrab && !grabDrop.shippingBin)
+                        {
+                            try { Game1.playSound("cancel"); } catch { }
+                            return true;
+                        }
                         MoveOrSwapSlots(ownerMenu as ItemGrabMenu, srcInv, srcSlot, dstInv, dstSlot);
                         return true;
                     }
@@ -757,6 +770,12 @@ namespace SDVMobileControls
                     // SHORT TAP!
                     if (isChestMenu && ownerMenu is ItemGrabMenu grab)
                     {
+                        if (srcInv == playerInv && !grab.reverseGrab && !grab.shippingBin)
+                        {
+                            // Read-only Fishing Treasure Chest / Mine Reward Chest: never push player items into treasure chest!
+                            try { Game1.playSound("cancel"); } catch { }
+                            return true;
+                        }
                         InventoryMenu dstInv = (srcInv == playerInv) ? chestInv : playerInv;
                         TransferQuantityBetweenInventories(grab, srcInv, srcSlot, dstInv, item.Stack);
                         return true;
@@ -845,6 +864,31 @@ namespace SDVMobileControls
             {
                 SetItemAt(srcInv, srcSlot, Game1.player.CursorSlotItem);
                 Game1.player.CursorSlotItem = null;
+            }
+        }
+
+        private static void TryUnequipToBackpack(InventoryPage ip, Point uiPt)
+        {
+            if (ip == null || Game1.player == null) return;
+            Game1.player.CursorSlotItem = null;
+            try { ip.receiveLeftClick(uiPt.X, uiPt.Y, true); } catch { }
+            Item lifted = Game1.player.CursorSlotItem;
+            if (lifted == null) return;
+
+            Game1.player.CursorSlotItem = null;
+            Item rem = null;
+            try { rem = Game1.player.addItemToInventory(lifted); } catch { rem = lifted; }
+            if (rem != null)
+            {
+                // Backpack is completely full -> re-equip back into slot so CursorSlotItem NEVER sticks!
+                Game1.player.CursorSlotItem = rem;
+                try { ip.receiveLeftClick(uiPt.X, uiPt.Y, true); } catch { }
+                Game1.player.CursorSlotItem = null;
+                try { Game1.playSound("cancel"); } catch { }
+            }
+            else
+            {
+                try { Game1.playSound("dwop"); } catch { }
             }
         }
 

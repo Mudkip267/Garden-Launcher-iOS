@@ -155,6 +155,10 @@ namespace SDVMobileControls
         private bool _menuTapDragged;
         private bool _menuTapImmediateDrag;
         private bool _menuTapCameraPan;
+        private double _menuTapStartSec;
+        private bool _menuTapRightClicked;
+        private int _holdSweepCooldown;
+        private int _lastAppliedSafeRightPad = -999;
 
         // Hover-first safe crafting, Community Center bundle & safe 2-tap Dialogue state
         private CraftingPage _craftHoverMenu;
@@ -528,6 +532,7 @@ namespace SDVMobileControls
             _menuTapDragged = false;
             _menuTapImmediateDrag = false;
             _menuTapCameraPan = false;
+            _menuTapRightClicked = false;
         }
 
         private void PollAutoKeyboard(object pad, PadBridge br, double nowSec)
@@ -646,11 +651,13 @@ namespace SDVMobileControls
                 _cfg.TriggerFishBiteHaptic();
             _wasFishNibbling = nibblingNow;
 
-            // 3. Vertical Scrollable Toolbar visibility sync (restores PC horizontal Toolbar immediately when OFF)
+            // 3. Vertical Scrollable Toolbar visibility sync (resets cached PC Toolbar cleanly on Return to Title!)
             if (Context.IsWorldReady)
                 _verticalToolbar.SyncHorizontalToolbarVisibility(IsMobileModeActive && _cfg.VerticalToolbar);
+            else
+                _verticalToolbar.ClearCachedToolbar();
 
-            // 4. Safe Area Notch/Dynamic Island padding for DayTimeMoneyBox
+            // 4. Safe Area Notch/Dynamic Island padding for DayTimeMoneyBox (live bidirectional!)
             ApplySafeAreaToDayTimeMoneyBox();
 
             // 5. Optional Battery Saver 30 FPS render cap (preserves 100% 60Hz logic speed; auto-suspends for BobberBar/minigames/fades!)
@@ -677,16 +684,19 @@ namespace SDVMobileControls
             if (!Context.IsWorldReady || Game1.dayTimeMoneyBox == null || _vpW <= 0)
                 return;
             int rightPadVp = ComputeSafeRightPx();
-            if (rightPadVp <= 0)
+            if (rightPadVp == 0 && _lastAppliedSafeRightPad == 0)
                 return;
             try
             {
                 int uiW = Game1.uiViewport.Width;
                 if (uiW <= 0) return;
                 float padUi = rightPadVp * (uiW / (float)_vpW);
-                float maxX = uiW - 300f - padUi;
-                if (Game1.dayTimeMoneyBox.position.X > maxX)
-                    Game1.dayTimeMoneyBox.position.X = Math.Max(0f, maxX);
+                float targetX = Math.Max(0f, uiW - 300f - padUi);
+                if (rightPadVp != _lastAppliedSafeRightPad || Game1.dayTimeMoneyBox.position.X > targetX)
+                {
+                    Game1.dayTimeMoneyBox.position.X = targetX;
+                    _lastAppliedSafeRightPad = rightPadVp;
+                }
             }
             catch { }
         }
@@ -1175,6 +1185,8 @@ namespace SDVMobileControls
                     _menuTapLastY = vp.Y;
                     _menuTapAccumY = 0f;
                     _menuTapDragged = false;
+                    _menuTapRightClicked = false;
+                    _menuTapStartSec = nowSec;
                     _menuTapImmediateDrag = IsImmediateDragMenu(activeMenu, ui);
                     _menuTapCameraPan = !_menuTapImmediateDrag && IsCameraPanMenu(activeMenu, ui);
 
@@ -1186,6 +1198,9 @@ namespace SDVMobileControls
                 }
                 else if (tl.State == TouchLocationState.Moved && tl.Id == _menuTapTouchId)
                 {
+                    if (_menuTapRightClicked)
+                        continue;
+
                     if (_menuTapImmediateDrag)
                     {
                         try { activeMenu.leftClickHeld(ui.X, ui.Y); } catch { }
@@ -1211,6 +1226,7 @@ namespace SDVMobileControls
                     {
                         float dy = vp.Y - _menuTapLastY;
                         _menuTapLastY = vp.Y;
+                        float totalDist = Vector2.Distance(vp, _menuTapStartVp);
                         float totalDy = Math.Abs(vp.Y - _menuTapStartVp.Y);
                         float dragThresh = Math.Max(22f, _vpH * 0.026f);
                         if (!_menuTapDragged && totalDy >= dragThresh)
@@ -1229,6 +1245,14 @@ namespace SDVMobileControls
                                 try { activeMenu.receiveScrollWheelAction(wheel); } catch { }
                             }
                         }
+                        else if (totalDist < 16f && (nowSec - _menuTapStartSec) >= 0.45 && CanLongPressRightClick(activeMenu))
+                        {
+                            // Long-Press (0.45s stationary) = PC Right-Click on PC/Mod menus (CJB, Chests Anywhere, Lookup Anything, etc.)!
+                            _menuTapRightClicked = true;
+                            try { activeMenu.performHoverAction(ui.X, ui.Y); } catch { }
+                            try { activeMenu.receiveRightClick(ui.X, ui.Y, true); } catch { }
+                            try { Game1.playSound("smallSelect"); } catch { }
+                        }
                         else
                         {
                             try { activeMenu.performHoverAction(ui.X, ui.Y); } catch { }
@@ -1237,6 +1261,11 @@ namespace SDVMobileControls
                 }
                 else if ((tl.State == TouchLocationState.Released || tl.State == TouchLocationState.Invalid) && tl.Id == _menuTapTouchId)
                 {
+                    if (_menuTapRightClicked)
+                    {
+                        ResetMenuTapState();
+                        continue;
+                    }
                     if (_menuTapImmediateDrag)
                     {
                         try { activeMenu.releaseLeftClick(ui.X, ui.Y); } catch { }
@@ -1322,6 +1351,18 @@ namespace SDVMobileControls
             }
 
             ApplyToPad(pad, Vector2.Zero, false, false, false);
+            return true;
+        }
+
+        private static bool CanLongPressRightClick(IClickableMenu menu)
+        {
+            if (menu == null) return false;
+            if (menu is DialogueBox || menu is LetterViewerMenu || menu is BobberBar || menu is TitleMenu || menu is EmoteMenu || menu is MineElevatorMenu)
+                return false;
+            if (menu is GameMenu gm)
+            {
+                try { if (gm.GetCurrentPage() is OptionsPage) return false; } catch { }
+            }
             return true;
         }
 
@@ -1498,6 +1539,7 @@ namespace SDVMobileControls
             EnsureTextures(sb.GraphicsDevice);
             if (!RefreshViewport()) return;
             ComputeLayout();
+            PixelUi.GlobalOpacity = _cfg.PixelOpacity;
             var br = EnsureBridge(pad);
 
             if (showInvCtx)
@@ -2054,7 +2096,7 @@ namespace SDVMobileControls
             _toolPressed = sawTool || _tapChargingTool;
             _interactPressed = sawInteract;
 
-            // --- 2. Hold-to-Walk ---
+            // --- 2. Hold-to-Walk (+ Smooth Auto-Harvest/Machine Sweep in Tap-to-Move!) ---
             if (_holdWalking && !_tapChargingTool && stickVec == Vector2.Zero && Game1.player != null)
             {
                 Vector2 playerScreen = WorldToViewport(Game1.player.GetBoundingBox().Center.ToVector2());
@@ -2063,6 +2105,7 @@ namespace SDVMobileControls
                 {
                     diff.Normalize();
                     stickVec = diff;
+                    TryHoldWalkAutoHarvest(Game1.player, Game1.currentLocation);
                 }
             }
 
@@ -2171,7 +2214,43 @@ namespace SDVMobileControls
         private static bool CanChargeCurrentTool()
         {
             var tool = Game1.player?.CurrentTool;
+            if (tool is FishingRod fr)
+                return !fr.isFishing && !fr.isReeling && !fr.isNibbling;
             return (tool is Hoe || tool is WateringCan) && tool.UpgradeLevel >= 1;
+        }
+
+        private void TryHoldWalkAutoHarvest(Farmer who, GameLocation loc)
+        {
+            if (!_cfg.AutoTool || who == null || loc == null || who.UsingTool || who.isRidingHorse())
+                return;
+            if (_holdSweepCooldown > 0)
+            {
+                _holdSweepCooldown--;
+                return;
+            }
+            Point pt = who.TilePoint;
+            int fx = who.FacingDirection == 1 ? 1 : (who.FacingDirection == 3 ? -1 : 0);
+            int fy = who.FacingDirection == 2 ? 1 : (who.FacingDirection == 0 ? -1 : 0);
+            Point front = new Point(pt.X + fx, pt.Y + fy);
+            Vector2 tv = new Vector2(front.X, front.Y);
+
+            bool ready = false;
+            if (loc.objects != null && loc.objects.TryGetValue(tv, out StardewValley.Object obj) && obj != null)
+            {
+                if (obj.readyForHarvest.Value || obj.IsSpawnedObject)
+                    ready = true;
+            }
+            else if (loc.terrainFeatures != null && loc.terrainFeatures.TryGetValue(tv, out StardewValley.TerrainFeatures.TerrainFeature tf) && tf is StardewValley.TerrainFeatures.HoeDirt hd)
+            {
+                if (hd.crop != null && hd.readyForHarvest() && hd.crop.GetHarvestMethod() != StardewValley.GameData.Crops.HarvestMethod.Scythe)
+                    ready = true;
+            }
+
+            if (ready)
+            {
+                _actionPulseAFrames = 2;
+                _holdSweepCooldown = 8;
+            }
         }
 
         private void TryPeriodicAutoSave(PadBridge br, Vector2 stickVec, bool anyAction, double nowSec)
@@ -2576,7 +2655,8 @@ namespace SDVMobileControls
         {
             Vector2 delta = curVp - _joyOrigin;
             float dist = delta.Length();
-            if (dist < _activeJoyRadius * 0.11f)
+            float dz = Math.Clamp(_cfg.JoyDeadzone, 0.05f, 0.25f);
+            if (dist < _activeJoyRadius * dz)
             {
                 _joyKnob = curVp;
                 return Vector2.Zero;
@@ -2718,17 +2798,52 @@ namespace SDVMobileControls
             if (who == null || loc == null)
                 return;
 
+            // Instant Hook / Reel when fishing in Tap-to-Move or Hybrid mode (tap anywhere on screen!)
+            if (who.CurrentTool is FishingRod fr && (fr.isFishing || fr.isNibbling))
+            {
+                ClearPath();
+                _actionPulseXFrames = 3;
+                return;
+            }
+
             Vector2 worldPos = ViewportToWorld(vp);
             Point tappedTile = new Point((int)Math.Floor(worldPos.X / 64f), (int)Math.Floor(worldPos.Y / 64f));
             Point playerTile = who.TilePoint;
+            int cheb = Math.Max(Math.Abs(playerTile.X - tappedTile.X), Math.Abs(playerTile.Y - tappedTile.Y));
+
+            // Tap directly on farmer (cheb == 0): Dismount Horse OR Eat/Drink/Use held Food/Coffee/Bomb/Staircase/Warp Totem!
+            if (cheb == 0)
+            {
+                if (who.isRidingHorse())
+                {
+                    ClearPath();
+                    _actionPulseAFrames = 3;
+                    return;
+                }
+                if (who.ActiveObject != null)
+                {
+                    ClearPath();
+                    _actionPulseAFrames = 3;
+                    return;
+                }
+            }
 
             TileIntent intent = AutoToolAndCombat.InspectTile(loc, tappedTile, who, _cfg.AutoTool);
 
-            int cheb = Math.Max(Math.Abs(playerTile.X - tappedTile.X), Math.Abs(playerTile.Y - tappedTile.Y));
             if (intent.Kind != TileActionKind.None && cheb <= 1)
             {
                 ClearPath();
                 TriggerTileIntent(who, tappedTile, intent);
+                return;
+            }
+
+            // Tap empty adjacent tile while holding a placeable object (Chest, Keg, Fence, Path, Sprinkler, Furniture, Bomb, etc.)!
+            if (intent.Kind == TileActionKind.None && cheb == 1 && who.ActiveObject != null &&
+                (who.ActiveObject.isPlaceable() || who.ActiveObject.bigCraftable.Value))
+            {
+                ClearPath();
+                who.faceGeneralDirection(new Vector2(tappedTile.X * 64f + 32f, tappedTile.Y * 64f + 32f));
+                _actionPulseAFrames = 3;
                 return;
             }
 
@@ -3115,6 +3230,7 @@ namespace SDVMobileControls
             EnsureTextures(sb.GraphicsDevice);
             if (!RefreshViewport()) return;
             ComputeLayout();
+            PixelUi.GlobalOpacity = _cfg.PixelOpacity;
 
             if (MobileMinigamePad.DetectCurrentArcadeMinigame() != MobileMinigamePad.ArcadeKind.None)
             {
@@ -3572,6 +3688,31 @@ namespace SDVMobileControls
             int rightEdgePad = Math.Max(_safeRightPx + 12, Math.Max(16, (int)(_vpW * 0.025f)));
             _btnRotateRect = new Rectangle(_vpW - rotW - rightEdgePad, (int)(_vpH * 0.34f), rotW, rotH);
             _btnSpecRect = new Rectangle(_vpW - rotW - rightEdgePad, (int)(_vpH * 0.34f), rotW, rotH);
+
+            // 1-Tap Left-Handed Mirror Layout (Joystick on Right, Action Buttons on Left)
+            if (_cfg.LeftHandedMobile && !_editMode)
+            {
+                Rectangle MirrorX(Rectangle r) => new Rectangle(_vpW - r.Right, r.Y, r.Width, r.Height);
+                _invJoyRect = MirrorX(_invJoyRect);
+                _invToolRect = MirrorX(_invToolRect);
+                _invActRect = MirrorX(_invActRect);
+                _visJoyCenter = new Vector2(_vpW - _visJoyCenter.X, _visJoyCenter.Y);
+                _visToolRect = MirrorX(_visToolRect);
+                _visActRect = MirrorX(_visActRect);
+                _btnRotateRect = MirrorX(_btnRotateRect);
+                _btnSpecRect = MirrorX(_btnSpecRect);
+            }
+
+            // Auto-clear left-edge VerticalToolbar so invisible joystick never overlaps toolbar scroll strip!
+            if (_cfg.VerticalToolbar && !_editMode)
+            {
+                int minX = _verticalToolbar.Bounds.Right + 6;
+                if (_invJoyRect.X < minX && _invJoyRect.Right > minX + 60)
+                {
+                    int delta = minX - _invJoyRect.X;
+                    _invJoyRect = new Rectangle(minX, _invJoyRect.Y, Math.Max(60, _invJoyRect.Width - delta), _invJoyRect.Height);
+                }
+            }
 
             // Compact ROW quick-switch pill right beside Toolbar (only when player has > 12 inventory slots & Horizontal PC Toolbar!)
             _btnToolbarRowRect = Rectangle.Empty;

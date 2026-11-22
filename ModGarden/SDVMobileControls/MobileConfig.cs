@@ -56,6 +56,9 @@ namespace SDVMobileControls
         public bool SafeDialogueAndTooltip { get; set; } = true;  // Fixed compact item tooltip + 2-tap safe dialogue choice confirmation
         public bool VerticalToolbar { get; set; } = false;        // Optional Mobile-style left vertical 36-slot scrollable toolbar
         public bool BatterySaver30Fps { get; set; } = false;      // Optional 30 FPS render cap (keeps full 60Hz game logic speed!)
+        public float PixelOpacity { get; set; } = 1.0f;           // 0.25..1.00 opacity scale for Pixel-Art touch controls
+        public bool LeftHandedMobile { get; set; } = false;       // 1-tap mirror layout for left-handed players (Joy right, Buttons left)
+        public float JoyDeadzone { get; set; } = 0.11f;           // 0.05..0.25 joystick deadzone sensitivity
 
         // Normalized layout (0..1 of viewport) for Invisible Mode: Left Joystick Rect + 2 Right Vertical Rectangular Bars
         public float InvJoyX { get; set; }
@@ -373,6 +376,9 @@ namespace SDVMobileControls
                         case "safedialogue": SafeDialogueAndTooltip = ParseBool(v, true); break;
                         case "verticaltb": VerticalToolbar = ParseBool(v, false); break;
                         case "saver30fps": BatterySaver30Fps = ParseBool(v, false); break;
+                        case "pixelopacity": PixelOpacity = ParseFloat(v, 1.0f, 0.25f, 1.00f); break;
+                        case "lefthanded": LeftHandedMobile = ParseBool(v, false); break;
+                        case "joydeadzone": JoyDeadzone = ParseFloat(v, 0.11f, 0.05f, 0.25f); break;
 
                         case "inv_joy_x": InvJoyX = ParseFloat(v, InvJoyX, 0.0f, 0.90f); break;
                         case "inv_joy_y": InvJoyY = ParseFloat(v, InvJoyY, 0.0f, 0.90f); break;
@@ -475,6 +481,9 @@ namespace SDVMobileControls
                 sb.AppendLine($"safedialogue={(SafeDialogueAndTooltip ? 1 : 0)}");
                 sb.AppendLine($"verticaltb={(VerticalToolbar ? 1 : 0)}");
                 sb.AppendLine($"saver30fps={(BatterySaver30Fps ? 1 : 0)}");
+                sb.AppendLine($"pixelopacity={PixelOpacity.ToString("0.00", CultureInfo.InvariantCulture)}");
+                sb.AppendLine($"lefthanded={(LeftHandedMobile ? 1 : 0)}");
+                sb.AppendLine($"joydeadzone={JoyDeadzone.ToString("0.00", CultureInfo.InvariantCulture)}");
                 sb.AppendLine($"inv_joy_x={F(InvJoyX)}");
                 sb.AppendLine($"inv_joy_y={F(InvJoyY)}");
                 sb.AppendLine($"inv_joy_w={F(InvJoyW)}");

@@ -37,6 +37,12 @@ namespace SDVMobileControls
             _tappedSlot = -1;
         }
 
+        public void ClearCachedToolbar()
+        {
+            _hiddenPcToolbar = null;
+            ResetTouch();
+        }
+
         public void SyncHorizontalToolbarVisibility(bool useVertical)
         {
             var menus = Game1.onScreenMenus;

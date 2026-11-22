@@ -345,8 +345,9 @@ static NSUInteger syncContentPackLocaleFallbacks(NSString *docsPath) {
                 }
                 if (!usesLanguageToken) continue;
 
-                // Create 0-byte APFS hardlinks (*.en.<ext> -> *.vi.<ext>, *_en.<ext> -> *_vi.<ext>, en/ -> vi/)
-                // Never overwrites any existing Vietnamese asset!
+                // Create 0-byte APFS copy-on-write clones (*.en.<ext> -> *.vi.<ext>, *_en.<ext> -> *_vi.<ext>, en/ -> vi/)
+                // Uses copyItemAtPath (APFS clonefile, st_nlink=1) instead of linkItemAtPath (hardlink st_nlink=2 breaks iOS AFC).
+                // Never overwrites any genuine existing Vietnamese asset!
                 for (NSString *fRel in packFiles) { @autoreleasepool {
                     NSString *ext = fRel.pathExtension;
                     if (!ext.length || ![assetExts containsObject:ext.lowercaseString]) continue;
@@ -382,11 +383,20 @@ static NSUInteger syncContentPackLocaleFallbacks(NSString *docsPath) {
 
                     if (!dstRel.length || [dstRel isEqualToString:fRel]) continue;
                     NSString *dstFull = join(packDir, dstRel);
-                    if ([fm() fileExistsAtPath:dstFull]) continue;
+                    if ([fm() fileExistsAtPath:dstFull]) {
+                        // Auto-heal legacy hardlinked fallbacks (st_nlink > 1) into independent APFS CoW clones (st_nlink = 1)
+                        struct stat stSrc, stDst;
+                        if (stat(srcFull.fileSystemRepresentation, &stSrc) == 0 &&
+                            stat(dstFull.fileSystemRepresentation, &stDst) == 0 &&
+                            stSrc.st_ino == stDst.st_ino && stDst.st_nlink > 1) {
+                            [fm() removeItemAtPath:dstFull error:nil];
+                            if ([fm() copyItemAtPath:srcFull toPath:dstFull error:nil]) created++;
+                        }
+                        continue;
+                    }
 
                     [fm() createDirectoryAtPath:dstFull.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
-                    if ([fm() linkItemAtPath:srcFull toPath:dstFull error:nil] ||
-                        [fm() copyItemAtPath:srcFull toPath:dstFull error:nil]) {
+                    if ([fm() copyItemAtPath:srcFull toPath:dstFull error:nil]) {
                         created++;
                     }
                 }}
@@ -1535,6 +1545,15 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
         if (contentIdx != NSNotFound && contentIdx + 1 < parts.count) {
             if ([extLow isEqualToString:@"xnb"] || [extLow isEqualToString:@"json"] || [extLow isEqualToString:@"png"] || [extLow isEqualToString:@"tmx"] || [extLow isEqualToString:@"yaml"]) {
                 NSString *subRel = [NSString pathWithComponents:[parts subarrayWithRange:NSMakeRange(contentIdx + 1, parts.count - contentIdx - 1)]];
+                NSString *fnLow = r.lastPathComponent.lowercaseString;
+                // Protect PC Content UI XNBs from Android/Mobile optional XNB folders bundled inside a Content Patcher ZIP
+                if (bases.count > 0 && [extLow isEqualToString:@"xnb"] &&
+                    ([fnLow hasPrefix:@"mobileatlas"] || [fnLow isEqualToString:@"titlebuttons.xnb"] ||
+                     [fnLow isEqualToString:@"menutiles.xnb"] || [fnLow isEqualToString:@"cursors.xnb"] ||
+                     [fnLow isEqualToString:@"clouds.xnb"])) {
+                    [warnings addObject:[NSString stringWithFormat:@"Bỏ qua XNB giao diện bản Mobile (%@) để bảo vệ Content gốc — mod đã dùng Content Patcher.", r.lastPathComponent]];
+                    continue;
+                }
                 add(join(@"Content", subRel), r);
                 NSString *topSub = parts[contentIdx + 1];
                 NSString *lbl = [NSString stringWithFormat:@"Content/%@ (Việt hóa / Tài nguyên)", topSub];
@@ -1585,6 +1604,12 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
         }
 
         if (![extLow isEqual:@"xnb"]) continue;
+        // If this archive already installs SMAPI/Content Patcher mods, never silently overwrite PC Content/*.xnb
+        // with loose sibling Android/Mobile XNB files (e.g. TitleButtons.xnb, MenuTiles.xnb, MobileAtlas*.xnb).
+        if (bases.count > 0) {
+            [warnings addObject:[NSString stringWithFormat:@"Bỏ qua XNB đi kèm (%@) vì gói đã có mod SMAPI/Content Patcher.", r.lastPathComponent]];
+            continue;
+        }
         NSData *data = readFile(inside(stage, r));
         if (data.length < 10 || memcmp(data.bytes, "XNB", 3)) {
             [warnings addObject:[@"Bỏ qua tệp XNB không hợp lệ: " stringByAppendingString:r.lastPathComponent]];

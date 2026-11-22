@@ -16,7 +16,9 @@ static void restore(NSURL *root,NSString *h) {
     NSArray *rows=journal(h)[@"rows"];
     for(NSDictionary *row in rows) { @autoreleasepool {
         NSString *p=gamePath(root.path,row[@"path"]); NSString *hash=[fm() fileExistsAtPath:p]?hashData(readFile(p)):@"";
-        if(![hash isEqual:row[@"before"]] && ![hash isEqual:row[@"after"]]) fail([@"Tệp đã được sửa sau khi cài. Đã dừng hoàn tác: " stringByAppendingString:row[@"path"]]);
+        // Allow rollback to proceed if a newly-added Mods/ file was already deleted by the user in Library
+        BOOL deletedModFile = (![row[@"before"] length] && !hash.length && [row[@"path"] hasPrefix:@"Mods/"]);
+        if(!deletedModFile && ![hash isEqual:row[@"before"]] && ![hash isEqual:row[@"after"]]) fail([@"Tệp đã được sửa sau khi cài. Đã dừng hoàn tác: " stringByAppendingString:row[@"path"]]);
         if([row[@"before"] length] && ![hashData(readFile(join(h,row[@"backup"]))) isEqual:row[@"before"]]) fail(@"Bản sao lưu bị hỏng.");
     }}
     removeItem(join(h,@"done"));

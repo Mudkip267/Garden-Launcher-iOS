@@ -279,6 +279,7 @@ static NSString *sdvProbeLocalNetwork(void) {
     NSDictionary *_plan;
     NSDictionary *_library;
     NSArray<NSDictionary *> *_catalog;
+    NSArray<NSDictionary *> *_modIssues;
     NSArray<NSDictionary *> *_savesList;
     NSArray *_prefs;
     NSMutableDictionary *_translations;
@@ -759,6 +760,33 @@ static NSString *sdvProbeLocalNetwork(void) {
             [ps addArrangedSubview:modList];
         }
 
+        NSArray<NSString *> *mobileWarns = _plan[@"mobileWarnings"];
+        if (mobileWarns.count) {
+            UIStackView *mBoxStack = mkVStack(6);
+            UIStackView *mHdr = mkHStack(7);
+            UIImageView *mIc = [[UIImageView alloc] initWithImage:sfIcon(@"exclamationmark.triangle.fill", 16, UIImageSymbolWeightBold)];
+            mIc.tintColor = kTintOrange;
+            [mIc setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+            UILabel *mTitle = mkLabel(@"Cảnh báo: Mod dành riêng cho bản Mobile / Android", 13.5, UIFontWeightBold, kTintOrange);
+            [mHdr addArrangedSubview:mIc];
+            [mHdr addArrangedSubview:mTitle];
+            [mBoxStack addArrangedSubview:mHdr];
+
+            [mBoxStack addArrangedSubview:mkLabel(@"Garden Launcher chạy lõi Stardew Valley PC 1.6.15. Mod dành cho bản Mobile/Android có thể gặp lỗi hiển thị, lệch giao diện hoặc không hoạt động đúng — khuyên bạn ưu tiên tải bản PC 1.6 nếu có.", 12.5, UIFontWeightRegular, kInkPrimary)];
+            for (NSString *mw in mobileWarns) {
+                [mBoxStack addArrangedSubview:mkLabel([@"• " stringByAppendingString:mw], 12, UIFontWeightMedium, kInkSecondary)];
+            }
+            UIView *mWrap = [UIView new];
+            mWrap.backgroundColor = [kTintOrange colorWithAlphaComponent:0.13];
+            mWrap.layer.cornerRadius = 11;
+            mWrap.layer.cornerCurve = kCACornerCurveContinuous;
+            mWrap.layer.borderWidth = 1.0;
+            mWrap.layer.borderColor = [kTintOrange colorWithAlphaComponent:0.45].CGColor;
+            [mWrap addSubview:mBoxStack];
+            pinInsets(mBoxStack, mWrap, UIEdgeInsetsMake(10, 12, 10, 12));
+            [ps addArrangedSubview:mWrap];
+        }
+
         for (NSString *w in _plan[@"warnings"]) {
             UILabel *wl = mkLabel(w, 12.5, UIFontWeightMedium, kTintRed);
             UIView *wBox = [UIView new];
@@ -858,10 +886,68 @@ static NSString *sdvProbeLocalNetwork(void) {
     pinInsets(hdr, hdrWrap, UIEdgeInsetsMake(2, 12, 0, 4));
     [_pane addArrangedSubview:hdrWrap];
 
-    if (!_catalog.count) {
+    if (!_catalog.count && !_modIssues.count) {
         UILabel *empty = mkLabel(@"Chưa có mod nào ngoài mod hệ thống.", 13.5, UIFontWeightRegular, kInkSecondary);
         [_pane addArrangedSubview:mkGroupedCard(empty, UIEdgeInsetsMake(14, 14, 14, 14))];
         return;
+    }
+
+    // Mod Health & Conflict Diagnostics Card
+    if (_modIssues.count) {
+        NSInteger errCnt = 0;
+        for (NSDictionary *it in _modIssues) if ([it[@"severity"] isEqualToString:@"error"]) errCnt++;
+        UIStackView *diagStack = mkVStack(8);
+        UIStackView *dHdr = mkHStack(8);
+        UIColor *hdrCol = (errCnt > 0) ? kTintRed : kTintOrange;
+        UIImageView *dIc = [[UIImageView alloc] initWithImage:sfIcon(errCnt > 0 ? @"exclamationmark.octagon.fill" : @"exclamationmark.triangle.fill", 17, UIImageSymbolWeightBold)];
+        dIc.tintColor = hdrCol;
+        [dIc setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        UILabel *dTitle = mkLabel([NSString stringWithFormat:@"Chẩn đoán Mod (%lu cảnh báo / xung đột)", (unsigned long)_modIssues.count], 13.5, UIFontWeightBold, hdrCol);
+        [dHdr addArrangedSubview:dIc];
+        [dHdr addArrangedSubview:dTitle];
+        [diagStack addArrangedSubview:dHdr];
+
+        for (NSUInteger idx = 0; idx < _modIssues.count; idx++) {
+            NSDictionary *it = _modIssues[idx];
+            BOOL isErr = [it[@"severity"] isEqualToString:@"error"];
+            UIColor *col = isErr ? kTintRed : kTintOrange;
+            UIStackView *iRow = mkHStack(8);
+            UIImageView *ic = [[UIImageView alloc] initWithImage:sfIcon(isErr ? @"xmark.circle.fill" : @"exclamationmark.circle.fill", 15, UIImageSymbolWeightSemibold)];
+            ic.tintColor = col;
+            [ic setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+            UIStackView *iTxt = mkVStack(1.5);
+            [iTxt addArrangedSubview:mkLabel(it[@"title"], 12.5, UIFontWeightSemibold, kInkPrimary)];
+            [iTxt addArrangedSubview:mkLabel(it[@"detail"], 11.5, UIFontWeightRegular, kInkSecondary)];
+            [iRow addArrangedSubview:ic];
+            [iRow addArrangedSubview:iTxt];
+            NSString *orphan = it[@"orphanFolder"];
+            if (orphan.length) {
+                SDVAppleButton *cleanBtn = mkIOSButton(@"Dọn", @"trash", [kTintRed colorWithAlphaComponent:0.14], kTintRed, 12, UIEdgeInsetsMake(5, 9, 5, 9));
+                cleanBtn.tag = (NSInteger)idx;
+                [cleanBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+                [cleanBtn addTarget:self action:@selector(cleanOrphanModFolderTapped:) forControlEvents:UIControlEventTouchUpInside];
+                [iRow addArrangedSubview:cleanBtn];
+            }
+            UIView *iWrap = [UIView new];
+            iWrap.backgroundColor = [col colorWithAlphaComponent:0.09];
+            iWrap.layer.cornerRadius = 9;
+            iWrap.layer.cornerCurve = kCACornerCurveContinuous;
+            [iWrap addSubview:iRow];
+            pinInsets(iRow, iWrap, UIEdgeInsetsMake(7, 9, 7, 9));
+            [diagStack addArrangedSubview:iWrap];
+        }
+        UIView *dCard = mkGroupedCard(diagStack, UIEdgeInsetsMake(12, 13, 12, 13));
+        dCard.layer.borderWidth = 0.8;
+        dCard.layer.borderColor = [hdrCol colorWithAlphaComponent:0.35].CGColor;
+        [_pane addArrangedSubview:dCard];
+    } else if (_catalog.count) {
+        UIStackView *okRow = mkHStack(7);
+        UIImageView *okIc = [[UIImageView alloc] initWithImage:sfIcon(@"checkmark.shield.fill", 15, UIImageSymbolWeightSemibold)];
+        okIc.tintColor = kTintGreen;
+        [okIc setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        [okRow addArrangedSubview:okIc];
+        [okRow addArrangedSubview:mkLabel(@"Không phát hiện xung đột, thiếu phụ thuộc hay mod lỗi.", 12.5, UIFontWeightMedium, kInkSecondary)];
+        [_pane addArrangedSubview:mkGroupedCard(okRow, UIEdgeInsetsMake(9, 13, 9, 13))];
     }
 
     NSMutableArray<UIView *> *rows = [NSMutableArray array];
@@ -2456,9 +2542,34 @@ static NSString *sdvProbeLocalNetwork(void) {
 -(void)scan:(NSURL *)r {
     _library = installed(r.path);
     _catalog = modCatalog(r.path);
+    _modIssues = sdvDiagnoseMods(r.path);
     _savesList = sdvListSaves(r.path);
     NSString *h = latest(r);
     _last = h ? journal(h)[@"name"] : nil;
+}
+
+-(void)cleanOrphanModFolderTapped:(UIButton *)btn {
+    if (btn.tag < 0 || (NSUInteger)btn.tag >= _modIssues.count) return;
+    NSString *folder = _modIssues[(NSUInteger)btn.tag][@"orphanFolder"];
+    if (!folder.length) return;
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:[NSString stringWithFormat:@"Dọn thư mục lỗi %@?", folder]
+        message:[NSString stringWithFormat:@"Sẽ xóa thư mục Mods/%@ (thiếu manifest.json). Bản đã tắt .%@ nếu có sẽ được giữ nguyên.", folder, folder]
+        preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
+    [a addAction:[UIAlertAction actionWithTitle:@"Xóa thư mục lỗi" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *ac) {
+        [self work:@"Đang dọn thư mục lỗi…" action:^{
+            [self access:YES block:^(NSURL *r) {
+                NSString *target = inside(gamePath(r.path, @"Mods"), folder);
+                if ([fm() fileExistsAtPath:target]) removeItem(target);
+                [self scan:r];
+            }];
+        } done:^{
+            self->_message = [NSString stringWithFormat:@"Đã dọn sạch thư mục lỗi Mods/%@.", folder];
+            self->_messageIsError = NO;
+            [self renderAll:YES];
+        }];
+    }]];
+    [self presentSafely:a];
 }
 
 -(void)refresh {
@@ -2618,7 +2729,7 @@ static NSArray<UTType *> *sdvAllArchivePickerTypes(void) {
     __block NSDictionary *p = nil;
     [self work:@"Đang đối chiếu với game…" action:^{
         [self access:NO block:^(NSURL *r) {
-            p = plan(r.path, self->_stage, self->_prefs, self->_translations);
+            p = plan(r.path, self->_stage, self->_prefs, self->_translations, self->_stagedFiles);
         }];
     } done:^{
         if (p[@"translationOwner"] != NSNull.null) {
@@ -2690,13 +2801,29 @@ static NSArray<UTType *> *sdvAllArchivePickerTypes(void) {
 }
 
 -(void)apply {
+    NSArray<NSString *> *mobileWarns = _plan[@"mobileWarnings"];
+    if (mobileWarns.count) {
+        NSString *detail = [mobileWarns componentsJoinedByString:@"\n• "];
+        NSString *msg = [NSString stringWithFormat:@"Mod này có dấu hiệu dành riêng cho Stardew Valley Mobile/Android nên có thể gặp lỗi hiển thị hoặc không tương thích trên bản PC 1.6.15 của Garden Launcher.\n\n• %@\n\nKhuyên bạn tải bản PC 1.6 nếu có. Bạn vẫn muốn tiếp tục cài đặt?", detail];
+        UIAlertController *a = [UIAlertController alertControllerWithTitle:@"⚠️ Cảnh báo Mod bản Mobile" message:msg preferredStyle:UIAlertControllerStyleAlert];
+        [a addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
+        [a addAction:[UIAlertAction actionWithTitle:@"Vẫn cài đặt" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *ac) {
+            [self performApply];
+        }]];
+        [self presentSafely:a];
+        return;
+    }
+    [self performApply];
+}
+
+-(void)performApply {
     NSString *batchLabel = (_stagedFiles.count == 1)
         ? _stagedFiles.firstObject
         : [NSString stringWithFormat:@"%lu gói (%@…)", (unsigned long)_stagedFiles.count, _stagedFiles.firstObject ?: @"Mods"];
     __block NSUInteger written = 0;
     [self work:@"Đang sao lưu và cài các gói mod…" action:^{
         [self access:YES block:^(NSURL *r) {
-            NSDictionary *p = plan(r.path, self->_stage, self->_prefs, self->_translations);
+            NSDictionary *p = plan(r.path, self->_stage, self->_prefs, self->_translations, self->_stagedFiles);
             written = installBatch(r, self->_stage, p[@"map"], p[@"obsoleteDisabled"], batchLabel);
             syncContentPackLocaleFallbacks(r.path);
             self->_plan = nil;

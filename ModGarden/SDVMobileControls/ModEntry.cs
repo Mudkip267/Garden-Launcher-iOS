@@ -29,10 +29,17 @@ namespace SDVMobileControls
         private static bool _fishingGuardInstalled;
         private static long _fishingHoldStartMs;
         private static FishingRod _fishingHoldRod;
+        private static string _bootDocsDir;
+        private static bool _bootGameLaunched;
+        private static bool _bootReadySignaled;
+        private static int _bootRenderedFrames;
 
         public override void Entry(IModHelper helper)
         {
             _monitor = Monitor;
+            _bootDocsDir = ResolveBootDocsDir(helper.DirectoryPath);
+            WriteBootStage("SMAPI đã nạp Mod — đang tải Stardew Valley…");
+
             var cfg = new MobileConfig();
             Engine = new MobileControlsEngine(cfg, Monitor, helper.DirectoryPath);
             RamOptimizer = new MapRamOptimizer(helper, Monitor);
@@ -42,14 +49,80 @@ namespace SDVMobileControls
 
             helper.Events.GameLoop.GameLaunched += OnGameLaunched;
             helper.Events.GameLoop.UpdateTicked += OnUpdateTicked;
+            helper.Events.Display.Rendered += OnRenderedBootCheck;
             helper.Events.GameLoop.Saved += OnSaved;
             helper.Events.GameLoop.SaveLoaded += OnSaveLoaded;
             helper.Events.GameLoop.DayStarted += OnDayStarted;
             helper.Events.Player.Warped += OnWarped;
         }
 
+        private static string ResolveBootDocsDir(string modDir)
+        {
+            try
+            {
+                if (!string.IsNullOrEmpty(modDir))
+                {
+                    var modsDir = Directory.GetParent(modDir);
+                    var docsDir = modsDir?.Parent?.FullName;
+                    if (!string.IsNullOrEmpty(docsDir) && Directory.Exists(docsDir))
+                        return docsDir;
+                }
+            }
+            catch { }
+            try
+            {
+                string docs = Environment.GetFolderPath(Environment.SpecialFolder.Personal);
+                if (!string.IsNullOrEmpty(docs) && Directory.Exists(docs))
+                    return docs;
+            }
+            catch { }
+            return null;
+        }
+
+        private static void WriteBootStage(string stage)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(_bootDocsDir) || string.IsNullOrEmpty(stage))
+                    return;
+                File.WriteAllText(Path.Combine(_bootDocsDir, "sdv_boot_stage.txt"), stage, Encoding.UTF8);
+            }
+            catch { }
+        }
+
+        private static void SignalBootReady()
+        {
+            if (_bootReadySignaled)
+                return;
+            _bootReadySignaled = true;
+            try
+            {
+                if (!string.IsNullOrEmpty(_bootDocsDir))
+                    File.WriteAllText(Path.Combine(_bootDocsDir, "sdv_boot_ready.flag"), "1");
+            }
+            catch { }
+        }
+
+        private void OnRenderedBootCheck(object sender, RenderedEventArgs e)
+        {
+            if (_bootReadySignaled)
+            {
+                try { Helper.Events.Display.Rendered -= OnRenderedBootCheck; } catch { }
+                return;
+            }
+            if (!_bootGameLaunched || Game1.ticks < 2)
+                return;
+            if (++_bootRenderedFrames >= 2)
+            {
+                SignalBootReady();
+                try { Helper.Events.Display.Rendered -= OnRenderedBootCheck; } catch { }
+            }
+        }
+
         private void OnGameLaunched(object sender, GameLaunchedEventArgs e)
         {
+            _bootGameLaunched = true;
+            WriteBootStage("Đang đồng bộ Content Patcher & Giao diện…");
             BindAllLoadedTouchVirtualPads("GameLaunched");
             InstallFishingCastGuard("GameLaunched");
             try { RamOptimizer?.OnGameLaunched(); } catch { }

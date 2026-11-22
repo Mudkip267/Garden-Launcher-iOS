@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <CommonCrypto/CommonDigest.h>
+#import <ctype.h>
 #import <dlfcn.h>
 #import <wchar.h>
 #import "vendor/miniz.h"
@@ -1435,8 +1436,372 @@ static NSString *sanitizeFolderName(NSString *raw, NSString *fallback) {
     return s.length ? s : (fallback.length ? fallback : @"Mod");
 }
 
+static BOOL sdvHasMobileEditionMarker(NSString *raw) {
+    if (!raw.length) return NO;
+    NSString *low = raw.lowercaseString;
+    // Never false-positive on our own system mods or normal PC mods like MobilePhone / Automobile
+    if ([low containsString:@"sdvmobilecontrols"] || [low containsString:@"sdviostouchcontrols"] ||
+        [low containsString:@"gardenlauncher.mobilecontrols"]) return NO;
+    NSArray<NSString *> *markers = @[
+        @"mobile interface", @"mobile ui", @"mobile version", @"mobile ver",
+        @"mobile port", @"mobile edition", @"mobile only", @"mobile-only", @"mobile_only",
+        @"for mobile", @"(mobile", @"[mobile", @"bản mobile", @"ban mobile", @"cho mobile",
+        @"smapi mobile", @"smapi android", @"mobileatlas",
+        @"android port", @"for android", @"(android", @"[android", @"_android", @"-android", @".android",
+        @"bản android", @"ban android", @"cho android", @"thai-android"
+    ];
+    for (NSString *mk in markers) {
+        if ([low containsString:mk]) return YES;
+    }
+    // Check standalone word "android" (bounded by non-alphanumeric chars)
+    NSRange r = [low rangeOfString:@"android"];
+    while (r.location != NSNotFound) {
+        BOOL leftOk = (r.location == 0) || !isalnum([low characterAtIndex:r.location - 1]);
+        NSUInteger end = r.location + r.length;
+        BOOL rightOk = (end >= low.length) || !isalnum([low characterAtIndex:end]);
+        if (leftOk && rightOk) return YES;
+        if (end >= low.length) break;
+        r = [low rangeOfString:@"android" options:0 range:NSMakeRange(end, low.length - end)];
+    }
+    return NO;
+}
+
+static BOOL sdvDataContainsAscii(NSData *data, const char *needle) {
+    if (!data.length || !needle) return NO;
+    size_t nlen = strlen(needle);
+    if (nlen == 0 || data.length < nlen) return NO;
+    const unsigned char *bytes = (const unsigned char *)data.bytes;
+    size_t limit = MIN((size_t)data.length, (size_t)(2 * 1024 * 1024));
+    if (limit < nlen) return NO;
+    return memmem(bytes, limit, needle, nlen) != NULL;
+}
+
+static NSInteger sdvCompareSemver(NSString *a, NSString *b) {
+    if (!a.length && !b.length) return 0;
+    if (!a.length) return -1;
+    if (!b.length) return 1;
+    NSString *ca = [[a componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"-+ "]] firstObject] ?: @"";
+    NSString *cb = [[b componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"-+ "]] firstObject] ?: @"";
+    NSArray<NSString *> *pa = [ca componentsSeparatedByString:@"."];
+    NSArray<NSString *> *pb = [cb componentsSeparatedByString:@"."];
+    for (NSUInteger i = 0; i < 3; i++) {
+        NSInteger va = (i < pa.count) ? pa[i].integerValue : 0;
+        NSInteger vb = (i < pb.count) ? pb[i].integerValue : 0;
+        if (va < vb) return -1;
+        if (va > vb) return 1;
+    }
+    return 0;
+}
+
+static NSSet<NSString *> *sdvExtractCpLoadTargetsFromFile(NSString *contentJsonPath) {
+    NSMutableSet<NSString *> *targets = [NSMutableSet set];
+    @try {
+        struct stat st;
+        if (stat(contentJsonPath.fileSystemRepresentation, &st) != 0 || st.st_size <= 0 || st.st_size > 2 * 1024 * 1024) return targets;
+        id parsed = jsonAt(contentJsonPath);
+        if (![parsed isKindOfClass:NSDictionary.class]) return targets;
+        id changes = dictValueCI((NSDictionary *)parsed, @"Changes");
+        if (![changes isKindOfClass:NSArray.class]) return targets;
+        for (id item in (NSArray *)changes) {
+            if (![item isKindOfClass:NSDictionary.class]) continue;
+            NSDictionary *ch = (NSDictionary *)item;
+            NSString *act = field(ch, @"Action").lowercaseString;
+            if (![act isEqualToString:@"load"]) continue;
+            NSString *rawTarget = field(ch, @"Target");
+            if (!rawTarget.length) continue;
+            for (NSString *part in [rawTarget componentsSeparatedByString:@","]) {
+                NSString *t = [[part stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]
+                    stringByReplacingOccurrencesOfString:@"\\" withString:@"/"].lowercaseString;
+                // Skip dynamic token targets (e.g. {{Target}}) since they cannot be statically matched without runtime evaluation
+                if (!t.length || [t containsString:@"{{"]) continue;
+                [targets addObject:t];
+            }
+        }
+    } @catch (NSException *ex) { }
+    return targets;
+}
+
+static NSDictionary<NSString *, NSSet<NSString *> *> *sdvCollectInstalledCpLoadTargets(NSString *root) {
+    NSMutableDictionary<NSString *, NSSet<NSString *> *> *res = [NSMutableDictionary dictionary];
+    if (!root.length || [root.lastPathComponent isEqual:@"Content"]) return res;
+    NSString *mods = gamePath(root, @"Mods");
+    if (!dir(mods)) return res;
+    for (NSString *r in files(mods)) { @autoreleasepool {
+        if (![r.lastPathComponent.lowercaseString isEqual:@"manifest.json"]) continue;
+        if (isHiddenRelPath(r)) continue;
+        @try {
+            NSDictionary *m = manifest(inside(mods, r));
+            NSString *uidLow = field(m, @"UniqueID").lowercaseString;
+            if (!uidLow.length) continue;
+            id cpf = dictValueCI(m, @"ContentPackFor");
+            if (![cpf isKindOfClass:NSDictionary.class]) continue;
+            if ([field(cpf, @"UniqueID") caseInsensitiveCompare:@"Pathoschild.ContentPatcher"] != NSOrderedSame) continue;
+            NSString *packDir = inside(mods, r).stringByDeletingLastPathComponent;
+            NSString *cj = join(packDir, @"content.json");
+            if ([fm() fileExistsAtPath:cj]) {
+                NSSet<NSString *> *lt = sdvExtractCpLoadTargetsFromFile(cj);
+                if (lt.count) res[uidLow] = lt;
+            }
+        } @catch (NSException *ex) { }
+    }}
+    return res;
+}
+
+static NSString *sdvTranslateSmapiSkipReason(NSString *reason) {
+    NSString *low = reason.lowercaseString;
+    if ([low containsString:@"no longer compatible"]) return @"không còn tương thích Stardew Valley 1.6.15 (cần bản cập nhật mới hoặc xóa bớt).";
+    if ([low containsString:@"none of them are manifest.json"]) return @"chứa tệp nhưng thiếu manifest.json (thư mục rác/cài thiếu).";
+    if ([low containsString:@"empty folder"]) return @"thư mục trống không có dữ liệu mod.";
+    if ([low containsString:@"requires mods which aren't installed"]) return [NSString stringWithFormat:@"thiếu mod phụ thuộc (%@).", reason];
+    if ([low containsString:@"multiple copies"]) return @"cài trùng nhiều bản sao cùng lúc.";
+    if ([low containsString:@"couldn't be loaded"]) return [NSString stringWithFormat:@"lỗi nạp tệp DLL (%@).", reason];
+    return reason;
+}
+
+// Comprehensive local Mod Health & Conflict Diagnostics (static + live SMAPI-latest.txt, 0% network, <20ms)
+static NSArray<NSDictionary *> *sdvDiagnoseMods(NSString *root) {
+    NSMutableArray<NSDictionary *> *issues = [NSMutableArray array];
+    if (!root.length || [root.lastPathComponent isEqual:@"Content"]) return issues;
+    NSString *mods = gamePath(root, @"Mods");
+    if (!dir(mods)) return issues;
+
+    NSMutableSet<NSString *> *seenKeys = [NSMutableSet set];
+    void (^addIssue)(NSString *, NSString *, NSString *, NSString *, NSString *) =
+    ^(NSString *dedupKey, NSString *sev, NSString *title, NSString *detail, NSString *orphanFolder) {
+        if (!dedupKey.length || [seenKeys containsObject:dedupKey]) return;
+        [seenKeys addObject:dedupKey];
+        NSMutableDictionary *d = [@{@"severity": sev ?: @"warn", @"title": title ?: @"", @"detail": detail ?: @""} mutableCopy];
+        if (orphanFolder.length) d[@"orphanFolder"] = orphanFolder;
+        [issues addObject:d];
+    };
+
+    // 1. Scan active mods, detect duplicate UniqueIDs, orphan folders, legacy DLLs, Mobile mods, and CP Load targets
+    NSMutableDictionary<NSString *, NSDictionary *> *activeById = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSMutableArray<NSString *> *> *idFolders = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSSet<NSString *> *> *cpLoads = [NSMutableDictionary dictionary];
+    NSMutableSet<NSString *> *topWithManifest = [NSMutableSet set];
+    NSDictionary<NSString *, NSString *> *disabledMap = disabledModsById(root);
+    NSSet<NSString *> *sysIds = [NSSet setWithArray:@[@"com.deadakj.sdviostouchcontrols", @"gardenlauncher.mobilecontrols"]];
+
+    for (NSString *r in files(mods)) { @autoreleasepool {
+        if (![r.lastPathComponent.lowercaseString isEqual:@"manifest.json"]) continue;
+        if (isHiddenRelPath(r)) continue;
+        NSString *top = r.pathComponents.firstObject;
+        if (top.length) [topWithManifest addObject:top];
+        NSDictionary *m = nil;
+        @try {
+            m = manifest(inside(mods, r));
+        } @catch (NSException *ex) {
+            addIssue([@"badmf:" stringByAppendingString:r], @"error",
+                [NSString stringWithFormat:@"Lỗi manifest.json: %@", top ?: r],
+                ex.reason ?: @"Tệp manifest.json bị sai cú pháp JSON.", nil);
+            continue;
+        }
+        NSString *uid = field(m, @"UniqueID");
+        NSString *uidLow = uid.lowercaseString;
+        if (!uidLow.length) continue;
+        NSString *dispName = field(m, @"Name").length ? field(m, @"Name") : uid;
+        NSString *packDir = inside(mods, r).stringByDeletingLastPathComponent;
+
+        if (!idFolders[uidLow]) idFolders[uidLow] = [NSMutableArray array];
+        [idFolders[uidLow] addObject:(top ?: r)];
+        if (!activeById[uidLow]) {
+            activeById[uidLow] = @{@"m": m, @"name": dispName, @"top": top ?: @"", @"dir": packDir};
+        }
+
+        if (![sysIds containsObject:uidLow]) {
+            NSString *minApi = field(m, @"MinimumApiVersion");
+            NSString *entryDll = field(m, @"EntryDll");
+            if (minApi.length && sdvCompareSemver(minApi, @"4.5.2") > 0) {
+                addIssue([@"api:" stringByAppendingString:uidLow], @"error",
+                    [NSString stringWithFormat:@"Cần SMAPI mới hơn: %@", dispName],
+                    [NSString stringWithFormat:@"Yêu cầu SMAPI v%@ (Garden Launcher hiện dùng 4.5.2).", minApi], nil);
+            } else if (entryDll.length && minApi.length && sdvCompareSemver(minApi, @"3.99.0") < 0) {
+                addIssue([@"legacy:" stringByAppendingString:uidLow], @"warn",
+                    [NSString stringWithFormat:@"Mod C# đời cũ (1.5): %@", dispName],
+                    [NSString stringWithFormat:@"Biên dịch cho SMAPI %@ — có thể không tương thích Stardew 1.6.15.", minApi], nil);
+            }
+            if (entryDll.length) {
+                NSData *dd = [NSData dataWithContentsOfFile:join(packDir, entryDll) options:NSDataReadingMappedIfSafe error:nil];
+                if (sdvDataContainsAscii(dd, "Mono.Android") || sdvDataContainsAscii(dd, "SMAPI.Android")) {
+                    addIssue([@"androiddll:" stringByAppendingString:uidLow], @"error",
+                        [NSString stringWithFormat:@"Mod biên dịch riêng Android: %@", dispName],
+                        [NSString stringWithFormat:@"%@ dùng SMAPI Android, có thể lỗi trên bản PC 1.6.15 — khuyên tải bản PC.", entryDll], nil);
+                }
+            }
+            if (sdvHasMobileEditionMarker(dispName) || sdvHasMobileEditionMarker(uid) ||
+                sdvHasMobileEditionMarker(field(m, @"Description")) || sdvHasMobileEditionMarker(top)) {
+                addIssue([@"mobile:" stringByAppendingString:uidLow], @"warn",
+                    [NSString stringWithFormat:@"Mod bản Mobile/Android: %@", dispName],
+                    @"Được đánh dấu dành cho bản Mobile — có thể lệch giao diện hoặc lỗi nhỏ trên lõi PC 1.6.15.", nil);
+            }
+            id cpf = dictValueCI(m, @"ContentPackFor");
+            if ([cpf isKindOfClass:NSDictionary.class] &&
+                [field(cpf, @"UniqueID") caseInsensitiveCompare:@"Pathoschild.ContentPatcher"] == NSOrderedSame) {
+                NSString *cj = join(packDir, @"content.json");
+                if ([fm() fileExistsAtPath:cj]) {
+                    NSSet<NSString *> *lt = sdvExtractCpLoadTargetsFromFile(cj);
+                    if (lt.count) cpLoads[uidLow] = lt;
+                    NSData *cjd = [NSData dataWithContentsOfFile:cj options:NSDataReadingMappedIfSafe error:nil];
+                    if (sdvDataContainsAscii(cjd, "MobileAtlas") || sdvDataContainsAscii(cjd, "mobileatlas")) {
+                        addIssue([@"mobileatlas:" stringByAppendingString:uidLow], @"warn",
+                            [NSString stringWithFormat:@"Content Pack bản Mobile: %@", dispName],
+                            @"Chỉnh sửa tài nguyên MobileAtlas riêng của bản Mobile — khuyên tải bản PC 1.6.", nil);
+                    }
+                }
+            }
+        }
+    }}
+
+    // 2. Duplicate UniqueIDs
+    for (NSString *uidLow in idFolders) {
+        NSArray<NSString *> *flist = idFolders[uidLow];
+        if (flist.count > 1) {
+            NSString *nm = activeById[uidLow][@"name"] ?: uidLow;
+            addIssue([@"dup:" stringByAppendingString:uidLow], @"error",
+                [NSString stringWithFormat:@"Cài trùng %lu bản: %@", (unsigned long)flist.count, nm],
+                [NSString stringWithFormat:@"Cùng UniqueID ở thư mục: %@. SMAPI sẽ bỏ qua cả hai — hãy xóa bớt 1 bản.", [flist componentsJoinedByString:@", "]], nil);
+        }
+    }
+
+    // 3. Orphan / broken top-level folders inside Mods/ (no manifest.json anywhere inside)
+    NSArray<NSString *> *topItems = [fm() contentsOfDirectoryAtPath:mods error:nil] ?: @[];
+    for (NSString *entry in topItems) {
+        if ([entry hasPrefix:@"."]) continue;
+        NSString *full = join(mods, entry);
+        if (!dir(full)) continue;
+        if ([topWithManifest containsObject:entry]) continue;
+        BOOL hasDisabledTwin = dir(join(mods, [@"." stringByAppendingString:entry]));
+        NSString *detail = hasDisabledTwin
+            ? [NSString stringWithFormat:@"Thư mục Mods/%@ còn sót tệp (thiếu manifest.json) bên cạnh bản đã tắt .%@ khiến SMAPI báo lỗi đỏ khi mở game.", entry, entry]
+            : [NSString stringWithFormat:@"Thư mục Mods/%@ không chứa manifest.json nên SMAPI không thể nạp.", entry];
+        addIssue([@"orphan:" stringByAppendingString:entry.lowercaseString], @"warn",
+            [NSString stringWithFormat:@"Thư mục lỗi: %@", entry], detail, entry);
+    }
+
+    // 4. Missing / Disabled dependencies & MinimumVersion mismatch across active mods
+    for (NSString *uidLow in activeById) {
+        NSDictionary *info = activeById[uidLow];
+        NSDictionary *m = info[@"m"];
+        NSString *dispName = info[@"name"];
+        NSMutableArray *deps = [NSMutableArray array];
+        id rawDeps = dictValueCI(m, @"Dependencies");
+        id rawCp = dictValueCI(m, @"ContentPackFor");
+        if ([rawDeps isKindOfClass:NSArray.class]) [deps addObjectsFromArray:rawDeps];
+        if ([rawCp isKindOfClass:NSDictionary.class]) [deps addObject:rawCp];
+        for (id dep in deps) {
+            if (![dep isKindOfClass:NSDictionary.class]) continue;
+            NSString *depId = field(dep, @"UniqueID");
+            NSString *depLow = depId.lowercaseString;
+            id req = dictValueCI(dep, @"IsRequired");
+            if (!depLow.length || [req isEqual:@NO]) continue;
+            if (!activeById[depLow]) {
+                if (disabledMap[depLow]) {
+                    addIssue([NSString stringWithFormat:@"disdep:%@:%@", uidLow, depLow], @"error",
+                        [NSString stringWithFormat:@"%@: thiếu mod đang bị tắt", dispName],
+                        [NSString stringWithFormat:@"Cần %@ (hiện đang tắt ở .%@) — hãy bật lại trong Thư viện.", depId, disabledMap[depLow]], nil);
+                } else {
+                    addIssue([NSString stringWithFormat:@"missdep:%@:%@", uidLow, depLow], @"error",
+                        [NSString stringWithFormat:@"%@: thiếu mod phụ thuộc", dispName],
+                        [NSString stringWithFormat:@"Cần cài thêm %@ để mod hoạt động.", depId], nil);
+                }
+            } else {
+                NSString *minV = field(dep, @"MinimumVersion");
+                NSString *instV = field(activeById[depLow][@"m"], @"Version");
+                if (minV.length && instV.length && sdvCompareSemver(instV, minV) < 0) {
+                    addIssue([NSString stringWithFormat:@"olddep:%@:%@", uidLow, depLow], @"error",
+                        [NSString stringWithFormat:@"%@: phụ thuộc quá cũ", dispName],
+                        [NSString stringWithFormat:@"Yêu cầu %@ ≥ v%@ (hiện đang cài v%@).", depId, minV, instV], nil);
+                }
+            }
+        }
+    }
+
+    // 5. Content Patcher Action:Load conflicts between active packs
+    NSArray<NSString *> *cpKeys = [cpLoads.allKeys sortedArrayUsingSelector:@selector(compare:)];
+    for (NSUInteger i = 0; i < cpKeys.count; i++) {
+        for (NSUInteger j = i + 1; j < cpKeys.count; j++) {
+            NSString *k1 = cpKeys[i], *k2 = cpKeys[j];
+            NSSet<NSString *> *s1 = cpLoads[k1], *s2 = cpLoads[k2];
+            NSMutableArray<NSString *> *overlap = [NSMutableArray array];
+            for (NSString *t in s1) {
+                if ([s2 containsObject:t]) [overlap addObject:t];
+            }
+            if (overlap.count) {
+                [overlap sortUsingSelector:@selector(compare:)];
+                NSString *n1 = activeById[k1][@"name"] ?: k1;
+                NSString *n2 = activeById[k2][@"name"] ?: k2;
+                NSString *sample = (overlap.count > 2)
+                    ? [NSString stringWithFormat:@"%@, %@ (+%lu mục)", overlap[0], overlap[1], (unsigned long)(overlap.count - 2)]
+                    : [overlap componentsJoinedByString:@", "];
+                addIssue([NSString stringWithFormat:@"cpconf:%@:%@", k1, k2], @"warn",
+                    [NSString stringWithFormat:@"Xung đột ghi đè: %@ ↔ %@", n1, n2],
+                    [NSString stringWithFormat:@"Cả 2 cùng dùng Action: Load cho %@ — chỉ 1 mod có hiệu lực, nên tắt bớt 1 mod.", sample], nil);
+            }
+        }
+    }
+
+    // 6. Live SMAPI-latest.txt Skipped mods & runtime ERROR parser (ground truth from last launch)
+    NSString *smapiLog = join(join(root, @"ErrorLogs"), @"SMAPI-latest.txt");
+    @try {
+        struct stat st;
+        if (stat(smapiLog.fileSystemRepresentation, &st) == 0 && st.st_size > 0 && st.st_size <= 1024 * 1024) {
+            NSString *txt = [NSString stringWithContentsOfFile:smapiLog encoding:NSUTF8StringEncoding error:nil];
+            if (txt.length) {
+                BOOL inSkipped = NO;
+                NSUInteger errLinesAdded = 0;
+                for (NSString *rawLine in [txt componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
+                    NSString *line = [rawLine stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+                    if (!line.length) { inSkipped = NO; continue; }
+                    if ([line containsString:@"ERROR SMAPI]    Skipped mods"]) { inSkipped = YES; continue; }
+                    if (inSkipped) {
+                        if (![line containsString:@"ERROR SMAPI]"]) { inSkipped = NO; continue; }
+                        NSRange dashR = [line rangeOfString:@"   - "];
+                        if (dashR.location != NSNotFound) {
+                            NSString *entry = [line substringFromIndex:dashR.location + dashR.length];
+                            NSRange becR = [entry rangeOfString:@" because "];
+                            NSString *modTitle = (becR.location != NSNotFound) ? [entry substringToIndex:becR.location] : entry;
+                            NSString *reason = (becR.location != NSNotFound) ? [entry substringFromIndex:becR.location + becR.length] : @"không thể nạp.";
+                            // Skip if already reported as orphan folder
+                            NSString *orphanKey = [@"orphan:" stringByAppendingString:modTitle.lowercaseString];
+                            if ([seenKeys containsObject:orphanKey]) continue;
+                            addIssue([@"skip:" stringByAppendingString:modTitle.lowercaseString], @"error",
+                                [NSString stringWithFormat:@"SMAPI bỏ qua: %@", modTitle],
+                                sdvTranslateSmapiSkipReason(reason), nil);
+                        }
+                    } else if (errLinesAdded < 4 && [line containsString:@" ERROR "] && ![line containsString:@"ERROR SMAPI]"]) {
+                        // Extract mod name & concise error snippet from runtime mod errors
+                        NSRange errR = [line rangeOfString:@" ERROR "];
+                        if (errR.location != NSNotFound) {
+                            NSString *after = [line substringFromIndex:errR.location + errR.length];
+                            NSRange brR = [after rangeOfString:@"] "];
+                            if (brR.location != NSNotFound) {
+                                NSString *modSrc = [[after substringToIndex:brR.location] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+                                NSString *msg = [after substringFromIndex:brR.location + brR.length];
+                                if (msg.length > 160) msg = [[msg substringToIndex:160] stringByAppendingString:@"…"];
+                                addIssue([NSString stringWithFormat:@"rt:%@", modSrc.lowercaseString], @"error",
+                                    [NSString stringWithFormat:@"Lỗi khi chạy: %@", modSrc], msg, nil);
+                                errLinesAdded++;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } @catch (NSException *ex) { }
+
+    // Sort errors first, then warnings
+    [issues sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        BOOL ea = [a[@"severity"] isEqualToString:@"error"];
+        BOOL eb = [b[@"severity"] isEqualToString:@"error"];
+        if (ea != eb) return ea ? NSOrderedAscending : NSOrderedDescending;
+        return [a[@"title"] compare:b[@"title"]];
+    }];
+    return issues;
+}
+
 // Plan installing ONE OR MULTIPLE staged packages inside `stage` (each package unpacked into `stage/pkg_<i>/...`)
-static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences, NSDictionary *translations) {
+static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences, NSDictionary *translations, NSArray<NSString *> *stagedFileNames) {
     NSArray *items = files(stage);
     NSDictionary *library = installed(root);
     NSDictionary<NSString *, NSString *> *disabledMap = disabledModsById(root);
@@ -1446,11 +1811,25 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
     NSMutableSet *ids = [NSMutableSet set];
     NSMutableSet *claimedFolders = [NSMutableSet set];
     NSMutableSet *warnings = [NSMutableSet set];
+    NSMutableArray<NSString *> *mobileWarnings = [NSMutableArray array];
+    NSMutableSet<NSString *> *mobileWarnSeen = [NSMutableSet set];
+    void (^addMobileWarn)(NSString *) = ^(NSString *msg) {
+        if (!msg.length || [mobileWarnSeen containsObject:msg]) return;
+        [mobileWarnSeen addObject:msg];
+        [mobileWarnings addObject:msg];
+    };
     NSMutableSet *obsoleteDisabled = [NSMutableSet set];
     NSMutableArray *names = [NSMutableArray array];
     NSMutableArray *choices = [NSMutableArray array];
     NSString *translationOwner = nil;
     NSString *modsRoot = [root.lastPathComponent isEqual:@"Content"] ? nil : gamePath(root, @"Mods");
+
+    // Check staged archive / folder filenames for Mobile / Android edition markers
+    for (NSString *sf in stagedFileNames) {
+        if (sdvHasMobileEditionMarker(sf)) {
+            addMobileWarn([NSString stringWithFormat:@"Tệp nguồn \"%@\" có tên dành cho bản Mobile/Android.", sf]);
+        }
+    }
 
     void (^add)(NSString *, NSString *) = ^(NSString *dst, NSString *src) {
         gamePath(root, dst);
@@ -1503,7 +1882,34 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
         [claimedFolders addObject:folder.lowercaseString];
         incoming[base] = @{@"dest": join(@"Mods", folder), @"m": m, @"folder": folder};
         combinedLibrary[key] = @{@"dir": folder, @"manifest": m};
-        [names addObject:[NSString stringWithFormat:@"%@  v%@", field(m, @"Name").length ? field(m, @"Name") : uid, field(m, @"Version").length ? field(m, @"Version") : @"1.0"]];
+        NSString *dispName = field(m, @"Name").length ? field(m, @"Name") : uid;
+        [names addObject:[NSString stringWithFormat:@"%@  v%@", dispName, field(m, @"Version").length ? field(m, @"Version") : @"1.0"]];
+
+        // Detect Android/Mobile-specific metadata in manifest.json / folder path / content.json / compiled DLLs
+        NSString *desc = field(m, @"Description");
+        if (sdvHasMobileEditionMarker(dispName) || sdvHasMobileEditionMarker(uid) ||
+            sdvHasMobileEditionMarker(desc) || sdvHasMobileEditionMarker(base)) {
+            addMobileWarn([NSString stringWithFormat:@"Mod \"%@\" được đánh dấu dành cho bản Mobile/Android.", dispName]);
+        }
+        NSString *entryDll = field(m, @"EntryDll");
+        if (entryDll.length) {
+            NSString *dllFull = inside(stage, base.length ? join(base, entryDll) : entryDll);
+            NSData *dllData = [NSData dataWithContentsOfFile:dllFull options:NSDataReadingMappedIfSafe error:nil];
+            if (sdvDataContainsAscii(dllData, "Mono.Android") ||
+                sdvDataContainsAscii(dllData, "SMAPI.Android") ||
+                sdvDataContainsAscii(dllData, "StardewValley.Android")) {
+                addMobileWarn([NSString stringWithFormat:@"Mod \"%@\" (%@) biên dịch riêng cho SMAPI Android — có thể lỗi hoặc không tải được trên bản PC 1.6.15.", dispName, entryDll]);
+            }
+        }
+        NSString *cpJsonPath = inside(stage, base.length ? join(base, @"content.json") : @"content.json");
+        if ([fm() fileExistsAtPath:cpJsonPath]) {
+            NSData *cjData = [NSData dataWithContentsOfFile:cpJsonPath options:NSDataReadingMappedIfSafe error:nil];
+            if (sdvDataContainsAscii(cjData, "MobileAtlas") ||
+                sdvDataContainsAscii(cjData, "mobileatlas") ||
+                sdvDataContainsAscii(cjData, "NRTnarathip")) {
+                addMobileWarn([NSString stringWithFormat:@"Content Pack \"%@\" chỉnh sửa tài nguyên riêng của bản Mobile (MobileAtlas).", dispName]);
+            }
+        }
     }
     for (NSString *bm in badManifests) {
         [warnings addObject:[@"Bỏ qua manifest lỗi: " stringByAppendingString:bm]];
@@ -1513,9 +1919,19 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
         return [@(b.length) compare:@(a.length)];
     }];
 
-    // Pass 2: Check dependencies against BOTH already-installed mods AND mods in this same batch!
+    // Pass 2: Check dependencies, SMAPI API version, legacy 1.5 DLLs, and Content Patcher Load conflicts!
+    NSDictionary<NSString *, NSSet<NSString *> *> *existingCpLoads = sdvCollectInstalledCpLoadTargets(root);
     for (NSString *base in bases) {
         NSDictionary *m = incoming[base][@"m"];
+        NSString *dispName = field(m, @"Name").length ? field(m, @"Name") : field(m, @"UniqueID");
+        NSString *minApi = field(m, @"MinimumApiVersion");
+        if (minApi.length) {
+            if (sdvCompareSemver(minApi, @"4.5.2") > 0) {
+                [warnings addObject:[NSString stringWithFormat:@"%@ yêu cầu SMAPI v%@ (hiện tại 4.5.2).", dispName, minApi]];
+            } else if (field(m, @"EntryDll").length && sdvCompareSemver(minApi, @"3.99.0") < 0) {
+                [warnings addObject:[NSString stringWithFormat:@"%@ là mod C# đời cũ (SMAPI %@) — có thể không tương thích Stardew 1.6.15.", dispName, minApi]];
+            }
+        }
         NSMutableArray *deps = [NSMutableArray array];
         id rawDeps = dictValueCI(m, @"Dependencies");
         id rawCp = dictValueCI(m, @"ContentPackFor");
@@ -1524,9 +1940,43 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
         for (id dep in deps) {
             if (![dep isKindOfClass:NSDictionary.class]) continue;
             NSString *uid = field(dep, @"UniqueID");
+            NSString *uidLow = uid.lowercaseString;
             id req = dictValueCI(dep, @"IsRequired");
-            if (uid.length && ![req isEqual:@NO] && !combinedLibrary[uid.lowercaseString]) {
-                [warnings addObject:[@"Thiếu mod phụ thuộc: " stringByAppendingString:uid]];
+            if (uid.length && ![req isEqual:@NO]) {
+                if (!combinedLibrary[uidLow]) {
+                    if (disabledMap[uidLow]) {
+                        [warnings addObject:[NSString stringWithFormat:@"Mod phụ thuộc đang bị TẮT: %@ (hãy bật lại trong Thư viện).", uid]];
+                    } else {
+                        [warnings addObject:[@"Thiếu mod phụ thuộc: " stringByAppendingString:uid]];
+                    }
+                } else {
+                    NSString *minV = field(dep, @"MinimumVersion");
+                    NSString *instV = field(combinedLibrary[uidLow][@"manifest"], @"Version");
+                    if (minV.length && instV.length && sdvCompareSemver(instV, minV) < 0) {
+                        [warnings addObject:[NSString stringWithFormat:@"%@ cần %@ ≥ v%@ (đang có v%@).", dispName, uid, minV, instV]];
+                    }
+                }
+            }
+        }
+        // Check Content Patcher Action:Load conflicts against already-installed active CP packs
+        NSString *cpJsonPath = inside(stage, base.length ? join(base, @"content.json") : @"content.json");
+        if ([fm() fileExistsAtPath:cpJsonPath]) {
+            NSSet<NSString *> *newLoads = sdvExtractCpLoadTargetsFromFile(cpJsonPath);
+            NSString *selfUidLow = field(m, @"UniqueID").lowercaseString;
+            for (NSString *otherKey in existingCpLoads) {
+                if ([otherKey isEqualToString:selfUidLow]) continue;
+                NSSet<NSString *> *otherTargets = existingCpLoads[otherKey];
+                NSMutableArray<NSString *> *overlap = [NSMutableArray array];
+                for (NSString *t in newLoads) {
+                    if ([otherTargets containsObject:t]) [overlap addObject:t];
+                }
+                if (overlap.count) {
+                    NSString *otherName = field(library[otherKey][@"manifest"], @"Name");
+                    if (!otherName.length) otherName = otherKey;
+                    [warnings addObject:[NSString stringWithFormat:@"Xung đột Content Patcher với \"%@\": cùng Load %@%@",
+                        otherName, overlap.firstObject,
+                        overlap.count > 1 ? [NSString stringWithFormat:@" (+%lu mục)", (unsigned long)(overlap.count - 1)] : @""]];
+                }
             }
         }
     }
@@ -1569,7 +2019,11 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
                      [fnLow isEqualToString:@"menutiles.xnb"] || [fnLow isEqualToString:@"cursors.xnb"] ||
                      [fnLow isEqualToString:@"clouds.xnb"])) {
                     [warnings addObject:[NSString stringWithFormat:@"Bỏ qua XNB giao diện bản Mobile (%@) để bảo vệ Content gốc — mod đã dùng Content Patcher.", r.lastPathComponent]];
+                    addMobileWarn([NSString stringWithFormat:@"Gói có chứa tệp giao diện bản Mobile (%@) — đã tự bỏ qua để bảo vệ Content PC gốc.", r.lastPathComponent]);
                     continue;
+                }
+                if ([fnLow hasPrefix:@"mobileatlas"]) {
+                    addMobileWarn([NSString stringWithFormat:@"Chứa tệp riêng bản Mobile (%@) — có thể không tương thích giao diện PC 1.6.15.", r.lastPathComponent]);
                 }
                 add(join(@"Content", subRel), r);
                 NSString *topSub = parts[contentIdx + 1];
@@ -1625,7 +2079,15 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
         // with loose sibling Android/Mobile XNB files (e.g. TitleButtons.xnb, MenuTiles.xnb, MobileAtlas*.xnb).
         if (bases.count > 0) {
             [warnings addObject:[NSString stringWithFormat:@"Bỏ qua XNB đi kèm (%@) vì gói đã có mod SMAPI/Content Patcher.", r.lastPathComponent]];
+            if ([r.lastPathComponent.lowercaseString hasPrefix:@"mobileatlas"] ||
+                [r.lastPathComponent.lowercaseString isEqualToString:@"titlebuttons.xnb"] ||
+                [r.lastPathComponent.lowercaseString isEqualToString:@"menutiles.xnb"]) {
+                addMobileWarn([NSString stringWithFormat:@"Gói có kẹp tệp XNB giao diện bản Mobile (%@) — đã tự bỏ qua để tránh hỏng màn hình.", r.lastPathComponent]);
+            }
             continue;
+        }
+        if ([r.lastPathComponent.lowercaseString hasPrefix:@"mobileatlas"]) {
+            addMobileWarn([NSString stringWithFormat:@"Tệp XNB riêng của bản Mobile (%@) — có thể gây lỗi hiển thị trên bản PC 1.6.15.", r.lastPathComponent]);
         }
         NSData *data = readFile(inside(stage, r));
         if (data.length < 10 || memcmp(data.bytes, "XNB", 3)) {
@@ -1698,6 +2160,7 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
         @"map": out,
         @"names": names,
         @"warnings": warnings.allObjects,
+        @"mobileWarnings": mobileWarnings,
         @"choices": choices,
         @"translationOwner": translationOwner ?: NSNull.null,
         @"obsoleteDisabled": obsoleteDisabled.allObjects,

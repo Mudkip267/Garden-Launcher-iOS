@@ -1,5 +1,6 @@
 #define GARDEN_IN_GAME 1
 #import <AVFAudio/AVAudioSession.h>
+#import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 #import <execinfo.h>
 #import <signal.h>
@@ -24,6 +25,11 @@ static char gSdvCrashLogPath[1024] = {0};
 static char gSdvPauseFlagPath[1024] = {0};
 static char gSdvHapticFlagPath[1024] = {0};
 static char gSdvSafeAreaPath[1024] = {0};
+static char gSdvBootReadyPath[1024] = {0};
+static char gSdvBootStagePath[1024] = {0};
+static char gSdvEngineLogPath[1024] = {0};
+static CFAbsoluteTime gSdvBootStartTime = 0;
+static time_t gSdvBootStartEpoch = 0;
 static char gSdvLastSafeAreaBuf[64] = {0};
 static volatile sig_atomic_t gSdvCrashHandled = 0;
 
@@ -755,6 +761,146 @@ static void sdvApplyAutoHideHomeIndicator(UIViewController *vc) {
 }
 @end
 
+// ---- Native Apple Startup Loading Screen (0% ConcernedApe assets, GPU CoreAnimation 60fps, 0 MB after fade-out) ----
+@interface SDVBootLoadingViewController : UIViewController
+-(void)updateStage:(NSString *)stage elapsedSeconds:(int)secs;
+@end
+
+@implementation SDVBootLoadingViewController {
+    UILabel *_stageLabel;
+    UILabel *_timeLabel;
+    UIView *_spinnerWrap;
+}
+-(BOOL)prefersStatusBarHidden { return YES; }
+-(BOOL)prefersHomeIndicatorAutoHidden { return YES; }
+-(UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }
+-(UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
+
+-(void)viewDidLoad {
+    [super viewDidLoad];
+    self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    self.view.backgroundColor = [UIColor colorWithRed:0.055 green:0.067 blue:0.098 alpha:1.0];
+
+    UIStackView *centerStack = mkVStack(10);
+    centerStack.alignment = UIStackViewAlignmentCenter;
+    centerStack.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:centerStack];
+
+    // App Icon (Garden Launcher open-source icon)
+    UIImage *iconImg = nil;
+    NSString *bp = NSBundle.mainBundle.bundlePath;
+    for (NSString *cand in @[@"AppIcon60x60@3x.png", @"AppIcon512.png", @"AppIcons/AppIcon60x60@3x.png", @"AppIcon60x60@2x.png"]) {
+        NSString *p = [bp stringByAppendingPathComponent:cand];
+        if ([fm() fileExistsAtPath:p]) {
+            iconImg = [UIImage imageWithContentsOfFile:p];
+            if (iconImg) break;
+        }
+    }
+    UIView *iconHolder = [UIView new];
+    iconHolder.translatesAutoresizingMaskIntoConstraints = NO;
+    iconHolder.layer.shadowColor = kTintBlue.CGColor;
+    iconHolder.layer.shadowOpacity = 0.28;
+    iconHolder.layer.shadowRadius = 18;
+    iconHolder.layer.shadowOffset = CGSizeMake(0, 6);
+    [NSLayoutConstraint activateConstraints:@[
+        [iconHolder.widthAnchor constraintEqualToConstant:76],
+        [iconHolder.heightAnchor constraintEqualToConstant:76]
+    ]];
+
+    UIImageView *iv = [[UIImageView alloc] initWithImage:(iconImg ?: sfIcon(@"leaf.fill", 36, UIImageSymbolWeightSemibold))];
+    iv.contentMode = iconImg ? UIViewContentModeScaleAspectFill : UIViewContentModeCenter;
+    iv.tintColor = kTintGreen;
+    iv.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.06];
+    iv.layer.cornerRadius = 18.0;
+    iv.layer.cornerCurve = kCACornerCurveContinuous;
+    iv.layer.borderWidth = 1.0;
+    iv.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.14].CGColor;
+    iv.clipsToBounds = YES;
+    [iconHolder addSubview:iv];
+    pinAll(iv, iconHolder, 0);
+    [centerStack addArrangedSubview:iconHolder];
+    [centerStack setCustomSpacing:12 afterView:iconHolder];
+
+    // Title & Version pill
+    UILabel *titleLbl = mkLabel(@"Garden Launcher", 22, UIFontWeightSemibold, UIColor.whiteColor);
+    titleLbl.textAlignment = NSTextAlignmentCenter;
+    [centerStack addArrangedSubview:titleLbl];
+    [centerStack setCustomSpacing:5 afterView:titleLbl];
+
+    UILabel *verPill = mkBadgePill(@"v7.10 · SMAPI 4.5.2 · Stardew PC 1.6.15", [UIColor colorWithWhite:1.0 alpha:0.08], [UIColor colorWithWhite:1.0 alpha:0.74], 11.5);
+    [centerStack addArrangedSubview:verPill];
+    [centerStack setCustomSpacing:18 afterView:verPill];
+
+    // GPU-driven CoreAnimation Spinning Ring (runs smoothly on iOS RenderServer even during heavy Mono/SMAPI loading!)
+    _spinnerWrap = [UIView new];
+    _spinnerWrap.translatesAutoresizingMaskIntoConstraints = NO;
+    [NSLayoutConstraint activateConstraints:@[
+        [_spinnerWrap.widthAnchor constraintEqualToConstant:34],
+        [_spinnerWrap.heightAnchor constraintEqualToConstant:34]
+    ]];
+    CGPoint c = CGPointMake(17, 17);
+    CAShapeLayer *track = [CAShapeLayer layer];
+    track.frame = CGRectMake(0, 0, 34, 34);
+    track.path = [UIBezierPath bezierPathWithArcCenter:c radius:13.5 startAngle:0 endAngle:(CGFloat)(M_PI * 2.0) clockwise:YES].CGPath;
+    track.fillColor = UIColor.clearColor.CGColor;
+    track.strokeColor = [UIColor colorWithWhite:1.0 alpha:0.14].CGColor;
+    track.lineWidth = 3.0;
+    [_spinnerWrap.layer addSublayer:track];
+
+    CAShapeLayer *arc = [CAShapeLayer layer];
+    arc.frame = CGRectMake(0, 0, 34, 34);
+    arc.path = [UIBezierPath bezierPathWithArcCenter:c radius:13.5 startAngle:(CGFloat)(-M_PI_2) endAngle:(CGFloat)(M_PI) clockwise:YES].CGPath;
+    arc.fillColor = UIColor.clearColor.CGColor;
+    arc.strokeColor = kTintBlue.CGColor;
+    arc.lineWidth = 3.0;
+    arc.lineCap = kCALineCapRound;
+    CABasicAnimation *spin = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
+    spin.fromValue = @(0.0);
+    spin.toValue = @(M_PI * 2.0);
+    spin.duration = 0.92;
+    spin.repeatCount = HUGE_VALF;
+    spin.removedOnCompletion = NO;
+    [arc addAnimation:spin forKey:@"sdvBootSpin"];
+    [_spinnerWrap.layer addSublayer:arc];
+    [centerStack addArrangedSubview:_spinnerWrap];
+    [centerStack setCustomSpacing:12 afterView:_spinnerWrap];
+
+    _stageLabel = mkLabel(@"Đang khởi động SMAPI 4.5.2…", 13.5, UIFontWeightMedium, [UIColor colorWithWhite:1.0 alpha:0.86]);
+    _stageLabel.textAlignment = NSTextAlignmentCenter;
+    [centerStack addArrangedSubview:_stageLabel];
+    [centerStack setCustomSpacing:3 afterView:_stageLabel];
+
+    _timeLabel = mkLabel(@"", 11.5, UIFontWeightRegular, [UIColor colorWithWhite:1.0 alpha:0.45]);
+    _timeLabel.font = iosMonoDigits(11.5, UIFontWeightRegular);
+    _timeLabel.textAlignment = NSTextAlignmentCenter;
+    [centerStack addArrangedSubview:_timeLabel];
+
+    UILabel *hintLbl = mkLabel(@"Chạm 3 ngón × 2 bất cứ lúc nào để mở Mod Garden", 12, UIFontWeightMedium, [UIColor colorWithWhite:1.0 alpha:0.42]);
+    hintLbl.textAlignment = NSTextAlignmentCenter;
+    hintLbl.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:hintLbl];
+
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [centerStack.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
+        [centerStack.centerYAnchor constraintEqualToAnchor:safe.centerYAnchor constant:-8],
+        [centerStack.leadingAnchor constraintGreaterThanOrEqualToAnchor:safe.leadingAnchor constant:24],
+        [centerStack.trailingAnchor constraintLessThanOrEqualToAnchor:safe.trailingAnchor constant:-24],
+        [hintLbl.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
+        [hintLbl.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-14]
+    ]];
+}
+
+-(void)updateStage:(NSString *)stage elapsedSeconds:(int)secs {
+    if (stage.length && ![_stageLabel.text isEqualToString:stage]) {
+        _stageLabel.text = stage;
+    }
+    if (secs >= 3) {
+        _timeLabel.text = [NSString stringWithFormat:@"Đang tải tài nguyên & Mod… %ds", secs];
+    }
+}
+@end
+
 // ---- Dedicated Fullscreen Overlay Window for Mod Garden ----
 @interface SDVGardenOverlayWindow : UIWindow
 @end
@@ -765,6 +911,10 @@ static void sdvApplyAutoHideHomeIndicator(UIViewController *vc) {
 @interface SDVGardenGestureHost : NSObject <UIGestureRecognizerDelegate>
 @property(nonatomic, strong) NSHashTable<UIWindow *> *attachedWindows;
 @property(nonatomic, strong) SDVGardenOverlayWindow *gardenWindow;
+@property(nonatomic, strong) SDVPassThroughWindow *loadingWindow;
+@property(nonatomic, strong) SDVBootLoadingViewController *loadingVC;
+@property(nonatomic, strong) NSTimer *bootPollTimer;
+@property(nonatomic, assign) BOOL bootLoadingDismissed;
 @property(nonatomic, strong) SDVPassThroughWindow *liveHudWindow;
 @property(nonatomic, strong) SDVPassThroughWindow *ramHudWindow;
 @property(nonatomic, strong) SDVPassThroughWindow *toastWindow;
@@ -773,6 +923,8 @@ static void sdvApplyAutoHideHomeIndicator(UIViewController *vc) {
 @property(nonatomic, strong) NSTimer *hapticTimer;
 -(BOOL)isGardenOpen;
 -(void)attachToGameWindows;
+-(void)showBootLoadingOverlayIfNeeded;
+-(void)dismissBootLoadingOverlayAnimated:(BOOL)animated;
 -(void)startHapticTimer;
 -(void)stopHapticTimer;
 @end
@@ -1004,7 +1156,7 @@ static SDVGardenGestureHost *gSdvGardenHost = nil;
 
 -(BOOL)isOwnWindow:(UIWindow *)w {
     if (!w) return YES;
-    return w == self.gardenWindow || w == self.liveHudWindow || w == self.ramHudWindow || w == self.toastWindow ||
+    return w == self.gardenWindow || w == self.loadingWindow || w == self.liveHudWindow || w == self.ramHudWindow || w == self.toastWindow ||
            [w isKindOfClass:SDVGardenOverlayWindow.class] || [w isKindOfClass:SDVPassThroughWindow.class];
 }
 
@@ -1117,22 +1269,158 @@ static SDVGardenGestureHost *gSdvGardenHost = nil;
         if (!self.autoOpenedSetup && hasWindow && ![gameDataStatus([self docsPath])[@"ready"] boolValue]) {
             self.autoOpenedSetup = YES;
             self.shownStartupToast = YES;
+            self.bootLoadingDismissed = YES;
+            [self dismissBootLoadingOverlayAnimated:NO];
             sdvBootLog("[BOOT 6] Game data missing -> scheduling Mod Garden setup UI");
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 if (![gameDataStatus([self docsPath])[@"ready"] boolValue]) {
                     [self openGarden];
                 }
             });
-        } else if (!self.shownStartupToast && hasWindow) {
-            self.shownStartupToast = YES;
-            sdvBootLog("[BOOT 6] Game data ready -> scheduling startup hint toast");
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                [self showStartupHintToast];
-            });
+        } else if (hasWindow && [gameDataStatus([self docsPath])[@"ready"] boolValue]) {
+            if (!self.bootLoadingDismissed) {
+                [self showBootLoadingOverlayIfNeeded];
+            } else if (!self.shownStartupToast) {
+                self.shownStartupToast = YES;
+                sdvBootLog("[BOOT 6] Game data ready -> scheduling startup hint toast");
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    [self showStartupHintToast];
+                });
+            }
         }
     } @catch (NSException *ex) {
         sdvBootLogFmt([NSString stringWithFormat:@"[WARN] attachToGameWindows exception: %@", ex]);
     }
+}
+
+-(void)showBootLoadingOverlayIfNeeded {
+    if (self.bootLoadingDismissed || self.loadingWindow || [self isGardenOpen]) return;
+    if (gSdvBootReadyPath[0] && access(gSdvBootReadyPath, F_OK) == 0) {
+        self.bootLoadingDismissed = YES;
+        unlink(gSdvBootReadyPath);
+        return;
+    }
+    UIWindow *game = [self gameWindow];
+    UIWindowScene *ws = game.windowScene ?: [self primaryWindowScene];
+    if (!game && !ws) return;
+
+    CGRect bounds = (game && !CGRectIsEmpty(game.frame)) ? game.frame : (ws ? ws.coordinateSpace.bounds : CGRectZero);
+    SDVPassThroughWindow *lw = ws
+        ? [[SDVPassThroughWindow alloc] initWithWindowScene:ws]
+        : [[SDVPassThroughWindow alloc] initWithFrame:bounds];
+    if (!CGRectIsEmpty(bounds)) lw.frame = bounds;
+    lw.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    lw.backgroundColor = [UIColor colorWithRed:0.055 green:0.067 blue:0.098 alpha:1.0];
+    lw.windowLevel = UIWindowLevelNormal + 3;
+    lw.userInteractionEnabled = NO;
+    lw.interactiveView = nil;
+
+    SDVBootLoadingViewController *vc = [SDVBootLoadingViewController new];
+    lw.rootViewController = vc;
+    lw.hidden = NO; // Never call makeKeyAndVisible so game/scene keyWindow is untouched!
+    self.loadingWindow = lw;
+    self.loadingVC = vc;
+    sdvBootLog("[BOOT 6] Native startup loading screen displayed");
+
+    if (!self.bootPollTimer) {
+        __weak typeof(self) weakSelf = self;
+        self.bootPollTimer = [NSTimer scheduledTimerWithTimeInterval:0.20 repeats:YES block:^(NSTimer *t) {
+            (void)t;
+            [weakSelf pollBootLoadingState];
+        }];
+    }
+    [self pollBootLoadingState];
+}
+
+-(BOOL)engineLogShowsRenderedFrames {
+    if (!gSdvEngineLogPath[0]) return NO;
+    struct stat st;
+    if (stat(gSdvEngineLogPath, &st) != 0 || st.st_mtime < gSdvBootStartEpoch || st.st_size < 128) return NO;
+    int fd = open(gSdvEngineLogPath, O_RDONLY);
+    if (fd < 0) return NO;
+    off_t readSz = (st.st_size > 4096) ? 4096 : st.st_size;
+    if (st.st_size > readSz) lseek(fd, st.st_size - readSz, SEEK_SET);
+    char buf[4097];
+    ssize_t n = read(fd, buf, (size_t)readSz);
+    close(fd);
+    if (n <= 0) return NO;
+    buf[n] = '\0';
+    return (strstr(buf, "Frame #3:") != NULL || strstr(buf, "Frame #4:") != NULL || strstr(buf, "Frame #5:") != NULL);
+}
+
+-(void)pollBootLoadingState {
+    if (!self.loadingWindow || self.bootLoadingDismissed) {
+        [self.bootPollTimer invalidate];
+        self.bootPollTimer = nil;
+        return;
+    }
+    if ([self isGardenOpen]) {
+        [self dismissBootLoadingOverlayAnimated:NO];
+        return;
+    }
+    UIWindow *game = [self gameWindow];
+    if (game && !CGRectIsEmpty(game.frame)) {
+        self.loadingWindow.frame = game.frame;
+    }
+
+    double elapsed = (gSdvBootStartTime > 0) ? (CFAbsoluteTimeGetCurrent() - gSdvBootStartTime) : 0.0;
+    if (gSdvBootStagePath[0]) {
+        int fd = open(gSdvBootStagePath, O_RDONLY);
+        if (fd >= 0) {
+            char sbuf[256];
+            ssize_t sn = read(fd, sbuf, sizeof(sbuf) - 1);
+            close(fd);
+            if (sn > 0) {
+                sbuf[sn] = '\0';
+                NSString *st = [[NSString stringWithUTF8String:sbuf] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+                if (st.length) [self.loadingVC updateStage:st elapsedSeconds:(int)elapsed];
+            }
+        }
+    } else {
+        [self.loadingVC updateStage:nil elapsedSeconds:(int)elapsed];
+    }
+
+    BOOL ready = (gSdvBootReadyPath[0] && access(gSdvBootReadyPath, F_OK) == 0);
+    if (!ready && elapsed >= 6.0 && [self engineLogShowsRenderedFrames]) {
+        ready = YES;
+    }
+    if (ready || elapsed >= 90.0) {
+        sdvBootLogFmt([NSString stringWithFormat:@"[BOOT 6b] Dismissing startup loading screen (ready=%d, elapsed=%.1fs)", ready ? 1 : 0, elapsed]);
+        [self dismissBootLoadingOverlayAnimated:YES];
+    }
+}
+
+-(void)dismissBootLoadingOverlayAnimated:(BOOL)animated {
+    self.bootLoadingDismissed = YES;
+    [self.bootPollTimer invalidate];
+    self.bootPollTimer = nil;
+    if (gSdvBootReadyPath[0]) unlink(gSdvBootReadyPath);
+
+    SDVPassThroughWindow *lw = self.loadingWindow;
+    self.loadingWindow = nil;
+    self.loadingVC = nil;
+    if (!lw) return;
+
+    void (^cleanup)(void) = ^{
+        lw.hidden = YES;
+        lw.rootViewController = nil;
+        if (![self isGardenOpen] && !self.shownStartupToast) {
+            self.shownStartupToast = YES;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.65 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [self showStartupHintToast];
+            });
+        }
+    };
+    if (!animated) {
+        cleanup();
+        return;
+    }
+    [UIView animateWithDuration:0.35 delay:0 options:UIViewAnimationOptionCurveEaseOut animations:^{
+        lw.alpha = 0.0;
+    } completion:^(BOOL finished) {
+        (void)finished;
+        cleanup();
+    }];
 }
 
 -(BOOL)gestureRecognizer:(UIGestureRecognizer *)g shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
@@ -1280,6 +1568,7 @@ static SDVGardenGestureHost *gSdvGardenHost = nil;
 
 -(void)openGarden {
     if ([self isGardenOpen]) return;
+    [self dismissBootLoadingOverlayAnimated:NO];
     UIWindow *game = [self gameWindow];
     UIWindowScene *ws = game.windowScene ?: [self primaryWindowScene];
     if (!game && !ws) return;
@@ -1407,6 +1696,18 @@ __attribute__((constructor)) static void startGardenControls(void) {
                 snprintf(gSdvPauseFlagPath, sizeof(gSdvPauseFlagPath), "%s/sdv_pause_now.flag", docs.UTF8String);
                 snprintf(gSdvHapticFlagPath, sizeof(gSdvHapticFlagPath), "%s/sdv_haptic_bite.flag", docs.UTF8String);
                 snprintf(gSdvSafeAreaPath, sizeof(gSdvSafeAreaPath), "%s/sdv_safe_area.cfg", docs.UTF8String);
+                snprintf(gSdvBootReadyPath, sizeof(gSdvBootReadyPath), "%s/sdv_boot_ready.flag", docs.UTF8String);
+                snprintf(gSdvBootStagePath, sizeof(gSdvBootStagePath), "%s/sdv_boot_stage.txt", docs.UTF8String);
+                snprintf(gSdvEngineLogPath, sizeof(gSdvEngineLogPath), "%s/ErrorLogs/engine-latest.log", docs.UTF8String);
+                gSdvBootStartTime = CFAbsoluteTimeGetCurrent();
+                gSdvBootStartEpoch = time(NULL);
+                unlink(gSdvBootReadyPath);
+                const char *initStage = "Đang khởi động SMAPI 4.5.2…";
+                int sfd = open(gSdvBootStagePath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (sfd >= 0) {
+                    (void)write(sfd, initStage, strlen(initStage));
+                    close(sfd);
+                }
             }
             // Dynamically tune Mono SGen GC heap limit based on real physical iPhone RAM (runs before main()/Mono init!)
             uint64_t physRam = NSProcessInfo.processInfo.physicalMemory;
@@ -1434,6 +1735,12 @@ __attribute__((constructor)) static void startGardenControls(void) {
             sdvBootLog("[BOOT 4] Main runloop active -> starting SDVGardenGestureHost");
             gSdvGardenHost = [SDVGardenGestureHost new];
             [gSdvGardenHost attachToGameWindows];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [gSdvGardenHost attachToGameWindows];
+            });
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [gSdvGardenHost attachToGameWindows];
+            });
             [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer *t) {
                 (void)t;
                 [gSdvGardenHost attachToGameWindows];

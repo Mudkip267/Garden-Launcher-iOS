@@ -998,17 +998,39 @@ static NSString *sdvProbeLocalNetwork(void) {
         [editRow addArrangedSubview:editBtn];
         [mcRows addObject:editRow];
 
-        [mcRows addObject:[self mkSettingsSwitchRow:@"Mua đồ & Kéo thả vật phẩm kiểu Mobile" icon:@"cart.fill" color:kTintGreen on:_mobileCfg.mobileShopAndDrag tag:36]];
+        [mcRows addObject:[self mkSettingsSwitchRow:@"Mua đồ & Kéo thả vật phẩm (gắn mồi/phao trực tiếp)" icon:@"cart.fill" color:kTintGreen on:_mobileCfg.mobileShopAndDrag tag:36]];
+        [mcRows addObject:[self mkSettingsSwitchRow:@"Tự bật bàn phím iOS khi chạm ô nhập chữ" icon:@"keyboard.chevron.compact.down" color:kTintTeal on:_mobileCfg.autoKeyboard tag:37]];
+        [mcRows addObject:[self mkSettingsSwitchRow:@"Chế tạo an toàn (chạm 1 xem, chạm 2 tạo)" icon:@"wrench.and.screwdriver.fill" color:kTintOrange on:_mobileCfg.safeCrafting tag:38]];
         [mcRows addObject:[self mkSettingsSwitchRow:@"Tự chọn công cụ (Auto-Tool)" icon:@"hammer.fill" color:kTintOrange on:_mobileCfg.autoTool tag:30]];
         [mcRows addObject:[self mkSettingsSwitchRow:@"Tự động đánh quái (Auto-Attack)" icon:@"bolt.shield.fill" color:kTintRed on:_mobileCfg.autoAttack tag:31]];
         [mcRows addObject:[self mkSettingsSwitchRow:@"Chụm 2 ngón phóng to/nhỏ (Pinch Zoom)" icon:@"arrow.up.left.and.arrow.down.right" color:kTintBlue on:_mobileCfg.pinchZoom tag:32]];
         if (_mobileCfg.mode == 1 || _mobileCfg.mode == 4) {
             [mcRows addObject:[self mkSettingsSwitchRow:@"Chớp vòng mờ khi chạm (chế độ Vô hình)" icon:@"circle.dashed" color:kTintIndigo on:_mobileCfg.showTouchHint tag:33]];
         }
-        [mcRows addObject:[self mkSettingsSwitchRow:@"Hiện thanh tiện ích (BAG · MAP · QST · MODS · KEY · EDIT)" icon:@"rectangle.topthird.inset.filled" color:kTintGreen on:_mobileCfg.showTopUtility tag:34]];
+        [mcRows addObject:[self mkSettingsSwitchRow:@"Hiện thanh tiện ích (BAG · MAP · QST · SAVE · KEY · EDIT)" icon:@"rectangle.topthird.inset.filled" color:kTintGreen on:_mobileCfg.showTopUtility tag:34]];
         if (_mobileCfg.mode != 3) {
             [mcRows addObject:[self mkSettingsSwitchRow:@"Đổi vị trí 2 nút phải (Đánh ↔ Tương tác)" icon:@"arrow.left.arrow.right" color:kTintPurple on:_mobileCfg.swapRightButtons tag:35]];
         }
+
+        // Optional Periodic Auto-Save row (Default OFF -> zero stutter; skips mines/combat/moving)
+        UIStackView *asRow = mkVStack(6);
+        UIStackView *asTop = mkHStack(10);
+        [asTop addArrangedSubview:mkSettingsIconBadge(@"clock.arrow.circlepath", kTintTeal, 28)];
+        UIStackView *asTxt = mkVStack(1);
+        [asTxt addArrangedSubview:mkLabel(@"Tự động lưu định kỳ (slot [AUTO])", 13.5, UIFontWeightRegular, kInkPrimary)];
+        [asTxt addArrangedSubview:mkLabel(@"Chỉ lưu khi đứng yên ngoài mỏ/hang để không khựng khi đánh quái", 11.5, UIFontWeightRegular, kInkSecondary)];
+        [asTop addArrangedSubview:asTxt];
+        [asRow addArrangedSubview:asTop];
+        UISegmentedControl *asSeg = [[UISegmentedControl alloc] initWithItems:@[@"Tắt", @"3 phút", @"5 phút", @"10 phút"]];
+        NSInteger asIdx = 0;
+        if (_mobileCfg.autoSaveMinutes == 3) asIdx = 1;
+        else if (_mobileCfg.autoSaveMinutes == 5) asIdx = 2;
+        else if (_mobileCfg.autoSaveMinutes == 10) asIdx = 3;
+        asSeg.selectedSegmentIndex = asIdx;
+        [asSeg addTarget:self action:@selector(autoSaveMinutesChanged:) forControlEvents:UIControlEventValueChanged];
+        [asRow addArrangedSubview:asSeg];
+        [mcRows addObject:asRow];
+
         [mcRows addObject:[self mkSliderRow:@"Kích thước nút / vùng chạm" min:0.75f max:1.45f val:_mobileCfg.buttonScale valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_mobileCfg.buttonScale * 100)] tag:17]];
     }
     [_pane addArrangedSubview:mkGroupedRows(mcRows, 48)];
@@ -1386,6 +1408,15 @@ static NSString *sdvProbeLocalNetwork(void) {
     [_uiCfg saveToDocuments:_root.path];
 }
 
+-(void)autoSaveMinutesChanged:(UISegmentedControl *)seg {
+    _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
+    NSInteger map[4] = {0, 3, 5, 10};
+    NSInteger idx = seg.selectedSegmentIndex;
+    _mobileCfg.autoSaveMinutes = (idx >= 0 && idx < 4) ? map[idx] : 0;
+    [_mobileCfg saveToDocuments:_root.path];
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+}
+
 -(void)mobileModeChanged:(UISegmentedControl *)seg {
     if (!_mobileCfg) _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
     NSInteger idx = seg.selectedSegmentIndex;
@@ -1485,8 +1516,8 @@ static NSString *sdvProbeLocalNetwork(void) {
         [self renderAll:NO];
         return;
     }
-    if (sw.tag >= 30 && sw.tag <= 36) {
-        if (!_mobileCfg) _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
+    if (sw.tag >= 30 && sw.tag <= 38) {
+        _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
         switch (sw.tag) {
             case 30: _mobileCfg.autoTool = sw.isOn; break;
             case 31: _mobileCfg.autoAttack = sw.isOn; break;
@@ -1495,6 +1526,8 @@ static NSString *sdvProbeLocalNetwork(void) {
             case 34: _mobileCfg.showTopUtility = sw.isOn; break;
             case 35: _mobileCfg.swapRightButtons = sw.isOn; break;
             case 36: _mobileCfg.mobileShopAndDrag = sw.isOn; break;
+            case 37: _mobileCfg.autoKeyboard = sw.isOn; break;
+            case 38: _mobileCfg.safeCrafting = sw.isOn; break;
         }
         [_mobileCfg saveToDocuments:_root.path];
         [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
@@ -1711,7 +1744,7 @@ static NSString *sdvProbeLocalNetwork(void) {
 
     [_pane addArrangedSubview:mkSectionTitle(@"2. Điều khiển Mobile, Phím PC & Save Menu 20 mốc")];
     [_pane addArrangedSubview:mkGroupedRows(@[
-        [self mkGuideStep:@"A" title:@"4 Chế độ Mobile Controls & Mua đồ kéo thả" body:@"Tại tab Hiệu năng & Nút, chuyển trực tiếp giữa Vô hình, 2 Nút, Chạm đi (A* Tap-to-Move), Kết hợp hoặc Tay cầm. Hỗ trợ thanh kéo số lượng khi mua đồ trong Shop và chạm chuyển nhanh vật phẩm vào Rương." color:kTintBlue],
+        [self mkGuideStep:@"A" title:@"4 Chế độ Mobile & Tiện ích cảm ứng chuyên sâu" body:@"Chuyển trực tiếp giữa Vô hình, 2 Nút, Chạm đi (A*, giữ lì để gồng Cuốc/Bình tưới nâng cấp), Kết hợp hoặc Tay cầm. Vuốt ngang Toolbar hoặc bấm ROW để đổi hàng nhanh; kéo mồi/phao thả thẳng lên cần câu (giữ lì cần để gỡ); tự hiện nút ROT khi cầm nội thất; kéo ngắm trực tiếp Súng cao su; kéo 1 ngón lia camera ở Robin & Bảo tàng; tự bật bàn phím iOS khi chạm ô nhập chữ và tự hiện nút máy thùng cho Prairie King / Junimo Kart / Crane Game." color:kTintBlue],
         [self mkGuideStep:@"B" title:@"Thanh tiện ích (BAG · MAP · QST · SAVE · KEY · EDIT)" body:@"Mở nhanh Túi đồ (BAG), Bản đồ (MAP), Nhiệm vụ (QST), Bàn phím ảo iOS (KEY) và chế độ chỉnh vị trí nút (EDIT). Bấm dấu < để thu gọn thanh khi cần màn hình thoáng." color:kTintGreen],
         [self mkGuideStep:@"C" title:@"Save Menu lưu tới 20 mốc thời gian" body:@"Bấm nút SAVE trên thanh tiện ích để mở Save Menu phong cách Stardew Pixel: tạo tới 20 mốc lưu nhanh kèm ngày/giờ/vị trí, tải lại hoặc xóa từng mốc bất kỳ lúc nào." color:kTintOrange],
         [self mkGuideStep:@"D" title:@"Thêm nút phím PC tùy chọn (PC Keys / +PHIM)" body:@"Thêm tối đa 16 phím máy tính (P, I, F1–F12, ESC, TAB, SHIFT, CTRL, ALT, A–Z, 0–9…) từ bảng 56 phím trong tab Hiệu năng & Nút hoặc bấm +PHIM trong Edit Layout. Kéo di chuyển & kéo góc dưới phải để chỉnh kích thước từng phím." color:kTintPurple]

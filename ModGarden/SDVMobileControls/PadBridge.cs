@@ -28,6 +28,8 @@ namespace SDVMobileControls
         private readonly MethodInfo _setButtonMenu;
         private readonly MethodInfo _setPlayerRequestedMenuOpen;
         private readonly MethodInfo _resetSimulatedMouse;
+        private readonly MethodInfo _setSimulatedMousePosition;
+        private readonly MethodInfo _setSimulatedMouseLeftDown;
         private readonly MethodInfo _forwardInputToGame;
         private readonly MethodInfo _syncMenuBarConfig;
         private readonly MethodInfo _triggerVirtualKeyboard;
@@ -86,6 +88,8 @@ namespace SDVMobileControls
             _setButtonMenu = padType.GetMethod("set_ButtonMenu", any);
             _setPlayerRequestedMenuOpen = padType.GetMethod("set_PlayerRequestedMenuOpen", any);
             _resetSimulatedMouse = padType.GetMethod("ResetSimulatedMouse", any);
+            _setSimulatedMousePosition = padType.GetMethod("set_SimulatedMousePosition", any);
+            _setSimulatedMouseLeftDown = padType.GetMethod("set_SimulatedMouseLeftDown", any);
             _forwardInputToGame = padType.GetMethod("ForwardInputToGame", any);
             _syncMenuBarConfig = padType.GetMethod("SyncMenuBarConfig", any);
             _triggerVirtualKeyboard = padType.GetMethod("TriggerVirtualKeyboard", any);
@@ -381,6 +385,11 @@ namespace SDVMobileControls
 
         public void ApplyInput(object pad, Vector2 stick, bool btnX, bool btnA, bool btnMenu)
         {
+            ApplyInputWithMouse(pad, stick, btnX, btnA, btnMenu, null, false);
+        }
+
+        public void ApplyInputWithMouse(object pad, Vector2 stick, bool btnX, bool btnA, bool btnMenu, Point? mousePos, bool mouseLeftDown)
+        {
             if (pad == null) return;
             _arg1[0] = stick;
             _setLeftStick?.Invoke(pad, _arg1);
@@ -391,7 +400,16 @@ namespace SDVMobileControls
             _setButtonLT?.Invoke(pad, _argBoolFalse);
             _setButtonRT?.Invoke(pad, _argBoolFalse);
             _setButtonMenu?.Invoke(pad, btnMenu ? _argBoolTrue : _argBoolFalse);
-            _resetSimulatedMouse?.Invoke(pad, null);
+            if (mousePos.HasValue)
+            {
+                _arg1[0] = mousePos.Value;
+                _setSimulatedMousePosition?.Invoke(pad, _arg1);
+                _setSimulatedMouseLeftDown?.Invoke(pad, mouseLeftDown ? _argBoolTrue : _argBoolFalse);
+            }
+            else
+            {
+                _resetSimulatedMouse?.Invoke(pad, null);
+            }
             _forwardInputToGame?.Invoke(pad, null);
         }
 

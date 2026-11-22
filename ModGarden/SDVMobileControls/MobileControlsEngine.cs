@@ -6,7 +6,10 @@ using Microsoft.Xna.Framework.Input;
 using Microsoft.Xna.Framework.Input.Touch;
 using StardewModdingAPI;
 using StardewValley;
+using StardewValley.Locations;
 using StardewValley.Menus;
+using StardewValley.Objects;
+using StardewValley.Tools;
 
 namespace SDVMobileControls
 {
@@ -16,6 +19,7 @@ namespace SDVMobileControls
         private readonly IMonitor _monitor;
         private readonly MobileSaveSlotManager _saveSlots;
         private readonly MobileInventoryShopHelper _invShop = new MobileInventoryShopHelper();
+        private readonly MobileMinigamePad _minigamePad = new MobileMinigamePad();
         private PadBridge _bridge;
         private bool _loggedFirstIntercept;
 
@@ -119,6 +123,7 @@ namespace SDVMobileControls
         private Vector2 _tapCurScreen;
         private double _tapStartTime;
         private bool _holdWalking;
+        private bool _tapChargingTool;
         private List<Point> _path;
         private int _pathIdx;
         private Point _targetTile;
@@ -130,19 +135,45 @@ namespace SDVMobileControls
         private int _actionPulseAFrames;
         private string _lastLocationName;
 
+        // Slingshot touch drag-to-aim state
+        private int _slingshotTouchId = -1;
+        private Vector2 _slingshotRawPos;
+        private Vector2 _slingshotVpPos;
+
         // Auto-attack state (default OFF)
         private int _autoAttackCooldown;
 
-        // Menu 1-finger tap / drag / swipe scroll state (single TouchPanel.GetState() per frame!)
+        // Menu 1-finger tap / drag / swipe scroll / camera pan state (single TouchPanel.GetState() per frame!)
         private int _menuTapTouchId = -1;
         private Vector2 _menuTapStartVp;
+        private Vector2 _menuTapLastVp;
         private float _menuTapLastY;
         private float _menuTapAccumY;
         private bool _menuTapDragged;
         private bool _menuTapImmediateDrag;
+        private bool _menuTapCameraPan;
 
-        // Toolbar tap debounce
+        // Hover-first safe crafting state
+        private CraftingPage _craftHoverMenu;
+        private ClickableTextureComponent _craftHoveredBtn;
+
+        // Auto iOS keyboard on TextBox focus
+        private IKeyboardSubscriber _lastKbSubscriber;
+        private double _lastAutoKbSec;
+
+        // Toolbar tap/swipe + ROW quick-switch + Furniture ROT button
         private int _toolbarTouchId = -1;
+        private Vector2 _toolbarStartVp;
+        private int _toolbarTappedSlot = -1;
+        private bool _toolbarSwiped;
+        private Rectangle _btnToolbarRowRect;
+        private Rectangle _btnRotateRect;
+
+        // Safe periodic AutoSave state (default OFF, skips combat/mines/moving)
+        private double _lastAutoSaveSec = -1;
+        private double _idleSinceSec = -1;
+        private int _lastAutoSaveTimeOfDay = -1;
+        private string _lastAutoSaveLoc;
 
         // ---- Dedicated Mobile Edit Layout Mode + In-Game PC Key Picker ----
         private enum EditTarget { None = 0, Joy = 1, Tool = 2, Act = 3, TopBar = 4, CustomKey = 5 }
@@ -261,6 +292,12 @@ namespace SDVMobileControls
             if (targetSet == null || !IsMobileModeActive || _editMode)
                 return;
 
+            if (Game1.currentMinigame != null)
+            {
+                _minigamePad.PopulateKeys(targetSet);
+                return;
+            }
+
             for (int i = 0; i < _cfg.CustomKeys.Count; i++)
             {
                 var btn = _cfg.CustomKeys[i];
@@ -279,6 +316,12 @@ namespace SDVMobileControls
         {
             if (targetList == null || !IsMobileModeActive || _editMode)
                 return;
+
+            if (Game1.currentMinigame != null)
+            {
+                _minigamePad.PopulateKeysList(targetList);
+                return;
+            }
 
             for (int i = 0; i < _cfg.CustomKeys.Count; i++)
             {
@@ -348,6 +391,8 @@ namespace SDVMobileControls
                 return false;
             if (Game1.activeClickableMenu != null || Game1.eventUp || Game1.dialogueUp || Game1.paused)
                 return false;
+            if (Game1.currentMinigame != null && MobileMinigamePad.DetectCurrentArcadeMinigame() == MobileMinigamePad.ArcadeKind.None)
+                return false;
             var br = EnsureBridge(pad);
             if (br == null)
                 return false;
@@ -383,6 +428,12 @@ namespace SDVMobileControls
             _pinchIdB = -1;
             _tapTouchId = -1;
             _holdWalking = false;
+            _tapChargingTool = false;
+            _slingshotTouchId = -1;
+            _toolbarTouchId = -1;
+            _toolbarTappedSlot = -1;
+            _toolbarSwiped = false;
+            _minigamePad.Reset();
             ClearPath();
         }
 
@@ -445,6 +496,85 @@ namespace SDVMobileControls
             _menuTapAccumY = 0f;
             _menuTapDragged = false;
             _menuTapImmediateDrag = false;
+            _menuTapCameraPan = false;
+        }
+
+        private void PollAutoKeyboard(object pad, PadBridge br, double nowSec)
+        {
+            if (!_cfg.AutoKeyboard)
+                return;
+            IKeyboardSubscriber cur = Game1.keyboardDispatcher?.Subscriber;
+            if (cur == null)
+            {
+                _lastKbSubscriber = null;
+                return;
+            }
+            if (!ReferenceEquals(cur, _lastKbSubscriber))
+            {
+                _lastKbSubscriber = cur;
+                if ((nowSec - _lastAutoKbSec) >= 0.45)
+                {
+                    _lastAutoKbSec = nowSec;
+                    br?.TriggerVirtualKeyboard(pad);
+                }
+            }
+        }
+
+        private static bool IsCameraPanMenu(IClickableMenu menu, Point uiPt)
+        {
+            if (menu is CarpenterMenu cm && cm.onFarm && !cm.freeze)
+            {
+                if (cm.cancelButton != null && cm.cancelButton.containsPoint(uiPt.X, uiPt.Y)) return false;
+                if (cm.okButton != null && cm.okButton.containsPoint(uiPt.X, uiPt.Y)) return false;
+                return true;
+            }
+            if (menu is MuseumMenu mm && !mm.fadeIntoBlack)
+            {
+                if (mm.okButton != null && mm.okButton.containsPoint(uiPt.X, uiPt.Y)) return false;
+                if (mm.inventory != null && mm.inventory.isWithinBounds(uiPt.X, uiPt.Y)) return false;
+                return true;
+            }
+            return false;
+        }
+
+        private static CraftingPage GetActiveCraftingPage(IClickableMenu menu)
+        {
+            if (menu is CraftingPage cp)
+                return cp;
+            if (menu is GameMenu gm)
+            {
+                try { return gm.GetCurrentPage() as CraftingPage; } catch { }
+            }
+            return null;
+        }
+
+        private static ClickableTextureComponent FindCraftingRecipeAt(CraftingPage cp, Point uiPt)
+        {
+            if (cp == null || cp.pagesOfCraftingRecipes == null)
+                return null;
+            int idx = cp.currentCraftingPage;
+            if (idx < 0 || idx >= cp.pagesOfCraftingRecipes.Count)
+                return null;
+            var page = cp.pagesOfCraftingRecipes[idx];
+            if (page == null) return null;
+            foreach (var kv in page)
+            {
+                if (kv.Key != null && kv.Key.containsPoint(uiPt.X, uiPt.Y))
+                    return kv.Key;
+            }
+            return null;
+        }
+
+        private static Furniture GetHeldRotatableFurniture()
+        {
+            if (Game1.player?.ActiveObject is Furniture f && f.rotations != null && f.rotations.Value > 1)
+                return f;
+            return null;
+        }
+
+        private static bool IsEscOnlyMenu(IClickableMenu menu)
+        {
+            return (menu is QuestLog) || (menu is CarpenterMenu cm && cm.onFarm);
         }
 
         private static bool IsImmediateDragMenu(IClickableMenu menu, Point uiPt)
@@ -519,12 +649,19 @@ namespace SDVMobileControls
 
             bool showInvCtx = IsInventoryContextMenu();
             bool showKeyOnly = !showInvCtx && IsTextInputMenu();
-            bool showEscOnly = !showInvCtx && !showKeyOnly && (activeMenu is QuestLog);
+            bool showEscOnly = !showInvCtx && !showKeyOnly && IsEscOnlyMenu(activeMenu);
             bool allowCustomKeys = AllowCustomKeysInCurrentMenu() && _cfg.CustomKeys.Count > 0;
 
             // Single TouchPanel.GetState() read per frame — from here on, ALWAYS return true!
             TouchCollection touches = TouchPanel.GetState();
             double nowSec = gameTime != null ? gameTime.TotalGameTime.TotalSeconds : Environment.TickCount64 / 1000.0;
+            PollAutoKeyboard(pad, br, nowSec);
+
+            if (_craftHoverMenu != GetActiveCraftingPage(activeMenu))
+            {
+                _craftHoverMenu = null;
+                _craftHoveredBtn = null;
+            }
 
             // Always consume lingering tap release from BAG/MAP/QST or HUD Quest button
             if (_ctxTouchId >= 0)
@@ -662,10 +799,12 @@ namespace SDVMobileControls
                 {
                     _menuTapTouchId = tl.Id;
                     _menuTapStartVp = vp;
+                    _menuTapLastVp = vp;
                     _menuTapLastY = vp.Y;
                     _menuTapAccumY = 0f;
                     _menuTapDragged = false;
                     _menuTapImmediateDrag = IsImmediateDragMenu(activeMenu, ui);
+                    _menuTapCameraPan = !_menuTapImmediateDrag && IsCameraPanMenu(activeMenu, ui);
 
                     try { activeMenu.performHoverAction(ui.X, ui.Y); } catch { }
                     if (_menuTapImmediateDrag)
@@ -678,6 +817,23 @@ namespace SDVMobileControls
                     if (_menuTapImmediateDrag)
                     {
                         try { activeMenu.leftClickHeld(ui.X, ui.Y); } catch { }
+                    }
+                    else if (_menuTapCameraPan)
+                    {
+                        Vector2 delta = vp - _menuTapLastVp;
+                        _menuTapLastVp = vp;
+                        if (!_menuTapDragged && Vector2.Distance(vp, _menuTapStartVp) >= 16f)
+                            _menuTapDragged = true;
+                        if (_menuTapDragged)
+                        {
+                            int panX = (int)Math.Round(-delta.X * Game1.viewport.Width / Math.Max(1f, _vpW));
+                            int panY = (int)Math.Round(-delta.Y * Game1.viewport.Height / Math.Max(1f, _vpH));
+                            if (panX != 0 || panY != 0)
+                            {
+                                try { Game1.panScreen(panX, panY); } catch { }
+                            }
+                            try { activeMenu.performHoverAction(ui.X, ui.Y); } catch { }
+                        }
                     }
                     else
                     {
@@ -715,9 +871,38 @@ namespace SDVMobileControls
                     }
                     else if (!_menuTapDragged)
                     {
-                        try { activeMenu.performHoverAction(ui.X, ui.Y); } catch { }
-                        try { activeMenu.receiveLeftClick(ui.X, ui.Y, true); } catch { }
-                        try { activeMenu.releaseLeftClick(ui.X, ui.Y); } catch { }
+                        CraftingPage cp = _cfg.SafeCrafting ? GetActiveCraftingPage(activeMenu) : null;
+                        ClickableTextureComponent hitRecipe = cp != null ? FindCraftingRecipeAt(cp, ui) : null;
+                        if (cp != null && hitRecipe != null)
+                        {
+                            if (!ReferenceEquals(hitRecipe, _craftHoveredBtn) || !ReferenceEquals(cp, _craftHoverMenu))
+                            {
+                                // 1st tap: show full recipe description & ingredients tooltip without crafting accidentally!
+                                _craftHoverMenu = cp;
+                                _craftHoveredBtn = hitRecipe;
+                                try { activeMenu.performHoverAction(ui.X, ui.Y); } catch { }
+                                try { Game1.playSound("smallSelect"); } catch { }
+                            }
+                            else
+                            {
+                                // 2nd tap on the same recipe: craft & put result straight into Backpack!
+                                try { activeMenu.performHoverAction(ui.X, ui.Y); } catch { }
+                                try { activeMenu.receiveLeftClick(ui.X, ui.Y, true); } catch { }
+                                try { activeMenu.releaseLeftClick(ui.X, ui.Y); } catch { }
+                                if (cp.heldItem != null && Game1.player != null)
+                                {
+                                    try { cp.heldItem = Game1.player.addItemToInventory(cp.heldItem); } catch { }
+                                }
+                            }
+                        }
+                        else
+                        {
+                            _craftHoverMenu = null;
+                            _craftHoveredBtn = null;
+                            try { activeMenu.performHoverAction(ui.X, ui.Y); } catch { }
+                            try { activeMenu.receiveLeftClick(ui.X, ui.Y, true); } catch { }
+                            try { activeMenu.releaseLeftClick(ui.X, ui.Y); } catch { }
+                        }
                     }
                     ResetMenuTapState();
                 }
@@ -821,10 +1006,11 @@ namespace SDVMobileControls
 
             bool showInvCtx = IsInventoryContextMenu();
             bool showKeyOnly = !showInvCtx && IsTextInputMenu();
-            bool showEscOnly = !showInvCtx && !showKeyOnly && (Game1.activeClickableMenu is QuestLog);
+            bool showEscOnly = !showInvCtx && !showKeyOnly && IsEscOnlyMenu(Game1.activeClickableMenu);
             bool allowCustomKeys = AllowCustomKeysInCurrentMenu() && _cfg.CustomKeys.Count > 0;
             bool showInvShop = _cfg.MobileShopAndDrag && (_invShop.IsPopupOpen || _invShop.IsDraggingItem || _invShop.HasSelectedSlot);
-            if (!showInvCtx && !showKeyOnly && !showEscOnly && !allowCustomKeys && !showInvShop)
+            bool showCraftHint = _cfg.SafeCrafting && _craftHoveredBtn != null && ReferenceEquals(_craftHoverMenu, GetActiveCraftingPage(Game1.activeClickableMenu));
+            if (!showInvCtx && !showKeyOnly && !showEscOnly && !allowCustomKeys && !showInvShop && !showCraftHint)
                 return;
 
             EnsureTextures(sb.GraphicsDevice);
@@ -847,6 +1033,22 @@ namespace SDVMobileControls
             else if (showEscOnly)
             {
                 DrawMinimalPill(sb, _ctxQuestEscRect, "ESC", false);
+            }
+
+            if (showCraftHint)
+            {
+                Rectangle rb = _craftHoveredBtn.bounds;
+                Vector2 tl = UiToViewport(new Point(rb.X, rb.Y));
+                Vector2 brPt = UiToViewport(new Point(rb.Right, rb.Bottom));
+                var vr = new Rectangle((int)tl.X, (int)tl.Y, Math.Max(16, (int)(brPt.X - tl.X)), Math.Max(16, (int)(brPt.Y - tl.Y)));
+                DrawRectOutline(sb, vr, Math.Max(2, _vpH / 280), new Color(255, 214, 64));
+
+                int bw = Math.Clamp((int)(_vpW * 0.34f), 220, _vpW - 40);
+                int bh = Math.Max(30, (int)(_vpH * 0.056f));
+                var hintR = new Rectangle((_vpW - bw) / 2, _vpH - bh - Math.Max(14, _vpH / 34), bw, bh);
+                sb.Draw(_pixel, hintR, new Color(42, 28, 14) * 0.90f);
+                DrawRectOutline(sb, hintR, Math.Max(2, _vpH / 360), new Color(255, 214, 64));
+                br?.DrawCenteredString(sb, _pixel, "CHAM LAN NUA DE CHE TAO", hintR, new Color(255, 238, 175), Math.Max(1, _vpH / 320));
             }
 
             if (allowCustomKeys)
@@ -872,6 +1074,19 @@ namespace SDVMobileControls
             if (!RefreshViewport())
                 return;
             ComputeLayout();
+
+            // ---- Dedicated Auto Arcade Pad for Keyboard PC Minigames (Prairie King, Junimo Kart, Crane Game) ----
+            var arcadeKind = MobileMinigamePad.DetectCurrentArcadeMinigame();
+            if (arcadeKind != MobileMinigamePad.ArcadeKind.None)
+            {
+                ClearCustomButtonTouches();
+                ResetGameplayState();
+                Vector2 mgStick = _minigamePad.Update(arcadeKind, TouchPanel.GetState(), MapRawToViewport, _vpW, _vpH);
+                Point? mgMouse = _minigamePad.MouseLeftDown ? new Point(_rawW / 2, _rawH / 2) : (Point?)null;
+                EnsureBridge(pad)?.ApplyInputWithMouse(pad, mgStick, false, false, false, mgMouse, _minigamePad.MouseLeftDown);
+                return;
+            }
+            _minigamePad.Reset();
 
             // ---- Dedicated Interactive Edit Layout Mode ----
             if (_editMode)
@@ -906,6 +1121,7 @@ namespace SDVMobileControls
             if (_interactRippleAlpha > 0f) _interactRippleAlpha = Math.Max(0f, _interactRippleAlpha - 0.12f);
 
             double nowSec = gameTime != null ? gameTime.TotalGameTime.TotalSeconds : Environment.TickCount64 / 1000.0;
+            PollAutoKeyboard(pad, br, nowSec);
             TouchCollection touches = TouchPanel.GetState();
 
             // --- 0. Process User Custom PC Key Buttons FIRST (never steal gameplay buttons!) ---
@@ -942,7 +1158,11 @@ namespace SDVMobileControls
             bool sawInteract = false;
             bool sawTap = false;
             bool sawToolbar = false;
+            bool sawSlingshot = false;
             Vector2 stickVec = Vector2.Zero;
+            Furniture heldFurn = GetHeldRotatableFurniture();
+            bool holdingSlingshot = Game1.player?.CurrentTool is Slingshot;
+            if (!holdingSlingshot) _slingshotTouchId = -1;
 
             for (int i = 0; i < touches.Count; i++)
             {
@@ -954,7 +1174,7 @@ namespace SDVMobileControls
                 Point vpPt = new Point((int)vp.X, (int)vp.Y);
                 bool active = tl.State == TouchLocationState.Pressed || tl.State == TouchLocationState.Moved;
 
-                // Top utility bar (BAG / MAP / QST / MODS / KEY / EDIT / collapse)
+                // Top utility bar (BAG / MAP / QST / SAVE / KEY / EDIT / collapse)
                 if (_cfg.ShowTopUtility && tl.State == TouchLocationState.Pressed)
                 {
                     if (_btnBagRect.Contains(vpPt))
@@ -1023,13 +1243,61 @@ namespace SDVMobileControls
                     }
                 }
 
-                // Direct Toolbar & Quest Journal tap
-                if (tl.Id == _toolbarTouchId)
+                // Auto-context Furniture Rotate Button (ROT)
+                if (heldFurn != null && tl.State == TouchLocationState.Pressed && _btnRotateRect.Contains(vpPt))
                 {
-                    if (active) sawToolbar = true;
+                    try { heldFurn.rotate(); } catch { }
+                    try { Game1.playSound("smallSelect"); } catch { }
+                    _toolbarTouchId = tl.Id;
+                    _toolbarTappedSlot = -1;
+                    _toolbarSwiped = true;
+                    sawToolbar = true;
                     continue;
                 }
-                if (tl.State == TouchLocationState.Pressed && TryHandleHudTap(vp, out bool openedMenu))
+
+                // Compact ROW quick-switch pill beside Toolbar (when MaxItems > 12)
+                if (!_btnToolbarRowRect.IsEmpty && tl.State == TouchLocationState.Pressed && _btnToolbarRowRect.Contains(vpPt))
+                {
+                    try { Game1.player?.shiftToolbar(true); } catch { }
+                    try { Game1.playSound("shwip"); } catch { }
+                    _toolbarTouchId = tl.Id;
+                    _toolbarTappedSlot = -1;
+                    _toolbarSwiped = true;
+                    sawToolbar = true;
+                    continue;
+                }
+
+                // Direct Toolbar tap & horizontal swipe (swipe left/right across Toolbar shifts rows!) + Quest Journal tap
+                if (tl.Id == _toolbarTouchId)
+                {
+                    if (active)
+                    {
+                        sawToolbar = true;
+                        if (!_toolbarSwiped && _toolbarTappedSlot >= 0 && Game1.player != null && Game1.player.MaxItems > 12)
+                        {
+                            float dx = vp.X - _toolbarStartVp.X;
+                            if (Math.Abs(dx) >= 36f)
+                            {
+                                _toolbarSwiped = true;
+                                try { Game1.player.shiftToolbar(dx < 0f); } catch { }
+                                try { Game1.playSound("shwip"); } catch { }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        if (!_toolbarSwiped && _toolbarTappedSlot >= 0 && Game1.player != null)
+                        {
+                            Game1.player.CurrentToolIndex = _toolbarTappedSlot;
+                            try { Game1.playSound("stoneStep"); } catch { }
+                        }
+                        _toolbarTouchId = -1;
+                        _toolbarTappedSlot = -1;
+                        _toolbarSwiped = false;
+                    }
+                    continue;
+                }
+                if (tl.State == TouchLocationState.Pressed && TryHandleHudTap(vp, out bool openedMenu, out int tappedSlot))
                 {
                     if (openedMenu)
                     {
@@ -1039,7 +1307,26 @@ namespace SDVMobileControls
                         return;
                     }
                     _toolbarTouchId = tl.Id;
+                    _toolbarStartVp = vp;
+                    _toolbarTappedSlot = tappedSlot;
+                    _toolbarSwiped = false;
                     sawToolbar = true;
+                    continue;
+                }
+
+                // Existing active Slingshot touch drag-to-aim finger
+                if (holdingSlingshot && tl.Id == _slingshotTouchId)
+                {
+                    if (active)
+                    {
+                        sawSlingshot = true;
+                        _slingshotRawPos = tl.Position;
+                        _slingshotVpPos = vp;
+                    }
+                    else
+                    {
+                        _slingshotTouchId = -1;
+                    }
                     continue;
                 }
 
@@ -1085,7 +1372,7 @@ namespace SDVMobileControls
                     continue;
                 }
 
-                // Existing active tap-to-move / hold-to-walk finger
+                // Existing active tap-to-move / hold-to-walk / long-press charge-tool finger
                 if (useTap && tl.Id == _tapTouchId)
                 {
                     if (active)
@@ -1093,17 +1380,29 @@ namespace SDVMobileControls
                         sawTap = true;
                         _tapCurScreen = vp;
                         float moved = Vector2.Distance(vp, _tapStartScreen);
-                        if (!_holdWalking && (moved >= 22f || (nowSec - _tapStartTime) >= 0.22))
+                        if (!_tapChargingTool && !_holdWalking)
                         {
-                            _holdWalking = true;
-                            ClearPath();
+                            bool canCharge = CanChargeCurrentTool() && moved < 22f && (nowSec - _tapStartTime) >= 0.30;
+                            if (canCharge)
+                            {
+                                _tapChargingTool = true;
+                                ClearPath();
+                                if (Game1.player != null)
+                                    Game1.player.faceGeneralDirection(ViewportToWorld(_tapStartScreen));
+                            }
+                            else if (moved >= 22f || (!CanChargeCurrentTool() && (nowSec - _tapStartTime) >= 0.22))
+                            {
+                                _holdWalking = true;
+                                ClearPath();
+                            }
                         }
                     }
                     else
                     {
-                        if (!_holdWalking)
+                        if (!_holdWalking && !_tapChargingTool)
                             HandleWorldTap(vp);
                         _holdWalking = false;
+                        _tapChargingTool = false;
                         _tapTouchId = -1;
                     }
                     continue;
@@ -1112,6 +1411,21 @@ namespace SDVMobileControls
                 // New touch pressed
                 if (tl.State == TouchLocationState.Pressed)
                 {
+                    // Direct Touch Drag-to-Aim when holding a Slingshot (outside Joystick zone)
+                    bool inJoyZoneCheck = useJoy && (IsInvisibleBarMode
+                        ? _invJoyRect.Contains(vpPt)
+                        : (Vector2.Distance(vp, _visJoyCenter) <= _visJoyRadius * 1.65f || vp.X < _vpW * 0.44f));
+
+                    if (holdingSlingshot && _slingshotTouchId < 0 && !inJoyZoneCheck)
+                    {
+                        _slingshotTouchId = tl.Id;
+                        _slingshotRawPos = tl.Position;
+                        _slingshotVpPos = vp;
+                        sawSlingshot = true;
+                        ClearPath();
+                        continue;
+                    }
+
                     if (use2Btn)
                     {
                         bool inTool = HitTestToolZone(vp, vpPt);
@@ -1145,11 +1459,7 @@ namespace SDVMobileControls
                         }
                     }
 
-                    bool inJoyZone = IsInvisibleBarMode
-                        ? _invJoyRect.Contains(vpPt)
-                        : (Vector2.Distance(vp, _visJoyCenter) <= _visJoyRadius * 1.65f || vp.X < _vpW * 0.44f);
-
-                    if (useJoy && _joyTouchId < 0 && inJoyZone)
+                    if (useJoy && _joyTouchId < 0 && inJoyZoneCheck)
                     {
                         _joyTouchId = tl.Id;
                         _joyTouchStart = vp;
@@ -1172,23 +1482,25 @@ namespace SDVMobileControls
                         _tapCurScreen = vp;
                         _tapStartTime = nowSec;
                         _holdWalking = false;
+                        _tapChargingTool = false;
                         sawTap = true;
                         continue;
                     }
                 }
             }
 
-            if (!sawToolbar) _toolbarTouchId = -1;
+            if (!sawToolbar) { _toolbarTouchId = -1; _toolbarTappedSlot = -1; _toolbarSwiped = false; }
             if (!sawJoy) { _joyTouchId = -1; _joyActivated = false; }
             if (!sawTool) _toolTouchId = -1;
             if (!sawInteract) _interactTouchId = -1;
-            if (!sawTap) { _tapTouchId = -1; _holdWalking = false; }
+            if (!sawTap) { _tapTouchId = -1; _holdWalking = false; _tapChargingTool = false; }
+            if (!sawSlingshot) _slingshotTouchId = -1;
 
-            _toolPressed = sawTool;
+            _toolPressed = sawTool || _tapChargingTool;
             _interactPressed = sawInteract;
 
             // --- 2. Hold-to-Walk ---
-            if (_holdWalking && stickVec == Vector2.Zero && Game1.player != null)
+            if (_holdWalking && !_tapChargingTool && stickVec == Vector2.Zero && Game1.player != null)
             {
                 Vector2 playerScreen = WorldToViewport(Game1.player.GetBoundingBox().Center.ToVector2());
                 Vector2 diff = _tapCurScreen - playerScreen;
@@ -1200,17 +1512,17 @@ namespace SDVMobileControls
             }
 
             // --- 3. A* Tap-to-Move Path Follower ---
-            if (stickVec == Vector2.Zero && !_toolPressed && !_interactPressed && _path != null)
+            if (stickVec == Vector2.Zero && !_toolPressed && !_interactPressed && !sawSlingshot && _path != null)
                 stickVec = StepPathFollower();
 
             // --- 4. Action Pulses ---
-            bool fireX = _toolPressed;
+            bool fireX = _toolPressed || sawSlingshot;
             bool fireA = _interactPressed;
             if (_actionPulseXFrames > 0) { _actionPulseXFrames--; fireX = true; }
             if (_actionPulseAFrames > 0) { _actionPulseAFrames--; fireA = true; }
 
             // --- 5. Optional Auto-Attack (DEFAULT OFF) ---
-            if (_cfg.AutoAttack && !fireX && !fireA)
+            if (_cfg.AutoAttack && !fireX && !fireA && !sawSlingshot)
             {
                 bool movingAway = stickVec.LengthSquared() > 0.25f;
                 if (AutoToolAndCombat.TryAutoAttack(Game1.currentLocation, Game1.player, movingAway, ref _autoAttackCooldown))
@@ -1221,7 +1533,79 @@ namespace SDVMobileControls
                 }
             }
 
-            ApplyToPad(pad, stickVec, fireX, fireA, false);
+            // --- 6. Optional Safe Periodic Auto-Save (DEFAULT OFF, skips Mines/Volcano/Combat/Moving) ---
+            TryPeriodicAutoSave(br, stickVec, fireX || fireA || sawSlingshot, nowSec);
+
+            if (sawSlingshot)
+            {
+                Point aimRaw = new Point((int)_slingshotRawPos.X, (int)_slingshotRawPos.Y);
+                EnsureBridge(pad)?.ApplyInputWithMouse(pad, stickVec, true, false, false, aimRaw, true);
+            }
+            else
+            {
+                ApplyToPad(pad, stickVec, fireX, fireA, false);
+            }
+        }
+
+        private static bool CanChargeCurrentTool()
+        {
+            var tool = Game1.player?.CurrentTool;
+            return (tool is Hoe || tool is WateringCan) && tool.UpgradeLevel >= 1;
+        }
+
+        private void TryPeriodicAutoSave(PadBridge br, Vector2 stickVec, bool anyAction, double nowSec)
+        {
+            if (_cfg.AutoSaveMinutes <= 0 || br == null || Game1.player == null || Game1.currentLocation == null)
+                return;
+
+            // Initialize timer on first gameplay tick so it doesn't save immediately on load
+            if (_lastAutoSaveSec < 0)
+            {
+                _lastAutoSaveSec = nowSec;
+                _lastAutoSaveTimeOfDay = Game1.timeOfDay;
+                _lastAutoSaveLoc = Game1.currentLocation.NameOrUniqueName;
+                return;
+            }
+
+            // Never interrupt combat, mines, volcano, tool swing, fishing, or movement!
+            bool busy = stickVec.LengthSquared() > 0.01f || anyAction ||
+                        Game1.player.UsingTool || Game1.player.isMoving() ||
+                        (Game1.player.CurrentTool is FishingRod fr && (fr.isFishing || fr.isCasting || fr.isReeling)) ||
+                        Game1.currentLocation is MineShaft || Game1.currentLocation is VolcanoDungeon ||
+                        br.IsMiddaySaving() || br.IsQuickSaveReloading();
+
+            if (busy)
+            {
+                _idleSinceSec = -1;
+                return;
+            }
+
+            if (_idleSinceSec < 0)
+                _idleSinceSec = nowSec;
+
+            // Wait until player stands still >= 1.0s in a safe area AND interval elapsed AND game progressed
+            double intervalSec = _cfg.AutoSaveMinutes * 60.0;
+            if ((nowSec - _lastAutoSaveSec) < intervalSec || (nowSec - _idleSinceSec) < 1.0)
+                return;
+
+            string curLoc = Game1.currentLocation.NameOrUniqueName;
+            if (Game1.timeOfDay == _lastAutoSaveTimeOfDay && string.Equals(curLoc, _lastAutoSaveLoc, StringComparison.Ordinal))
+                return;
+
+            _lastAutoSaveSec = nowSec;
+            _lastAutoSaveTimeOfDay = Game1.timeOfDay;
+            _lastAutoSaveLoc = curLoc;
+            _idleSinceSec = -1;
+
+            _saveSlots.BeginPendingSnapshot(br, isAutoSave: true);
+            if (br.TryQuickSave(out _))
+            {
+                ShowSaveToast("AUTO-SAVE...", nowSec);
+            }
+            else
+            {
+                _saveSlots.CancelPendingSnapshot();
+            }
         }
 
         // =========================================================================
@@ -1649,9 +2033,10 @@ namespace SDVMobileControls
             return true;
         }
 
-        private bool TryHandleHudTap(Vector2 vp, out bool openedMenu)
+        private bool TryHandleHudTap(Vector2 vp, out bool openedMenu, out int tappedToolbarSlot)
         {
             openedMenu = false;
+            tappedToolbarSlot = -1;
             if (Game1.onScreenMenus == null || Game1.player == null)
                 return false;
 
@@ -1666,8 +2051,7 @@ namespace SDVMobileControls
                         ClickableComponent btn = tb.buttons[i];
                         if (btn != null && btn.bounds.Contains(uiPt))
                         {
-                            Game1.player.CurrentToolIndex = i;
-                            try { Game1.playSound("stoneStep"); } catch { }
+                            tappedToolbarSlot = i;
                             return true;
                         }
                     }
@@ -1683,6 +2067,26 @@ namespace SDVMobileControls
                 }
             }
 
+            return false;
+        }
+
+        private bool TryGetToolbarViewportBounds(out Rectangle tbVpRect)
+        {
+            tbVpRect = Rectangle.Empty;
+            if (Game1.onScreenMenus == null) return false;
+            foreach (IClickableMenu menu in Game1.onScreenMenus)
+            {
+                if (menu is Toolbar tb && tb.buttons != null && tb.buttons.Count >= 12)
+                {
+                    Rectangle first = tb.buttons[0].bounds;
+                    Rectangle last = tb.buttons[11].bounds;
+                    if (first.Width <= 0 || last.Width <= 0) return false;
+                    Vector2 tl = UiToViewport(new Point(first.X, first.Y));
+                    Vector2 br = UiToViewport(new Point(last.Right, last.Bottom));
+                    tbVpRect = new Rectangle((int)tl.X, (int)tl.Y, Math.Max(1, (int)(br.X - tl.X)), Math.Max(1, (int)(br.Y - tl.Y)));
+                    return true;
+                }
+            }
             return false;
         }
 
@@ -2043,7 +2447,7 @@ namespace SDVMobileControls
                     var topLine = new Rectangle(rowRect.X + pad, rowRect.Y + pad, rowRect.Width - pad * 2, halfH);
                     var subLine = new Rectangle(rowRect.X + pad, topLine.Bottom, rowRect.Width - pad * 2, rowRect.Height - pad * 2 - halfH);
 
-                    string prefix = $"#{slots.Count - idx} ";
+                    string prefix = slot.IsAutoSave ? "" : $"#{slots.Count - idx} ";
                     _bridge?.DrawCenteredString(sb, _pixel, prefix + slot.FormatHeaderLine(), topLine, new Color(58, 30, 12), rowFs);
                     _bridge?.DrawCenteredString(sb, _pixel, slot.FormatDetailLine(), subLine, new Color(116, 70, 32), Math.Max(1, rowFs));
                 }
@@ -2073,6 +2477,12 @@ namespace SDVMobileControls
             EnsureTextures(sb.GraphicsDevice);
             if (!RefreshViewport()) return;
             ComputeLayout();
+
+            if (MobileMinigamePad.DetectCurrentArcadeMinigame() != MobileMinigamePad.ArcadeKind.None)
+            {
+                _minigamePad.Draw(sb, _pixel, _circle, _ring, _bridge, _vpW, _vpH);
+                return;
+            }
 
             if (_editMode)
             {
@@ -2163,6 +2573,29 @@ namespace SDVMobileControls
             // 4. User Custom PC Key Buttons
             if (_cfg.CustomKeys.Count > 0)
                 DrawCustomKeyButtons(sb);
+
+            // 4b. Compact ROW button beside Toolbar (when player has > 12 inventory slots)
+            if (!_btnToolbarRowRect.IsEmpty && !_saveMenuOpen)
+            {
+                DrawMinimalPill(sb, _btnToolbarRowRect, "ROW", false);
+            }
+
+            // 4c. Auto-Context Furniture Rotate Button (only visible when holding rotatable furniture!)
+            if (GetHeldRotatableFurniture() != null && !_saveMenuOpen)
+            {
+                int rbt = Math.Max(2, _vpH / 340);
+                sb.Draw(_pixel, _btnRotateRect, new Color(214, 134, 34) * 0.86f);
+                DrawRectOutline(sb, _btnRotateRect, rbt, new Color(255, 232, 160));
+                _bridge?.DrawCenteredString(sb, _pixel, "ROT", _btnRotateRect, Color.White, Math.Max(1, _vpH / 290));
+            }
+
+            // 4d. Slingshot Aiming Crosshair & Guide Ring while dragging
+            if (_slingshotTouchId >= 0 && Game1.player?.CurrentTool is Slingshot)
+            {
+                float cr = Math.Max(24f, Math.Min(_vpW, _vpH) * 0.036f);
+                DrawRing(sb, _slingshotVpPos, cr, new Color(255, 92, 72) * 0.85f);
+                DrawCircle(sb, _slingshotVpPos, 4f, Color.White * 0.92f);
+            }
 
             // 5. Stardew-Pixel Multi-Slot Save Menu Modal
             if (_saveMenuOpen)
@@ -2484,6 +2917,24 @@ namespace SDVMobileControls
 
             _btnCollapseRect = new Rectangle(cx, topY, colW, pillH);
             _topBarGroupRect = new Rectangle(leftX - 4, topY - 4, (_btnCollapseRect.Right - leftX) + 8, pillH + 8);
+
+            // Auto-Context Furniture Rotate button (cleanly above right action area)
+            int rotW = (int)(pillH * 2.15f);
+            int rotH = (int)(pillH * 1.18f);
+            _btnRotateRect = new Rectangle(_vpW - rotW - Math.Max(16, (int)(_vpW * 0.025f)), (int)(_vpH * 0.34f), rotW, rotH);
+
+            // Compact ROW quick-switch pill right beside Toolbar (only when player has > 12 inventory slots!)
+            _btnToolbarRowRect = Rectangle.Empty;
+            if (Game1.player != null && Game1.player.MaxItems > 12 && TryGetToolbarViewportBounds(out Rectangle tbR))
+            {
+                int rowW = Math.Max(42, (int)(tbR.Height * 0.92f));
+                int rowH = Math.Max(30, (int)(tbR.Height * 0.78f));
+                int rx = tbR.Right + Math.Max(6, rowW / 7);
+                if (rx + rowW > _vpW - 8)
+                    rx = Math.Max(8, tbR.X - rowW - Math.Max(6, rowW / 7));
+                int ry = tbR.Y + (tbR.Height - rowH) / 2;
+                _btnToolbarRowRect = new Rectangle(rx, ry, rowW, rowH);
+            }
 
             // Context Menu Helper Bar
             int mx0 = (int)Math.Max(_vpW * 0.048f, unit * 0.06f);

@@ -36,6 +36,9 @@ namespace SDVMobileControls
         public bool ShowTopUtility { get; set; } = true;
         public bool SwapRightButtons { get; set; } = false;
         public bool MobileShopAndDrag { get; set; } = true; // Mobile Shop quantity slider + Drag-and-Drop + Chest 1-tap transfer
+        public bool AutoKeyboard { get; set; } = true;      // Auto-open iOS keyboard when tapping any TextBox
+        public bool SafeCrafting { get; set; } = true;      // Hover-first 2-tap safe crafting/cooking
+        public int AutoSaveMinutes { get; set; } = 0;       // 0 = OFF (default, zero stutter), 3 / 5 / 10 minutes periodic AutoSave slot
         public float ButtonScale { get; set; } = 1.0f;
 
         // Normalized layout (0..1 of viewport) for Invisible Mode: Left Joystick Rect + 2 Right Vertical Rectangular Bars
@@ -270,6 +273,12 @@ namespace SDVMobileControls
                         case "toputility": ShowTopUtility = ParseBool(v, true); break;
                         case "swapbuttons": SwapRightButtons = ParseBool(v, false); break;
                         case "mobileshopdrag": MobileShopAndDrag = ParseBool(v, true); break;
+                        case "autokeyboard": AutoKeyboard = ParseBool(v, true); break;
+                        case "safecrafting": SafeCrafting = ParseBool(v, true); break;
+                        case "autosavemin":
+                            if (int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out int am) && (am == 0 || am == 3 || am == 5 || am == 10))
+                                AutoSaveMinutes = am;
+                            break;
                         case "buttonscale": ButtonScale = ParseFloat(v, 1.0f, 0.75f, 1.45f); break;
 
                         case "inv_joy_x": InvJoyX = ParseFloat(v, InvJoyX, 0.0f, 0.90f); break;
@@ -355,6 +364,9 @@ namespace SDVMobileControls
                 sb.AppendLine($"toputility={(ShowTopUtility ? 1 : 0)}");
                 sb.AppendLine($"swapbuttons={(SwapRightButtons ? 1 : 0)}");
                 sb.AppendLine($"mobileshopdrag={(MobileShopAndDrag ? 1 : 0)}");
+                sb.AppendLine($"autokeyboard={(AutoKeyboard ? 1 : 0)}");
+                sb.AppendLine($"safecrafting={(SafeCrafting ? 1 : 0)}");
+                sb.AppendLine($"autosavemin={AutoSaveMinutes}");
                 sb.AppendLine($"buttonscale={ButtonScale.ToString("0.00", CultureInfo.InvariantCulture)}");
                 sb.AppendLine($"inv_joy_x={F(InvJoyX)}");
                 sb.AppendLine($"inv_joy_y={F(InvJoyY)}");

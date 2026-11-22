@@ -29,8 +29,8 @@
 ## ✨ Tính năng chính
 
 - **Quản lý Mod & Việt hóa trong game** — Chạm **3 ngón tay × 2** để mở Mod Garden; hỗ trợ cài trực tiếp `.ZIP`, `.RAR`, `.7Z`, `.TAR.GZ`, `.XNB` hoặc thư mục, bật/tắt, xóa và hoàn tác an toàn.
-- **Điều khiển kiểu Mobile & Phím PC** — 4 chế độ (*Vô hình*, *2 Nút*, *Chạm đi A\**, *Kết hợp*), kéo thả chỉnh cỡ nút (`EDIT`) và thêm tới 16 phím PC (`P`, `I`, `F1–F12`, `ESC`, `TAB`, `SHIFT`...).
-- **Save Menu 20 mốc thời gian** — Lưu và tải lại tối đa 20 bản lưu nhanh cho từng nhân vật với thông tin ngày, giờ, vị trí và vàng.
+- **Điều khiển kiểu Mobile & Phím PC** — 4 chế độ (*Vô hình*, *2 Nút*, *Chạm đi A\**, *Kết hợp*), kéo thả chỉnh cỡ nút (`EDIT`), thêm tới 16 phím PC, vuốt/đổi hàng Toolbar (`ROW`), gắn mồi/phao kéo thả, xoay nội thất (`ROT`), kéo ngắm súng cao su, lia camera ở Robin/Bảo tàng, chế tạo 2 chạm an toàn, tự bật bàn phím iOS và tự hiện nút máy thùng cho Mini-game.
+- **Save Menu 20 mốc + Auto-Save tùy chọn** — Lưu và tải lại tới 20 bản lưu nhanh cùng tùy chọn tự lưu định kỳ slot `[AUTO]` khi đứng yên ngoài hang/mỏ.
 - **Hỗ trợ Shader & Âm thanh chuẩn iOS** — Tương thích mod Shader (`DynamicReflections`, `DynamicShader`...) kèm phản chiếu nhân vật trên mặt nước và âm thanh OpenAL ổn định.
 - **Cảnh báo RAM tự động (`85%` / `90%`) & Tối ưu Cache Map/Recolor** — Tự động xả cache ảnh bản đồ cũ & bản sao trùng của Content Patcher khi chuyển khu vực (không nén ảnh, không ảnh hưởng âm thanh), kèm cảnh báo nhắc lưu game kịp thời tránh văng app.
 - **Co-op LAN / IP** — Hỗ trợ chơi cùng Wi-Fi LAN hoặc qua ZeroTier / Tailscale.

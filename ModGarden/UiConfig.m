@@ -262,6 +262,9 @@ static long long sdvNextRev(void) {
 @property(nonatomic, assign) BOOL showTopUtility;
 @property(nonatomic, assign) BOOL swapRightButtons;
 @property(nonatomic, assign) BOOL mobileShopAndDrag;
+@property(nonatomic, assign) BOOL autoKeyboard;
+@property(nonatomic, assign) BOOL safeCrafting;
+@property(nonatomic, assign) NSInteger autoSaveMinutes; // 0=Off, 3, 5, 10
 @property(nonatomic, assign) float buttonScale;
 @property(nonatomic, strong) NSMutableArray<SDVCustomKeyEntry *> *customKeys;
 
@@ -285,6 +288,9 @@ static long long sdvNextRev(void) {
     c.showTopUtility = YES;
     c.swapRightButtons = NO;
     c.mobileShopAndDrag = YES;
+    c.autoKeyboard = YES;
+    c.safeCrafting = YES;
+    c.autoSaveMinutes = 0; // Default OFF (zero stutter while playing; user can pick 3/5/10 min)
     c.buttonScale = 1.00f;
     c.customKeys = [NSMutableArray array];
     return c;
@@ -318,6 +324,13 @@ static long long sdvNextRev(void) {
             c.swapRightButtons = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
         } else if ([k isEqualToString:@"mobileshopdrag"]) {
             c.mobileShopAndDrag = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
+        } else if ([k isEqualToString:@"autokeyboard"]) {
+            c.autoKeyboard = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
+        } else if ([k isEqualToString:@"safecrafting"]) {
+            c.safeCrafting = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
+        } else if ([k isEqualToString:@"autosavemin"]) {
+            NSInteger am = v.integerValue;
+            if (am == 0 || am == 3 || am == 5 || am == 10) c.autoSaveMinutes = am;
         } else if ([k isEqualToString:@"buttonscale"]) {
             c.buttonScale = sdvClampf(v.floatValue, 0.75f, 1.45f);
         } else if ([k isEqualToString:@"ckey"] && c.customKeys.count < 16) {
@@ -408,11 +421,12 @@ static long long sdvNextRev(void) {
     }
 
     NSMutableString *s = [NSMutableString stringWithFormat:
-        @"mode=%ld\nautotool=%d\nautoattack=%d\npinchzoom=%d\ntouchhint2=%d\ntoputility=%d\nswapbuttons=%d\nmobileshopdrag=%d\nbuttonscale=%.2f\n",
+        @"mode=%ld\nautotool=%d\nautoattack=%d\npinchzoom=%d\ntouchhint2=%d\ntoputility=%d\nswapbuttons=%d\nmobileshopdrag=%d\nautokeyboard=%d\nsafecrafting=%d\nautosavemin=%ld\nbuttonscale=%.2f\n",
         (long)self.mode, self.autoTool ? 1 : 0, self.autoAttack ? 1 : 0,
         self.pinchZoom ? 1 : 0, self.showTouchHint ? 1 : 0,
         self.showTopUtility ? 1 : 0, self.swapRightButtons ? 1 : 0,
-        self.mobileShopAndDrag ? 1 : 0,
+        self.mobileShopAndDrag ? 1 : 0, self.autoKeyboard ? 1 : 0,
+        self.safeCrafting ? 1 : 0, (long)self.autoSaveMinutes,
         sdvClampf(self.buttonScale, 0.75f, 1.45f)];
     for (NSString *ex in extraLines) {
         [s appendFormat:@"%@\n", ex];

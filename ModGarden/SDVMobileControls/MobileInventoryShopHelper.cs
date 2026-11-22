@@ -635,6 +635,26 @@ namespace SDVMobileControls
                             OpenSplitPopup(ownerMenu, srcInv, srcSlot, dstInv, item, isChestMenu);
                             return true;
                         }
+                        else if (_dragItem is Tool attTool && HasAnyAttachment(attTool) && (nowSec - _touchStartSec) >= 0.42)
+                        {
+                            // Long-Press on FishingRod/Slingshot with attached Bait/Tackle/Ammo -> pop attachment cleanly into Backpack!
+                            if (TryDetachOneAttachment(attTool))
+                            {
+                                try { Game1.playSound("dwop"); } catch { }
+                                _popConsumeTouchId = tl.Id;
+                                ResetTouch();
+                                ClearSelection();
+                                return true;
+                            }
+                            else
+                            {
+                                try { Game1.playSound("cancel"); } catch { }
+                                _popConsumeTouchId = tl.Id;
+                                ResetTouch();
+                                ClearSelection();
+                                return true;
+                            }
+                        }
                         else if (_dragItem != null)
                         {
                             // Long-Press on single item (Stack == 1) -> smoothly lift under finger for Drag-and-Drop (NEVER transfer to mouse cursor!)
@@ -739,6 +759,42 @@ namespace SDVMobileControls
             return true;
         }
 
+        private static bool HasAnyAttachment(Tool tool)
+        {
+            if (tool == null || tool.attachments == null || tool.AttachmentSlotsCount <= 0)
+                return false;
+            for (int i = 0; i < tool.attachments.Length; i++)
+            {
+                if (tool.attachments[i] != null)
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool TryDetachOneAttachment(Tool tool)
+        {
+            if (tool == null || Game1.player == null || !HasAnyAttachment(tool))
+                return false;
+            // Ensure player inventory can accept at least 1 detached item before calling attach(null)
+            StardewValley.Object firstAtt = null;
+            for (int i = 0; i < tool.attachments.Length; i++)
+            {
+                if (tool.attachments[i] != null) { firstAtt = tool.attachments[i]; break; }
+            }
+            if (firstAtt == null || !Game1.player.couldInventoryAcceptThisItem(firstAtt))
+                return false;
+
+            StardewValley.Object popped = tool.attach(null);
+            if (popped != null)
+            {
+                Item rem = Game1.player.addItemToInventory(popped);
+                if (rem is StardewValley.Object remObj)
+                    tool.attach(remObj);
+                return true;
+            }
+            return false;
+        }
+
         private static void TryEquipItem(InventoryPage ip, InventoryMenu srcInv, int srcSlot, Item item, Point uiPt)
         {
             SetItemAt(srcInv, srcSlot, null);
@@ -791,6 +847,20 @@ namespace SDVMobileControls
                 SetItemAt(dstInv, dstSlot, srcItem);
                 SetItemAt(srcInv, srcSlot, null);
                 try { Game1.playSound("stoneStep"); } catch { }
+            }
+            else if (dstItem is Tool dstTool && dstTool.AttachmentSlotsCount > 0 && srcItem is StardewValley.Object srcObj && dstTool.canThisBeAttached(srcObj))
+            {
+                // Direct Mobile Attach: drag/tap Bait or Tackle onto FishingRod, or Ammo onto Slingshot!
+                StardewValley.Object swapped = dstTool.attach(srcObj);
+                SetItemAt(srcInv, srcSlot, swapped);
+                try { Game1.playSound("button1"); } catch { }
+            }
+            else if (srcItem is Tool srcTool && srcTool.AttachmentSlotsCount > 0 && dstItem is StardewValley.Object dstObj && srcTool.canThisBeAttached(dstObj))
+            {
+                // Reverse direction (drag/tap Rod onto Bait or Slingshot onto Ammo) also attaches cleanly!
+                StardewValley.Object swapped = srcTool.attach(dstObj);
+                SetItemAt(dstInv, dstSlot, swapped);
+                try { Game1.playSound("button1"); } catch { }
             }
             else if (dstItem.canStackWith(srcItem))
             {

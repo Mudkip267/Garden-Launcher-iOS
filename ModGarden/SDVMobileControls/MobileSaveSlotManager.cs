@@ -24,6 +24,7 @@ namespace SDVMobileControls
         public int MineLevel { get; set; }
         public string SavedAtText { get; set; }
         public string SlotDir { get; set; }
+        public bool IsAutoSave { get; set; }
 
         public string FormatGameTime()
         {
@@ -42,8 +43,9 @@ namespace SDVMobileControls
             string loc = string.IsNullOrEmpty(LocationName) ? "FARM" : LocationName.ToUpperInvariant();
             if (MineLevel > 0 && loc.IndexOf("MINE", StringComparison.OrdinalIgnoreCase) >= 0)
                 loc = $"MINE F{MineLevel}";
-            if (loc.Length > 18) loc = loc.Substring(0, 18);
-            return $"{sShort} {DayOfMonth} Y{Year} {FormatGameTime()} - {loc}";
+            if (loc.Length > 15) loc = loc.Substring(0, 15);
+            string tag = IsAutoSave ? "[AUTO] " : "";
+            return $"{tag}{sShort} {DayOfMonth} Y{Year} {FormatGameTime()} - {loc}";
         }
 
         public string FormatDetailLine()
@@ -106,7 +108,9 @@ namespace SDVMobileControls
             return _cachedSlots;
         }
 
-        public void BeginPendingSnapshot(PadBridge bridge)
+        private const string AutoSaveSlotId = "99999999_AUTOSAVE";
+
+        public void BeginPendingSnapshot(PadBridge bridge, bool isAutoSave = false)
         {
             string folder = GetCurrentSaveFolderName();
             if (string.IsNullOrEmpty(folder) || Game1.player == null)
@@ -127,7 +131,7 @@ namespace SDVMobileControls
             DateTime now = DateTime.Now;
             _pendingMeta = new SaveSlotInfo
             {
-                SlotId = now.ToString("yyyyMMdd_HHmmss_fff"),
+                SlotId = isAutoSave ? AutoSaveSlotId : now.ToString("yyyyMMdd_HHmmss_fff"),
                 SaveFolderName = folder,
                 PlayerName = Game1.player.Name ?? "Farmer",
                 LocationName = StripNonAsciiForOverlay(loc),
@@ -139,7 +143,8 @@ namespace SDVMobileControls
                 Health = Game1.player.health,
                 Stamina = (int)Math.Round(Game1.player.Stamina),
                 MineLevel = mineLvl,
-                SavedAtText = now.ToString("HH:mm dd/MM")
+                SavedAtText = now.ToString("HH:mm dd/MM"),
+                IsAutoSave = isAutoSave
             };
             _pendingQuickSaveJsonPath = bridge?.GetQuickSaveStateFilePath(folder);
         }
@@ -275,12 +280,18 @@ namespace SDVMobileControls
         {
             try
             {
-                string[] dirs = Directory.GetDirectories(charDir);
-                if (dirs.Length <= maxKeep) return;
-                Array.Sort(dirs, (a, b) => string.CompareOrdinal(Path.GetFileName(b), Path.GetFileName(a)));
-                for (int i = maxKeep; i < dirs.Length; i++)
+                string[] allDirs = Directory.GetDirectories(charDir);
+                var manualDirs = new List<string>(allDirs.Length);
+                for (int i = 0; i < allDirs.Length; i++)
                 {
-                    try { Directory.Delete(dirs[i], recursive: true); } catch { }
+                    if (!string.Equals(Path.GetFileName(allDirs[i]), AutoSaveSlotId, StringComparison.OrdinalIgnoreCase))
+                        manualDirs.Add(allDirs[i]);
+                }
+                if (manualDirs.Count <= maxKeep) return;
+                manualDirs.Sort((a, b) => string.CompareOrdinal(Path.GetFileName(b), Path.GetFileName(a)));
+                for (int i = maxKeep; i < manualDirs.Count; i++)
+                {
+                    try { Directory.Delete(manualDirs[i], recursive: true); } catch { }
                 }
             }
             catch { }
@@ -342,6 +353,7 @@ namespace SDVMobileControls
             sb.AppendLine("stamina=" + m.Stamina);
             sb.AppendLine("mineLevel=" + m.MineLevel);
             sb.AppendLine("savedAt=" + (m.SavedAtText ?? ""));
+            sb.AppendLine("isAuto=" + (m.IsAutoSave ? "1" : "0"));
             File.WriteAllText(path, sb.ToString(), Encoding.UTF8);
         }
 
@@ -350,6 +362,8 @@ namespace SDVMobileControls
             try
             {
                 var info = new SaveSlotInfo { SlotDir = slotDir, SlotId = Path.GetFileName(slotDir) };
+                if (string.Equals(info.SlotId, AutoSaveSlotId, StringComparison.OrdinalIgnoreCase))
+                    info.IsAutoSave = true;
                 foreach (string raw in File.ReadAllLines(path, Encoding.UTF8))
                 {
                     int eq = raw.IndexOf('=');
@@ -371,6 +385,7 @@ namespace SDVMobileControls
                         case "stamina": int.TryParse(v, out int st); info.Stamina = st; break;
                         case "mineLevel": int.TryParse(v, out int ml); info.MineLevel = ml; break;
                         case "savedAt": info.SavedAtText = v; break;
+                        case "isAuto": info.IsAutoSave = (v == "1" || v.Equals("true", StringComparison.OrdinalIgnoreCase)); break;
                     }
                 }
                 return info;

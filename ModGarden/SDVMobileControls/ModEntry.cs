@@ -561,13 +561,27 @@ namespace SDVMobileControls
                 }
 
                 int applied = 0;
+                void TryApply(string label, MethodBase original, string prefixName, string postfixName)
+                {
+                    if (original == null)
+                        return;
+                    try
+                    {
+                        ApplyPatch(original, prefixName, postfixName);
+                        applied++;
+                    }
+                    catch (Exception pex)
+                    {
+                        _monitor?.Log($"[{phase}] Mobile Harmony patch '{label}' failed: {pex.GetType().Name}: {pex.Message}", LogLevel.Warn);
+                    }
+                }
 
                 // 1-3. FishingRod cast-charge guards (startCasting + non-inlineable NetEvent doStartCasting + DoFunction re-entry guard)
                 MethodInfo mStartCast = typeof(FishingRod).GetMethod("startCasting", instAny);
-                if (mStartCast != null) { ApplyPatch(mStartCast, nameof(PrefixFishingRodStartCasting), null); applied++; }
+                TryApply("FishingRod.startCasting", mStartCast, nameof(PrefixFishingRodStartCasting), null);
 
                 MethodInfo mDoStartCast = typeof(FishingRod).GetMethod("doStartCasting", instAny);
-                if (mDoStartCast != null) { ApplyPatch(mDoStartCast, nameof(PrefixFishingRodDoStartCasting), null); applied++; }
+                TryApply("FishingRod.doStartCasting", mDoStartCast, nameof(PrefixFishingRodDoStartCasting), null);
 
                 MethodInfo mDoFunc = typeof(FishingRod).GetMethod(
                     "DoFunction",
@@ -575,20 +589,20 @@ namespace SDVMobileControls
                     null,
                     new[] { typeof(GameLocation), typeof(int), typeof(int), typeof(int), typeof(Farmer) },
                     null);
-                if (mDoFunc != null) { ApplyPatch(mDoFunc, nameof(PrefixFishingRodDoFunction), null); applied++; }
+                TryApply("FishingRod.DoFunction", mDoFunc, nameof(PrefixFishingRodDoFunction), null);
 
                 // 4. BobberBar Mobile-feel physics (damping + crisp reversal braking + gentle edge bounce)
                 MethodInfo mBobberUpd = typeof(BobberBar).GetMethod("update", instAny, null, new[] { typeof(GameTime) }, null);
-                if (mBobberUpd != null) { ApplyPatch(mBobberUpd, null, nameof(PostfixBobberBarUpdate)); applied++; }
+                TryApply("BobberBar.update", mBobberUpd, null, nameof(PostfixBobberBarUpdate));
 
-                // 5. HUDMessage relocation when Vertical Toolbar is enabled (keeps item pickups clear of vertical bar & joystick)
+                // 5. Direct HUDMessage relocation when Vertical Toolbar is enabled (zero SpriteBatch restart, zero __state!)
                 MethodInfo mHudDraw = typeof(HUDMessage).GetMethod(
                     "draw",
                     instAny,
                     null,
                     new[] { typeof(SpriteBatch), typeof(int), typeof(int).MakeByRefType() },
                     null);
-                if (mHudDraw != null) { ApplyPatch(mHudDraw, nameof(PrefixHudMessageDraw), nameof(PostfixHudMessageDraw)); applied++; }
+                TryApply("HUDMessage.draw", mHudDraw, nameof(PrefixHudMessageDraw), null);
 
                 // 6. Tap-to-Move right-click synthesis for ShippingBin.doAction, FishPond.doAction, Furniture & modded buildings
                 MethodInfo mRightClick = typeof(Game1).GetMethod(
@@ -597,19 +611,19 @@ namespace SDVMobileControls
                     null,
                     new[] { typeof(bool) },
                     null);
-                if (mRightClick != null) { ApplyPatch(mRightClick, null, nameof(PostfixDidPlayerJustRightClick)); applied++; }
+                TryApply("Game1.didPlayerJustRightClick", mRightClick, null, nameof(PostfixDidPlayerJustRightClick));
 
                 // 7. Live boot asset-loading progress telemetry (zero runtime cost after boot finishes!)
                 try
                 {
                     Type sCoreType = typeof(Mod).Assembly.GetType("StardewModdingAPI.Framework.SCore", throwOnError: false);
                     MethodInfo mOnAsset = sCoreType?.GetMethod("OnAssetLoaded", instAny);
-                    if (mOnAsset != null) { ApplyPatch(mOnAsset, null, nameof(PostfixSmapiAssetLoaded)); applied++; }
+                    TryApply("SCore.OnAssetLoaded", mOnAsset, null, nameof(PostfixSmapiAssetLoaded));
                 }
                 catch { }
 
                 _harmonyPatchesInstalled = true;
-                _monitor?.Log($"[{phase}] Installed {applied}/7 Mobile Harmony patches (FishingRod + BobberBar + HUDMessage + TapAction RightClick + BootAssetProgress).", LogLevel.Info);
+                _monitor?.Log($"[{phase}] Installed {applied}/7 Mobile Harmony patches (FishingRod + BobberBar + Direct HUDMessage + TapAction RightClick + BootAssetProgress).", LogLevel.Info);
             }
             catch (Exception ex)
             {
@@ -972,64 +986,116 @@ namespace SDVMobileControls
             __instance.bobberBarSpeed = Math.Clamp(spd, -5.8f, 5.8f);
         }
 
-        private static void PrefixHudMessageDraw(HUDMessage __instance, SpriteBatch b, ref int heightUsed, out bool __state)
+        private static bool PrefixHudMessageDraw(HUDMessage __instance, SpriteBatch b, int i, ref int heightUsed)
         {
-            __state = false;
             if (__instance == null || b == null || Engine == null)
-                return;
-            if (!Engine.TryGetHudMessageRelocation(out float targetX, out float topStartY))
-                return;
+                return true;
 
             try
             {
                 Rectangle tsarea = Game1.graphics.GraphicsDevice.Viewport.GetTitleSafeArea();
-                float origX;
-                float origY;
+                if (!Engine.TryGetHudMessageRelocation(tsarea, out float targetX, out float topStartY, out float maxRightX))
+                    return true;
+
+                string msg = __instance.message ?? string.Empty;
+                float alpha = __instance.transparency;
+
                 if (__instance.noIcon)
                 {
-                    int h = (int)Game1.dialogueFont.MeasureString(__instance.message ?? string.Empty).Y + 64;
-                    origX = tsarea.Left + 16;
-                    origY = tsarea.Bottom - h - heightUsed - 64 + (Game1.uiViewport.Width < 1400 ? -64 : 0);
+                    Vector2 textSz = Game1.dialogueFont.MeasureString(msg);
+                    int boxH = (int)textSz.Y + 64;
+                    int boxW = (int)textSz.X + 48;
+                    int drawX = (int)Math.Round(targetX);
+                    if (drawX + boxW > maxRightX)
+                        drawX = Math.Max(tsarea.Left + 16, (int)(maxRightX - boxW));
+                    int drawY = (int)Math.Round(topStartY + heightUsed);
+                    heightUsed += boxH;
+
+                    if (drawY + boxH <= tsarea.Bottom - 16)
+                    {
+                        IClickableMenu.drawHoverText(
+                            b,
+                            msg,
+                            Game1.dialogueFont,
+                            0, 0, -1, null, -1, null, null, 0, null, -1,
+                            drawX,
+                            drawY,
+                            alpha);
+                    }
+                    return false;
+                }
+
+                const int boxStepH = 104;
+                float msgWidth = Game1.smallFont.MeasureString(msg).X;
+                float totalW = 104f + msgWidth + 24f;
+                float drawXf = targetX;
+                if (drawXf + totalW > maxRightX)
+                    drawXf = Math.Max(tsarea.Left + 16f, maxRightX - totalW);
+                float drawYf = topStartY + heightUsed;
+                heightUsed += boxStepH;
+
+                if (drawYf + 96f > tsarea.Bottom - 16f)
+                    return false;
+
+                Vector2 pos = new Vector2((float)Math.Floor(drawXf), (float)Math.Floor(drawYf));
+
+                // 1. Native Stardew wooden scroll box (100% skinned by Content Patcher UI mods like Cat Valley UI!)
+                bool rareItem = __instance.messageSubject is StardewValley.Object obj && obj.sellToStorePrice() > 500;
+                Rectangle leftCapSrc = rareItem
+                    ? new Rectangle(163, 399, 26, 24)
+                    : new Rectangle(293, 360, 26, 24);
+                b.Draw(Game1.mouseCursors, pos, leftCapSrc, Color.White * alpha, 0f, Vector2.Zero, 4f, SpriteEffects.None, 1f);
+                b.Draw(Game1.mouseCursors, new Vector2(pos.X + 104f, pos.Y), new Rectangle(319, 360, 1, 24), Color.White * alpha, 0f, Vector2.Zero, new Vector2(msgWidth, 4f), SpriteEffects.None, 1f);
+                b.Draw(Game1.mouseCursors, new Vector2(pos.X + 104f + msgWidth, pos.Y), new Rectangle(323, 360, 6, 24), Color.White * alpha, 0f, Vector2.Zero, 4f, SpriteEffects.None, 1f);
+
+                // 2. Item icon or HUD status icon with vanilla pop-in bounce
+                Vector2 iconPos = new Vector2(pos.X + 16f, pos.Y + 16f);
+                float bounce = Math.Max(0f, (__instance.timeLeft - 3000f) / 900f);
+                if (__instance.messageSubject != null)
+                {
+                    __instance.messageSubject.drawInMenu(b, iconPos, 1f + bounce, alpha, 1f, StackDrawType.Hide);
                 }
                 else
                 {
-                    origX = tsarea.Left + 16;
-                    if (Game1.isOutdoorMapSmallerThanViewport())
-                        origX = Math.Max(tsarea.Left + 16, -Game1.uiViewport.X + 16);
-                    origY = tsarea.Bottom - 112 - heightUsed - 64 - (Game1.uiViewport.Width < 1400 ? 48 : 0);
+                    Vector2 iconCenter = iconPos + new Vector2(32f, 32f);
+                    switch (__instance.whatType)
+                    {
+                        case 1: // newQuest_type
+                            b.Draw(Game1.mouseCursors, iconCenter, new Rectangle(294, 392, 16, 16), Color.White * alpha, 0f, new Vector2(8f, 8f), 4f + bounce, SpriteEffects.None, 1f);
+                            break;
+                        case 2: // error_type
+                            b.Draw(Game1.mouseCursors, iconCenter, new Rectangle(403, 496, 5, 14), Color.White * alpha, 0f, new Vector2(3f, 7f), 4f + bounce, SpriteEffects.None, 1f);
+                            break;
+                        case 3: // stamina_type
+                            b.Draw(Game1.mouseCursors, iconCenter, new Rectangle(268, 470, 16, 16), Color.White * alpha, 0f, new Vector2(8f, 8f), 4f + bounce, SpriteEffects.None, 1f);
+                            break;
+                        case 4: // health_type
+                            b.Draw(Game1.mouseCursors, iconCenter, new Rectangle(0, 411, 16, 16), Color.White * alpha, 0f, new Vector2(8f, 8f), 4f + bounce, SpriteEffects.None, 1f);
+                            break;
+                        case 5: // screenshot_type
+                            b.Draw(Game1.mouseCursors, iconCenter, new Rectangle(16, 411, 16, 16), Color.White * alpha, 0f, new Vector2(8f, 8f), 4f + bounce, SpriteEffects.None, 1f);
+                            break;
+                        case 6: // speed_type
+                            b.Draw(Game1.mouseCursors2, iconCenter, new Rectangle(96, 32, 16, 16), Color.White * alpha, 0f, new Vector2(8f, 8f), 4f + bounce, SpriteEffects.None, 1f);
+                            break;
+                    }
                 }
 
-                float dx = targetX - origX;
-                float dy = (topStartY + heightUsed) - origY;
+                // 3. Stack count digits & item label
+                Vector2 digitPos = new Vector2(iconPos.X + 51f, iconPos.Y + 51f);
+                if (__instance.number > 1)
+                {
+                    Utility.drawTinyDigits(__instance.number, b, digitPos, 3f, 1f, Color.White * alpha);
+                }
 
-                b.End();
-                b.Begin(
-                    SpriteSortMode.Deferred,
-                    BlendState.AlphaBlend,
-                    SamplerState.PointClamp,
-                    null,
-                    null,
-                    null,
-                    Matrix.CreateTranslation(dx, dy, 0f));
-                __state = true;
+                Vector2 textPos = new Vector2(digitPos.X + 32f, digitPos.Y - 33f);
+                Utility.drawTextWithShadow(b, msg, Game1.smallFont, textPos, Game1.textColor * alpha, 1f, 1f, -1, -1, alpha);
+                return false;
             }
             catch
             {
-                __state = false;
+                return true;
             }
-        }
-
-        private static void PostfixHudMessageDraw(SpriteBatch b, bool __state)
-        {
-            if (!__state || b == null)
-                return;
-
-            try
-            {
-                b.End();
-                b.Begin(SpriteSortMode.Deferred, BlendState.AlphaBlend, SamplerState.PointClamp);
-            }
-            catch { }
         }
 
         private void RunShaderDiagnostic(string phase)

@@ -544,46 +544,52 @@ namespace SDVMobileControls
         public bool IsMobileModeForBobberPhysics => IsMobileModeActive;
 
         /// <summary>
-        /// When the Mobile Vertical Toolbar is enabled, relocates Stardew's bottom-left HUDMessage
-        /// item-pickup popups neatly to the upper-left area clear of both the vertical toolbar and joystick!
+        /// When the Mobile Vertical Toolbar is enabled, computes pixel-exact coordinates inside the active
+        /// HUDMessage draw viewport (tsarea) using normalized 0..1 screen fractions so item-pickup popups
+        /// ALWAYS clear the Vertical Toolbar (left or right, 1-3 cols), Top Utility Bar, and Joystick
+        /// regardless of ZoomLevel, UIScale, or BackBuffer vs uiScreen!
         /// </summary>
-        public bool TryGetHudMessageRelocation(out float targetX, out float topStartY)
+        public bool TryGetHudMessageRelocation(Rectangle tsarea, out float targetX, out float topStartY, out float maxRightX)
         {
             targetX = 0f;
             topStartY = 0f;
-            if (!IsMobileModeActive || !_cfg.VerticalToolbar || _guiHidden)
+            maxRightX = tsarea.Right - 16f;
+            if (!IsMobileModeActive || !_cfg.VerticalToolbar || _guiHidden || _gamepadHideHud)
                 return false;
             if (!Context.IsWorldReady || Game1.activeClickableMenu != null)
                 return false;
 
             try
             {
-                int uiW = Game1.uiViewport.Width;
-                int uiH = Game1.uiViewport.Height;
-                if (uiW < 320 || uiH < 200 || _vpW < 100 || _vpH < 100)
+                if (tsarea.Width < 320 || tsarea.Height < 200 || _vpW < 100 || _vpH < 100)
                     return false;
 
-                float scaleX = (float)uiW / _vpW;
-                float scaleY = (float)uiH / _vpH;
+                // Top clearance in normalized screen fraction: sit cleanly below Top Utility Bar when Top Bar is near the top
+                bool topBarAtTop = _cfg.ShowTopUtility && !_btnBagRect.IsEmpty && _btnBagRect.Top < _vpH * 0.28f;
+                float topFrac = topBarAtTop
+                    ? Math.Max((_btnBagRect.Bottom + 10f) / _vpH, 0.105f)
+                    : Math.Max(14f / _vpH, 0.032f);
+                topFrac = Math.Clamp(topFrac, 0.025f, 0.24f);
+                topStartY = tsarea.Top + topFrac * tsarea.Height;
 
-                // Top clearance: sit neatly below Top Utility Bar (if visible)
-                float topVp = _cfg.ShowTopUtility
-                    ? Math.Max(_btnBagRect.Bottom + 10f, _vpH * 0.11f)
-                    : Math.Max(14f, _vpH * 0.04f);
-                topStartY = Math.Clamp(topVp * scaleY, 24f, Math.Max(48f, uiH * 0.24f));
-
-                // Horizontal clearance: clear of left-docked Vertical Toolbar (or left safe-area when toolbar is on right)
+                // Horizontal clearance in normalized screen fraction: clear Vertical Toolbar (left or right) & Notch SafeArea
                 Rectangle vtBounds = _verticalToolbar.Bounds;
-                float leftVp;
+                float leftFrac;
+                float rightLimitFrac = 0.985f;
                 if (_cfg.ToolbarSide == 0 && !vtBounds.IsEmpty)
                 {
-                    leftVp = vtBounds.Right + 14f;
+                    leftFrac = (vtBounds.Right + 14f) / _vpW;
                 }
                 else
                 {
-                    leftVp = Math.Max(_safeLeftPx + 14f, 16f);
+                    leftFrac = Math.Max(_safeLeftPx + 14f, 16f) / _vpW;
+                    if (_cfg.ToolbarSide == 1 && !vtBounds.IsEmpty)
+                        rightLimitFrac = Math.Clamp((vtBounds.Left - 14f) / _vpW, 0.45f, 0.985f);
                 }
-                targetX = Math.Clamp(leftVp * scaleX, 16f, Math.Max(32f, uiW * 0.45f));
+
+                leftFrac = Math.Clamp(leftFrac, 0.015f, 0.45f);
+                targetX = tsarea.Left + leftFrac * tsarea.Width;
+                maxRightX = tsarea.Left + rightLimitFrac * tsarea.Width;
                 return true;
             }
             catch
@@ -936,7 +942,7 @@ namespace SDVMobileControls
             {
                 if (_guiHidden && (Game1.activeClickableMenu != null || Game1.eventUp || Game1.currentMinigame != null))
                     SetGuiHidden(false);
-                _verticalToolbar.SyncHorizontalToolbarVisibility(IsMobileModeActive && (_cfg.VerticalToolbar || _guiHidden));
+                _verticalToolbar.SyncHorizontalToolbarVisibility(IsMobileModeActive && ((_cfg.VerticalToolbar && !_gamepadHideHud) || _guiHidden));
             }
             else
             {

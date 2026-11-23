@@ -653,7 +653,7 @@ static void sdvApplyAutoHideHomeIndicator(UIViewController *vc) {
     NSInteger _fps;
     NSString *_mobileCfgPath;
     time_t _lastCfgMtime;
-    BOOL _eco30Fps;
+    NSInteger _ecoFpsMode; // 0=60, 1=30, 2=45
 }
 
 -(UIView *)badgeView { return _badge; }
@@ -713,7 +713,7 @@ static void sdvApplyAutoHideHomeIndicator(UIViewController *vc) {
     NSString *docsDir = [fm() URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject.path;
     _mobileCfgPath = docsDir.length ? [sdvHiddenGardenDir(docsDir) stringByAppendingPathComponent:@"sdv_mobile_ctrl.cfg"] : nil;
     _lastCfgMtime = 0;
-    _eco30Fps = NO;
+    _ecoFpsMode = 0;
     _link = [CADisplayLink displayLinkWithTarget:self selector:@selector(onFrame:)];
     [_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
     [self refreshLabel];
@@ -754,24 +754,30 @@ static void sdvApplyAutoHideHomeIndicator(UIViewController *vc) {
     }
 }
 
--(void)syncEco30FpsFlag {
+-(void)syncEcoFpsMode {
     if (!_mobileCfgPath.length) return;
     struct stat st;
     if (stat(_mobileCfgPath.fileSystemRepresentation, &st) != 0) return;
     if (st.st_mtime == _lastCfgMtime) return;
     _lastCfgMtime = st.st_mtime;
     NSString *raw = [NSString stringWithContentsOfFile:_mobileCfgPath encoding:NSUTF8StringEncoding error:nil];
-    _eco30Fps = [raw containsString:@"saver30fps=1"];
+    if ([raw containsString:@"saver30fps=2"]) _ecoFpsMode = 2;
+    else if ([raw containsString:@"saver30fps=1"]) _ecoFpsMode = 1;
+    else _ecoFpsMode = 0;
 }
 
 -(void)refreshLabel {
-    [self syncEco30FpsFlag];
+    [self syncEcoFpsMode];
     SDVRamSnapshot s = [SDVRamMonitor.shared sample];
     UIColor *ledCol = (s.usagePct >= 90.0) ? kTintRed : ((s.usagePct >= 85.0) ? kTintOrange : kTintGreen);
     _led.backgroundColor = ledCol;
     _lbl.textColor = (s.usagePct >= 90.0) ? rgb(0xFF8A80) : ((s.usagePct >= 85.0) ? rgb(0xFFD180) : UIColor.whiteColor);
-    if (_eco30Fps) {
+    if (_ecoFpsMode == 1) {
         NSInteger dispFps = (_fps >= 40) ? (_fps / 2) : _fps;
+        _lbl.text = [NSString stringWithFormat:@"RAM %@ · Dư %@ · %ldFPS Eco",
+            sdvFmtMemCompact(s.usedBytes), sdvFmtMemCompact(s.availBytes), (long)dispFps];
+    } else if (_ecoFpsMode == 2) {
+        NSInteger dispFps = (_fps >= 50) ? ((_fps * 3) / 4) : _fps;
         _lbl.text = [NSString stringWithFormat:@"RAM %@ · Dư %@ · %ldFPS Eco",
             sdvFmtMemCompact(s.usedBytes), sdvFmtMemCompact(s.availBytes), (long)dispFps];
     } else {
@@ -2378,6 +2384,11 @@ static void sdvExtInputAttachWindow(UIWindow *win);
 static void sdvExtSetGardenOpen(BOOL open);
 
 // ---- Native UIWindowSceneDelegate for iOS 14 – iOS 26 & iOS 27 Mandatory Scene Lifecycle ----
+@interface SDVKeyboardAlertWindow : UIWindow
+@end
+@implementation SDVKeyboardAlertWindow
+@end
+
 @interface SDVSceneDelegate : UIResponder <UIWindowSceneDelegate>
 @property(nonatomic, strong) UIWindow *window;
 @property(nonatomic, strong) SDVSceneHostWindow *placeholderWindow;
@@ -2388,16 +2399,53 @@ static void sdvExtSetGardenOpen(BOOL open);
 -(void)adoptRealWindowForScene:(UIWindowScene *)ws {
     if (!ws) return;
     @try {
-        // Never steal keyWindow while Mod Garden overlay is actively presented!
+        // Never steal keyWindow while Mod Garden overlay or Native Keyboard alert is actively presented!
         if (gSdvGardenHost && [gSdvGardenHost isGardenOpen]) return;
+        for (UIWindow *ow in ws.windows) {
+            if ([ow isKindOfClass:SDVKeyboardAlertWindow.class] && !ow.hidden) return;
+        }
 
-        // 1. Check if AppDelegate already created a window (e.g. ShowMissingFilesScreen / ShowErrorScreen)
+        // 1. Prefer an ALREADY-ACTIVE MonoGame / SDViOS real game window attached to this scene!
+        //    (Prevents stale AppDelegate.window from stealing keyWindow on iPadOS/iOS 26-27!)
+        UIWindow *bestGameWin = nil;
+        for (UIWindow *w in ws.windows) {
+            if ([w isKindOfClass:SDVSceneHostWindow.class] ||
+                [w isKindOfClass:SDVGardenOverlayWindow.class] ||
+                [w isKindOfClass:SDVPassThroughWindow.class] ||
+                [w isKindOfClass:SDVKeyboardAlertWindow.class]) continue;
+            if (w.windowLevel >= UIWindowLevelAlert || w.hidden || !w.rootViewController) continue;
+            NSString *rcName = NSStringFromClass(w.rootViewController.class) ?: @"";
+            if ([rcName containsString:@"GameViewController"] || [rcName containsString:@"iOSGame"]) {
+                bestGameWin = w;
+                break;
+            }
+            if (!bestGameWin) bestGameWin = w;
+        }
+        if (bestGameWin) {
+            BOOL hadPlaceholder = (self.placeholderWindow != nil);
+            if (hadPlaceholder) {
+                self.placeholderWindow.hidden = YES;
+                self.placeholderWindow = nil;
+                sdvBootLog("[SCENE] Retired placeholder host window (real game window active)");
+            }
+            if (self.window != bestGameWin) {
+                self.window = bestGameWin;
+            }
+            if (!bestGameWin.isKeyWindow) {
+                [bestGameWin makeKeyAndVisible];
+            }
+            return;
+        }
+
+        // 2. Fallback: adopt AppDelegate.window only if no real game window exists on this scene yet
+        //    (e.g., ShowMissingFilesScreen / ShowErrorScreen before MonoGame initializes)
         id<UIApplicationDelegate> appDel = UIApplication.sharedApplication.delegate;
         if (appDel && [appDel respondsToSelector:@selector(window)]) {
             UIWindow *dw = [appDel window];
             if (dw && ![dw isKindOfClass:SDVSceneHostWindow.class] &&
                 ![dw isKindOfClass:SDVGardenOverlayWindow.class] &&
-                ![dw isKindOfClass:SDVPassThroughWindow.class]) {
+                ![dw isKindOfClass:SDVPassThroughWindow.class] &&
+                ![dw isKindOfClass:SDVKeyboardAlertWindow.class]) {
                 BOOL needsAdopt = (dw.windowScene != ws || dw.hidden || self.window != dw || self.placeholderWindow != nil);
                 if (!needsAdopt) return;
                 if (dw.windowScene != ws) {
@@ -2414,21 +2462,6 @@ static void sdvExtSetGardenOpen(BOOL open);
                 sdvBootLog("[SCENE] Adopted AppDelegate.window onto UIWindowScene");
                 return;
             }
-        }
-        // 2. Check if MonoGame / SDViOS already attached its own real UIWindow to this scene
-        for (UIWindow *w in ws.windows) {
-            if ([w isKindOfClass:SDVSceneHostWindow.class] ||
-                [w isKindOfClass:SDVGardenOverlayWindow.class] ||
-                [w isKindOfClass:SDVPassThroughWindow.class]) continue;
-            if (w.windowLevel >= UIWindowLevelAlert || w.hidden || !w.rootViewController) continue;
-            if (self.window == w && !self.placeholderWindow) return;
-            self.window = w;
-            if (self.placeholderWindow) {
-                self.placeholderWindow.hidden = YES;
-                self.placeholderWindow = nil;
-                sdvBootLog("[SCENE] Retired placeholder host window (real game window active)");
-            }
-            return;
         }
     } @catch (NSException *ex) { }
 }
@@ -2603,7 +2636,7 @@ static void sdvExtSetGardenOpen(BOOL open);
 -(BOOL)isOwnWindow:(UIWindow *)w {
     if (!w) return YES;
     return w == self.gardenWindow || w == self.loadingWindow || w == self.liveHudWindow || w == self.ramHudWindow || w == self.toastWindow ||
-           [w isKindOfClass:SDVGardenOverlayWindow.class] || [w isKindOfClass:SDVPassThroughWindow.class];
+           [w isKindOfClass:SDVGardenOverlayWindow.class] || [w isKindOfClass:SDVPassThroughWindow.class] || [w isKindOfClass:SDVKeyboardAlertWindow.class];
 }
 
 -(UIWindowScene *)primaryWindowScene {
@@ -3587,6 +3620,182 @@ void sdv_boot_on_log(const char *utf8Line) {
         }
         sdvBootPumpMainThreadNow(major);
     }
+}
+
+// ---- Bulletproof Native iOS 14 – iOS 27 Keyboard Input Bridge (UIWindowScene + Dedicated Alert Window) ----
+static os_unfair_lock gSdvKbLock = OS_UNFAIR_LOCK_INIT;
+static int gSdvKbState = 0; // 0=idle, 1=active, 2=submitted, 3=cancelled
+static char gSdvKbResult[1024] = {0};
+static SDVKeyboardAlertWindow *gSdvKbWindow = nil;
+
+@interface SDVKeyboardFieldDelegate : NSObject <UITextFieldDelegate>
+@property(nonatomic, copy) void (^onReturnBlock)(void);
+@end
+@implementation SDVKeyboardFieldDelegate
+-(BOOL)textFieldShouldReturn:(UITextField *)textField {
+    (void)textField;
+    if (self.onReturnBlock) self.onReturnBlock();
+    return YES;
+}
+@end
+
+static SDVKeyboardFieldDelegate *gSdvKbDelegate = nil;
+
+static void sdvKbFinishOnMain(int finalState, NSString *text) {
+    os_unfair_lock_lock(&gSdvKbLock);
+    if (gSdvKbState == 1) {
+        gSdvKbState = finalState;
+        if (finalState == 2 && text) {
+            const char *u = text.UTF8String;
+            if (u) {
+                strncpy(gSdvKbResult, u, sizeof(gSdvKbResult) - 1);
+                gSdvKbResult[sizeof(gSdvKbResult) - 1] = 0;
+            } else {
+                gSdvKbResult[0] = 0;
+            }
+        } else {
+            gSdvKbResult[0] = 0;
+        }
+    }
+    os_unfair_lock_unlock(&gSdvKbLock);
+
+    if (gSdvKbWindow) {
+        gSdvKbWindow.hidden = YES;
+        gSdvKbWindow.rootViewController = nil;
+        gSdvKbWindow = nil;
+    }
+    gSdvKbDelegate = nil;
+
+    if (gSdvGardenHost && ![gSdvGardenHost isGardenOpen]) {
+        UIWindow *game = [gSdvGardenHost gameWindow];
+        if (game && !game.hidden) {
+            [game makeKeyAndVisible];
+            if (game.rootViewController) sdvApplyAutoHideHomeIndicator(game.rootViewController);
+        }
+    }
+}
+
+__attribute__((visibility("default")))
+int sdv_kb_is_active(void) {
+    os_unfair_lock_lock(&gSdvKbLock);
+    int active = (gSdvKbState == 1) ? 1 : 0;
+    os_unfair_lock_unlock(&gSdvKbLock);
+    return active;
+}
+
+__attribute__((visibility("default")))
+int sdv_kb_poll(char *outUtf8, int outCap) {
+    os_unfair_lock_lock(&gSdvKbLock);
+    int st = gSdvKbState;
+    if (st == 2) {
+        if (outUtf8 && outCap > 0) {
+            strncpy(outUtf8, gSdvKbResult, (size_t)(outCap - 1));
+            outUtf8[outCap - 1] = 0;
+        }
+        gSdvKbResult[0] = 0;
+        gSdvKbState = 0;
+    } else if (st == 3) {
+        gSdvKbResult[0] = 0;
+        gSdvKbState = 0;
+    }
+    os_unfair_lock_unlock(&gSdvKbLock);
+    return st;
+}
+
+__attribute__((visibility("default")))
+int sdv_kb_show(const char *titleUtf8, const char *initialUtf8) {
+    os_unfair_lock_lock(&gSdvKbLock);
+    if (gSdvKbState == 1) {
+        os_unfair_lock_unlock(&gSdvKbLock);
+        return 0;
+    }
+    gSdvKbState = 1;
+    gSdvKbResult[0] = 0;
+    os_unfair_lock_unlock(&gSdvKbLock);
+
+    NSString *title = (titleUtf8 && titleUtf8[0]) ? [NSString stringWithUTF8String:titleUtf8] : @"Nhập chữ";
+    NSString *initial = (initialUtf8 && initialUtf8[0]) ? [NSString stringWithUTF8String:initialUtf8] : @"";
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            if (gSdvKbWindow) {
+                gSdvKbWindow.hidden = YES;
+                gSdvKbWindow.rootViewController = nil;
+                gSdvKbWindow = nil;
+            }
+
+            UIWindowScene *ws = gSdvGardenHost ? [gSdvGardenHost primaryWindowScene] : nil;
+            SDVKeyboardAlertWindow *kw = nil;
+            if (ws) {
+                kw = [[SDVKeyboardAlertWindow alloc] initWithWindowScene:ws];
+                kw.frame = ws.coordinateSpace.bounds;
+            } else {
+                kw = [[SDVKeyboardAlertWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+            }
+            kw.backgroundColor = UIColor.clearColor;
+            kw.windowLevel = UIWindowLevelAlert + 2;
+
+            UIViewController *hostVC = [UIViewController new];
+            hostVC.view.backgroundColor = UIColor.clearColor;
+            kw.rootViewController = hostVC;
+            gSdvKbWindow = kw;
+            [kw makeKeyAndVisible];
+
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:nil preferredStyle:UIAlertControllerStyleAlert];
+            __block UITextField *capturedField = nil;
+            __block BOOL doneOnce = NO;
+
+            void (^doSubmit)(void) = ^{
+                if (doneOnce) return;
+                doneOnce = YES;
+                NSString *val = capturedField.text ?: @"";
+                sdvKbFinishOnMain(2, val);
+            };
+            void (^doCancel)(void) = ^{
+                if (doneOnce) return;
+                doneOnce = YES;
+                sdvKbFinishOnMain(3, nil);
+            };
+
+            SDVKeyboardFieldDelegate *del = [SDVKeyboardFieldDelegate new];
+            __weak UIAlertController *weakAlert = alert;
+            del.onReturnBlock = ^{
+                UIAlertController *sa = weakAlert;
+                if (sa) {
+                    [sa dismissViewControllerAnimated:YES completion:^{ doSubmit(); }];
+                } else {
+                    doSubmit();
+                }
+            };
+            gSdvKbDelegate = del;
+
+            [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+                capturedField = tf;
+                tf.text = initial;
+                tf.autocorrectionType = UITextAutocorrectionTypeNo;
+                tf.autocapitalizationType = UITextAutocapitalizationTypeWords;
+                tf.returnKeyType = UIReturnKeyDone;
+                tf.clearButtonMode = UITextFieldViewModeWhileEditing;
+                tf.delegate = del;
+            }];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+                (void)a;
+                doSubmit();
+            }]];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Huỷ" style:UIAlertActionStyleCancel handler:^(UIAlertAction *a) {
+                (void)a;
+                doCancel();
+            }]];
+
+            [hostVC presentViewController:alert animated:YES completion:^{
+                if (capturedField) [capturedField becomeFirstResponder];
+            }];
+        } @catch (NSException *ex) {
+            sdvBootLogFmt([NSString stringWithFormat:@"[KB] Native keyboard error: %@", ex]);
+            sdvKbFinishOnMain(3, nil);
+        }
+    });
+    return 1;
 }
 
 __attribute__((constructor)) static void startGardenControls(void) {

@@ -14,6 +14,7 @@ using StardewModdingAPI.Events;
 using StardewValley;
 using StardewValley.Extensions;
 using StardewValley.Menus;
+using StardewValley.Mods;
 using StardewValley.Tools;
 
 namespace SDVMobileControls
@@ -51,6 +52,8 @@ namespace SDVMobileControls
         private static bool _bootNativeResolved;
         private static BootReportDelegate _bootNativeReport;
         internal static bool SynthesizingTapAction;
+        private static readonly List<HUDMessage> _stashedHudMessages = new List<HUDMessage>(8);
+        private static bool _hudMessagesStashed;
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate void BootReportDelegate(
@@ -128,6 +131,8 @@ namespace SDVMobileControls
             helper.Events.GameLoop.GameLaunched += OnGameLaunched;
             helper.Events.GameLoop.UpdateTicked += OnUpdateTicked;
             helper.Events.Display.Rendered += OnRenderedBootCheck;
+            helper.Events.Display.RenderingStep += OnRenderingStepHudRelocate;
+            helper.Events.Display.RenderedStep += OnRenderedStepHudRelocate;
             helper.Events.GameLoop.Saved += OnSaved;
             helper.Events.GameLoop.SaveLoaded += OnSaveLoaded;
             helper.Events.GameLoop.DayStarted += OnDayStarted;
@@ -257,8 +262,84 @@ namespace SDVMobileControls
             }
         }
 
+        private static void RestoreStashedHudMessagesIfNeeded()
+        {
+            if (!_hudMessagesStashed)
+                return;
+            _hudMessagesStashed = false;
+            try
+            {
+                if (_stashedHudMessages.Count > 0 && Game1.hudMessages != null)
+                {
+                    if (Game1.hudMessages.Count == 0)
+                    {
+                        Game1.hudMessages.AddRange(_stashedHudMessages);
+                    }
+                    else
+                    {
+                        // Preserve any new HUDMessage pushed during drawHUD at the end
+                        Game1.hudMessages.InsertRange(0, _stashedHudMessages);
+                    }
+                }
+            }
+            catch { }
+            finally
+            {
+                _stashedHudMessages.Clear();
+            }
+        }
+
+        private void OnRenderingStepHudRelocate(object sender, RenderingStepEventArgs e)
+        {
+            if (e == null || e.Step != RenderSteps.HUD || Engine == null || (Game1.game1 != null && Game1.game1.takingMapScreenshot))
+                return;
+            try
+            {
+                var list = Game1.hudMessages;
+                if (list == null || list.Count == 0)
+                    return;
+                Rectangle tsarea = Game1.graphics.GraphicsDevice.Viewport.GetTitleSafeArea();
+                if (!Engine.TryGetHudMessageRelocation(tsarea, out _, out _, out _))
+                    return;
+
+                // Zero-Harmony relocation: stash Game1.hudMessages right before vanilla Game1._draw draws them at bottom-left!
+                _stashedHudMessages.Clear();
+                _stashedHudMessages.AddRange(list);
+                list.Clear();
+                _hudMessagesStashed = true;
+            }
+            catch
+            {
+                RestoreStashedHudMessagesIfNeeded();
+            }
+        }
+
+        private void OnRenderedStepHudRelocate(object sender, RenderedStepEventArgs e)
+        {
+            if (e == null || e.Step != RenderSteps.HUD || !_hudMessagesStashed)
+                return;
+
+            RestoreStashedHudMessagesIfNeeded();
+
+            try
+            {
+                var list = Game1.hudMessages;
+                if (list == null || list.Count == 0 || e.SpriteBatch == null || Engine == null || (Game1.game1 != null && Game1.game1.takingMapScreenshot))
+                    return;
+                int heightUsed = 0;
+                for (int i = list.Count - 1; i >= 0; i--)
+                {
+                    HUDMessage m = list[i];
+                    if (m != null)
+                        PrefixHudMessageDraw(m, e.SpriteBatch, i, ref heightUsed);
+                }
+            }
+            catch { }
+        }
+
         private void OnUpdateTicked(object sender, UpdateTickedEventArgs e)
         {
+            RestoreStashedHudMessagesIfNeeded();
             try { ExternalInput?.PollFrame(); } catch { }
             try { Engine?.OnUpdateTickedGlobal(); } catch { }
             try { RamOptimizer?.PollManualPruneFlag(); } catch { }

@@ -1,5 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using Microsoft.Xna.Framework.Input;
@@ -96,10 +99,12 @@ namespace SDVMobileControls
         private readonly Dictionary<int, double> _customBtnLastPressSec = new Dictionary<int, double>(16); // btnId -> last press timestamp
         private readonly HashSet<int> _customBtnsHeldNow = new HashSet<int>();
 
-        // Active joystick runtime state
+        // Active joystick runtime state (normalized 0..1 coordinates guarantee zero drift between Update & Draw viewports!)
         private int _joyTouchId = -1;
         private Vector2 _joyOrigin;
         private Vector2 _joyKnob;
+        private Vector2 _joyOriginNorm;
+        private Vector2 _joyKnobNorm;
         private Vector2 _joyTouchStart;
         private double _joyTouchStartTime;
         private bool _joyActivated;
@@ -110,6 +115,8 @@ namespace SDVMobileControls
         private int _interactTouchId = -1;
         private bool _toolPressed;
         private bool _interactPressed;
+        private bool _prevInteractPressed;
+        private bool _suppressActUntilRelease;
         private float _toolRippleAlpha;
         private float _interactRippleAlpha;
 
@@ -154,6 +161,7 @@ namespace SDVMobileControls
         private int _slingshotTouchId = -1;
         private Vector2 _slingshotRawPos;
         private Vector2 _slingshotVpPos;
+        private Vector2 _slingshotNorm;
 
         // Auto-attack state (default OFF)
         private int _autoAttackCooldown;
@@ -217,9 +225,46 @@ namespace SDVMobileControls
         private int _dlgHoveredIdx = -1;
         private int _weatherTickCounter;
 
-        // Auto iOS keyboard on TextBox focus
+        // Auto iOS keyboard on TextBox focus + Native iOS 14-27 UIWindowScene Keyboard Alert bridge
         private IKeyboardSubscriber _lastKbSubscriber;
         private double _lastAutoKbSec;
+        private IKeyboardSubscriber _nativeKbTarget;
+        private bool _nativeKbActive;
+        private int _titleClickPulseFrames;
+        private Point? _titleClickRawPos;
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int NativeKbShowDelegate(
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string title,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string initial);
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int NativeKbPollDelegate(byte[] outUtf8, int outCap);
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int NativeKbIsActiveDelegate();
+
+        [DllImport("/usr/lib/libSystem.dylib", EntryPoint = "dlsym")]
+        private static extern IntPtr MobileDarwinDlsym(IntPtr handle, [MarshalAs(UnmanagedType.LPStr)] string symbol);
+
+        private static bool _nativeKbResolved;
+        private static NativeKbShowDelegate _nativeKbShow;
+        private static NativeKbPollDelegate _nativeKbPoll;
+        private static NativeKbIsActiveDelegate _nativeKbIsActive;
+        private static readonly byte[] _nativeKbBuf = new byte[1024];
+
+        private static readonly FieldInfo CcNameBoxField =
+            typeof(CharacterCustomization).GetField("nameBox", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        private static readonly FieldInfo CcFarmBoxField =
+            typeof(CharacterCustomization).GetField("farmnameBox", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        private static readonly FieldInfo CcFavBoxField =
+            typeof(CharacterCustomization).GetField("favThingBox", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        private static readonly FieldInfo TextBoxOnEnterField =
+            typeof(TextBox).GetField("OnEnterPressed", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        private static readonly FieldInfo InputCurrentMouseStateField =
+            typeof(InputState).GetField("_currentMouseState", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        private static FieldInfo _hostVkmActiveField;
+        private static bool _hostVkmResolved;
 
         // Toolbar tap/swipe + ROW quick-switch + Furniture ROT + Weapon SPEC button
         private int _toolbarTouchId = -1;
@@ -262,7 +307,7 @@ namespace SDVMobileControls
         private bool _wasFishNibbling;
         private int _safeLeftPx;
         private int _safeRightPx;
-        private bool _saverFrameParity;
+        private int _saverFrameCounter;
 
         // Safe periodic AutoSave state (default OFF, skips combat/mines/moving)
         private double _lastAutoSaveSec = -1;
@@ -649,6 +694,8 @@ namespace SDVMobileControls
             _interactTouchId = -1;
             _toolPressed = false;
             _interactPressed = false;
+            _prevInteractPressed = false;
+            _suppressActUntilRelease = false;
             _actionPulseXFrames = 0;
             _actionPulseAFrames = 0;
             _holdSweepCooldown = 0;
@@ -759,10 +806,266 @@ namespace SDVMobileControls
 
         private bool IsTextInputMenu(IClickableMenu topMenu)
         {
-            if (topMenu is NamingMenu || topMenu is TitleTextInputMenu)
+            if (topMenu is NamingMenu || topMenu is TitleTextInputMenu || topMenu is CharacterCustomization)
                 return true;
             if (Game1.keyboardDispatcher != null && Game1.keyboardDispatcher.Subscriber != null)
                 return true;
+            return false;
+        }
+
+        private static bool EnsureNativeKbResolved()
+        {
+            if (!_nativeKbResolved)
+            {
+                _nativeKbResolved = true;
+                try
+                {
+                    IntPtr pShow = MobileDarwinDlsym(new IntPtr(-2), "sdv_kb_show");
+                    IntPtr pPoll = MobileDarwinDlsym(new IntPtr(-2), "sdv_kb_poll");
+                    IntPtr pAct = MobileDarwinDlsym(new IntPtr(-2), "sdv_kb_is_active");
+                    if (pShow != IntPtr.Zero && pPoll != IntPtr.Zero)
+                    {
+                        _nativeKbShow = Marshal.GetDelegateForFunctionPointer<NativeKbShowDelegate>(pShow);
+                        _nativeKbPoll = Marshal.GetDelegateForFunctionPointer<NativeKbPollDelegate>(pPoll);
+                        if (pAct != IntPtr.Zero)
+                            _nativeKbIsActive = Marshal.GetDelegateForFunctionPointer<NativeKbIsActiveDelegate>(pAct);
+                    }
+                }
+                catch { }
+            }
+            return _nativeKbShow != null && _nativeKbPoll != null;
+        }
+
+        private static void SetHostVkmActiveFlag(bool paused)
+        {
+            try
+            {
+                if (!_hostVkmResolved)
+                {
+                    _hostVkmResolved = true;
+                    foreach (Assembly asm in AppDomain.CurrentDomain.GetAssemblies())
+                    {
+                        if (asm.GetName().Name == "SDViOS")
+                        {
+                            Type t = asm.GetType("SDViOS.Input.VirtualKeyboardManager", false);
+                            _hostVkmActiveField = t?.GetField("_isKeyboardActive", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                            break;
+                        }
+                    }
+                }
+                _hostVkmActiveField?.SetValue(null, paused);
+            }
+            catch { }
+        }
+
+        private static string GuessKeyboardPromptTitle(IKeyboardSubscriber sub, IClickableMenu topMenu)
+        {
+            if (sub is TextBox tb)
+            {
+                if (topMenu is CharacterCustomization cc)
+                {
+                    try
+                    {
+                        if (ReferenceEquals(tb, CcNameBoxField?.GetValue(cc))) return "Tên nhân vật";
+                        if (ReferenceEquals(tb, CcFarmBoxField?.GetValue(cc))) return "Tên nông trại";
+                        if (ReferenceEquals(tb, CcFavBoxField?.GetValue(cc))) return "Điều bạn yêu thích";
+                    }
+                    catch { }
+                }
+                if (!string.IsNullOrWhiteSpace(tb.TitleText))
+                    return tb.TitleText;
+            }
+            if (topMenu is NamingMenu) return "Nhập tên";
+            return "Nhập chữ";
+        }
+
+        private void TriggerKeyboardSmart(object pad, PadBridge br, IKeyboardSubscriber explicitSub = null, IClickableMenu topMenu = null)
+        {
+            IKeyboardSubscriber target = explicitSub ?? Game1.keyboardDispatcher?.Subscriber;
+
+            // On CharacterCustomization, if user tapped the manual KEY pill before tapping a field, pick first empty box (or nameBox)!
+            if (target == null && topMenu is CharacterCustomization cc)
+            {
+                try
+                {
+                    var nb = CcNameBoxField?.GetValue(cc) as TextBox;
+                    var fb = CcFarmBoxField?.GetValue(cc) as TextBox;
+                    var vb = CcFavBoxField?.GetValue(cc) as TextBox;
+                    if (nb != null && string.IsNullOrWhiteSpace(nb.Text)) target = nb;
+                    else if (fb != null && string.IsNullOrWhiteSpace(fb.Text)) target = fb;
+                    else if (vb != null && string.IsNullOrWhiteSpace(vb.Text)) target = vb;
+                    else target = nb ?? fb ?? vb;
+                    if (target is TextBox chosen)
+                    {
+                        if (nb != null) nb.Selected = ReferenceEquals(nb, chosen);
+                        if (fb != null) fb.Selected = ReferenceEquals(fb, chosen);
+                        if (vb != null) vb.Selected = ReferenceEquals(vb, chosen);
+                        if (Game1.keyboardDispatcher != null) Game1.keyboardDispatcher.Subscriber = chosen;
+                    }
+                }
+                catch { }
+            }
+
+            if (EnsureNativeKbResolved())
+            {
+                string title = GuessKeyboardPromptTitle(target, topMenu);
+                string initial = "";
+                if (target is TextBox tb)
+                {
+                    initial = tb.Text ?? "";
+                }
+                else if (target != null)
+                {
+                    try
+                    {
+                        var tp = target.GetType().GetProperty("Text", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                        initial = (tp?.GetValue(target) as string) ?? "";
+                    }
+                    catch { }
+                }
+
+                // Prevent legacy VirtualKeyboardManager from racing or wedging _isKeyboardActive on iOS 26/27!
+                SetHostVkmActiveFlag(true);
+                int ok = 0;
+                try { ok = _nativeKbShow(title, initial); } catch { ok = 0; }
+                if (ok != 0)
+                {
+                    _nativeKbTarget = target;
+                    _nativeKbActive = true;
+                    _lastKbSubscriber = target;
+                    return;
+                }
+                SetHostVkmActiveFlag(false);
+            }
+
+            br?.TriggerVirtualKeyboard(pad);
+        }
+
+        private bool PollNativeKeyboardResult(object pad, PadBridge br)
+        {
+            if (!_nativeKbActive && !(_nativeKbIsActive != null && _nativeKbIsActive() != 0))
+                return false;
+            if (!EnsureNativeKbResolved())
+            {
+                _nativeKbActive = false;
+                return false;
+            }
+
+            int st = 0;
+            try { st = _nativeKbPoll(_nativeKbBuf, _nativeKbBuf.Length); } catch { st = 0; }
+
+            if (st == 1)
+            {
+                _nativeKbActive = true;
+                SetHostVkmActiveFlag(true);
+                return true; // Native iOS keyboard alert is currently open
+            }
+
+            _nativeKbActive = false;
+            SetHostVkmActiveFlag(false);
+            IKeyboardSubscriber target = _nativeKbTarget ?? Game1.keyboardDispatcher?.Subscriber;
+            _nativeKbTarget = null;
+
+            if (st == 2)
+            {
+                int len = 0;
+                while (len < _nativeKbBuf.Length && _nativeKbBuf[len] != 0) len++;
+                string text = len > 0 ? Encoding.UTF8.GetString(_nativeKbBuf, 0, len) : string.Empty;
+                ApplyNativeKeyboardText(target, text);
+            }
+            else if (st == 3)
+            {
+                try
+                {
+                    if (target != null) target.Selected = false;
+                    if (Game1.keyboardDispatcher != null && ReferenceEquals(Game1.keyboardDispatcher.Subscriber, target))
+                        Game1.keyboardDispatcher.Subscriber = null;
+                }
+                catch { }
+            }
+            _lastAutoKbSec = Environment.TickCount64 / 1000.0;
+            br?.ResetVirtualPad(pad);
+            return false;
+        }
+
+        private static void ApplyNativeKeyboardText(IKeyboardSubscriber target, string text)
+        {
+            try
+            {
+                if (target is TextBox tb)
+                {
+                    tb.Text = text ?? string.Empty;
+                    tb.Selected = false;
+                    if (Game1.keyboardDispatcher != null && ReferenceEquals(Game1.keyboardDispatcher.Subscriber, tb))
+                        Game1.keyboardDispatcher.Subscriber = null;
+                    try
+                    {
+                        if (TextBoxOnEnterField?.GetValue(tb) is Delegate del)
+                            del.DynamicInvoke(tb);
+                    }
+                    catch { }
+                    return;
+                }
+                if (target != null)
+                {
+                    var tp = target.GetType().GetProperty("Text", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (tp != null && tp.CanWrite)
+                    {
+                        tp.SetValue(target, text ?? string.Empty);
+                    }
+                    else if (!string.IsNullOrEmpty(text))
+                    {
+                        target.RecieveTextInput(text);
+                    }
+                    target.Selected = false;
+                    if (Game1.keyboardDispatcher != null && ReferenceEquals(Game1.keyboardDispatcher.Subscriber, target))
+                        Game1.keyboardDispatcher.Subscriber = null;
+                    try
+                    {
+                        var ef = target.GetType().GetField("OnEnterPressed", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                        if (ef?.GetValue(target) is Delegate del)
+                            del.DynamicInvoke(target);
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+        }
+
+        private bool TryTapCharacterCustomizationTextBox(object pad, PadBridge br, CharacterCustomization cc, Point uiPt)
+        {
+            if (cc == null) return false;
+            try
+            {
+                var nb = CcNameBoxField?.GetValue(cc) as TextBox;
+                var fb = CcFarmBoxField?.GetValue(cc) as TextBox;
+                var vb = CcFavBoxField?.GetValue(cc) as TextBox;
+                TextBox[] boxes = new[] { nb, fb, vb };
+                ClickableComponent[] ccs = new[] { cc.nameBoxCC, cc.farmnameBoxCC, cc.favThingBoxCC };
+
+                for (int i = 0; i < boxes.Length; i++)
+                {
+                    TextBox box = boxes[i];
+                    if (box == null) continue;
+                    Rectangle r = new Rectangle(box.X - 10, box.Y - 10, box.Width + 20, box.Height + 20);
+                    bool hit = r.Contains(uiPt);
+                    if (!hit && ccs[i] != null)
+                    {
+                        Rectangle cr = ccs[i].bounds;
+                        hit = new Rectangle(cr.X - 10, cr.Y - 10, cr.Width + 20, cr.Height + 20).Contains(uiPt);
+                    }
+                    if (!hit) continue;
+
+                    for (int j = 0; j < boxes.Length; j++)
+                        if (boxes[j] != null) boxes[j].Selected = (j == i);
+                    if (Game1.keyboardDispatcher != null)
+                        Game1.keyboardDispatcher.Subscriber = box;
+                    try { Game1.playSound("smallSelect"); } catch { }
+                    TriggerKeyboardSmart(pad, br, box, cc);
+                    return true;
+                }
+            }
+            catch { }
             return false;
         }
 
@@ -786,8 +1089,10 @@ namespace SDVMobileControls
             _modTouchState = ModTouchState.None;
         }
 
-        private void PollAutoKeyboard(object pad, PadBridge br, double nowSec)
+        private void PollAutoKeyboard(object pad, PadBridge br, double nowSec, IClickableMenu topMenu = null)
         {
+            if (PollNativeKeyboardResult(pad, br))
+                return;
             if (!_cfg.AutoKeyboard)
                 return;
             IKeyboardSubscriber cur = Game1.keyboardDispatcher?.Subscriber;
@@ -799,10 +1104,13 @@ namespace SDVMobileControls
             if (!ReferenceEquals(cur, _lastKbSubscriber))
             {
                 _lastKbSubscriber = cur;
+                // On CharacterCustomization, wait for explicit tap on Name/Farm/Favorite box (or KEY button) so keyboard doesn't pop before user looks at the screen!
+                if (topMenu is CharacterCustomization)
+                    return;
                 if ((nowSec - _lastAutoKbSec) >= 0.45)
                 {
                     _lastAutoKbSec = nowSec;
-                    br?.TriggerVirtualKeyboard(pad);
+                    TriggerKeyboardSmart(pad, br, cur, topMenu);
                 }
             }
         }
@@ -957,24 +1265,28 @@ namespace SDVMobileControls
             // 4. Safe Area Notch/Dynamic Island padding for DayTimeMoneyBox (live bidirectional!)
             ApplySafeAreaToDayTimeMoneyBox();
 
-            // 5. Optional Battery Saver 30 FPS render cap (preserves 100% 60Hz logic speed; auto-suspends for Fishing cast bar/BobberBar/minigames/fades!)
+            // 5. Optional Battery Saver FPS render cap (1 = 30 FPS [draw 1/2], 2 = 45 FPS [draw 3/4]; preserves 100% 60Hz logic speed; auto-suspends for Fishing/minigames/fades!)
             bool fishingCastAnim = Context.IsWorldReady && Game1.player?.CurrentTool is FishingRod frCast && (frCast.isTimingCast || frCast.isCasting);
-            if (_cfg.BatterySaver30Fps &&
+            int ecoMode = _cfg.BatterySaverFpsMode;
+            if (ecoMode > 0 &&
                 !_editMode && !_saveMenuOpen &&
                 !fishingCastAnim &&
                 Game1.currentMinigame == null &&
                 !(Game1.activeClickableMenu is BobberBar) &&
                 !Game1.fadeToBlack)
             {
-                _saverFrameParity = !_saverFrameParity;
-                if (_saverFrameParity)
+                _saverFrameCounter++;
+                bool skipDraw = (ecoMode == 1)
+                    ? ((_saverFrameCounter & 1) == 1)
+                    : ((_saverFrameCounter & 3) == 0); // 45 FPS: skip 1 of every 4 render frames (draws 3/4 = 45 FPS)
+                if (skipDraw)
                 {
                     try { GameRunner.instance?.SuppressDraw(); } catch { }
                 }
             }
             else
             {
-                _saverFrameParity = false;
+                _saverFrameCounter = 0;
             }
         }
 
@@ -1384,6 +1696,159 @@ namespace SDVMobileControls
             return null;
         }
 
+        private bool TryDirectPetAnimalOrPet(GameLocation loc, Farmer who, Vector2? tapWorldPos, bool onlyIfNoBlockingObject)
+        {
+            if (loc == null || who == null || !who.CanMove || who.isRidingHorse() ||
+                Game1.activeClickableMenu != null || Game1.dialogueUp || Game1.eventUp || Game1.fadeToBlack)
+                return false;
+
+            // Never steal Hay placement on a Barn/Coop trough or Hat/ButterflyPowder on Pets
+            string activeQid = who.ActiveObject?.QualifiedItemId;
+            if (onlyIfNoBlockingObject)
+            {
+                try
+                {
+                    Vector2 grabTile = who.GetGrabTile();
+                    if (loc.objects != null && loc.objects.TryGetValue(grabTile, out StardewValley.Object gObj) && gObj != null &&
+                        (gObj is Chest || gObj.bigCraftable.Value || gObj.readyForHarvest.Value))
+                        return false;
+                    if (activeQid == "(O)178" && loc is AnimalHouse &&
+                        loc.doesTileHaveProperty((int)grabTile.X, (int)grabTile.Y, "Trough", "Back") != null)
+                        return false;
+                    if (loc.doesTileHaveProperty((int)grabTile.X, (int)grabTile.Y, "Action", "Buildings") != null)
+                        return false;
+                    Point gp = new Point((int)grabTile.X, (int)grabTile.Y);
+                    if (loc.doors != null && loc.doors.ContainsKey(gp))
+                        return false;
+                    if (loc.characters != null)
+                    {
+                        Rectangle grabRect = new Rectangle(gp.X * 64, gp.Y * 64, 64, 64);
+                        foreach (NPC n in loc.characters)
+                        {
+                            if (n != null && !(n is StardewValley.Characters.Pet) && n.IsVillager && n.GetBoundingBox().Intersects(grabRect))
+                                return false;
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            Vector2 playerCenter = who.GetBoundingBox().Center.ToVector2();
+
+            // 1. Check unpetted FarmAnimals (supports large 2x2 barn animals, diagonal reach, animals standing on eggs/truffles/hay,
+            //    and clears stale non-heart emotes like Zzz so the heart emote ALWAYS renders cleanly!)
+            try
+            {
+                if (loc.Animals != null && loc.Animals.Length > 0)
+                {
+                    FarmAnimal bestAnimal = null;
+                    float bestScore = float.MaxValue;
+                    Vector2 grabCenter = who.GetGrabTile() * 64f + new Vector2(32f, 32f);
+
+                    foreach (FarmAnimal animal in loc.Animals.Values)
+                    {
+                        if (animal == null || animal.wasPet.Value)
+                            continue;
+                        if (Game1.timeOfDay >= 1900 && !animal.isMoving())
+                            continue;
+
+                        Rectangle bb = animal.GetBoundingBox();
+                        Vector2 ac = bb.Center.ToVector2();
+                        float distToPlayer = Vector2.Distance(playerCenter, ac);
+                        if (distToPlayer > (tapWorldPos.HasValue ? 132f : 112f))
+                            continue;
+
+                        if (tapWorldPos.HasValue)
+                        {
+                            Rectangle petBox = animal.GetCursorPetBoundingBox();
+                            petBox.Inflate(20, 20);
+                            bool hitBox = bb.Contains((int)tapWorldPos.Value.X, (int)tapWorldPos.Value.Y) ||
+                                          petBox.Contains((int)tapWorldPos.Value.X, (int)tapWorldPos.Value.Y);
+                            float tapDist = Vector2.Distance(ac, tapWorldPos.Value);
+                            if (!hitBox && tapDist > 88f)
+                                continue;
+                            float score = hitBox ? tapDist * 0.25f : tapDist;
+                            if (score < bestScore) { bestScore = score; bestAnimal = animal; }
+                        }
+                        else
+                        {
+                            float grabDist = Vector2.Distance(ac, grabCenter);
+                            if (grabDist > 88f && distToPlayer > 84f)
+                                continue;
+                            if (grabDist < bestScore) { bestScore = grabDist; bestAnimal = animal; }
+                        }
+                    }
+
+                    if (bestAnimal != null)
+                    {
+                        // Clear any non-heart ambient emote (e.g. Zzz) that would silently block Character.doEmote(20)
+                        if (bestAnimal.IsEmoting && bestAnimal.CurrentEmote != 20)
+                            bestAnimal.IsEmoting = false;
+                        bestAnimal.pet(who, false);
+                        return true;
+                    }
+                }
+            }
+            catch { }
+
+            // 2. Check unpetted Dog / Cat Pet (StardewValley.Characters.Pet)
+            try
+            {
+                if (loc.characters != null && !(who.CurrentItem is Hat) && activeQid != "(O)ButterflyPowder")
+                {
+                    int today = Game1.Date != null ? Game1.Date.TotalDays : -1;
+                    long uid = who.UniqueMultiplayerID;
+                    Vector2 grabCenter = who.GetGrabTile() * 64f + new Vector2(32f, 32f);
+                    StardewValley.Characters.Pet bestPet = null;
+                    float bestScore = float.MaxValue;
+
+                    foreach (NPC npc in loc.characters)
+                    {
+                        if (!(npc is StardewValley.Characters.Pet pet))
+                            continue;
+                        if (today >= 0 && pet.lastPetDay != null && pet.lastPetDay.TryGetValue(uid, out int lastDay) && lastDay == today)
+                            continue;
+
+                        Rectangle bb = pet.GetBoundingBox();
+                        Vector2 pc = bb.Center.ToVector2();
+                        float distToPlayer = Vector2.Distance(playerCenter, pc);
+                        if (distToPlayer > (tapWorldPos.HasValue ? 128f : 104f))
+                            continue;
+
+                        if (tapWorldPos.HasValue)
+                        {
+                            Rectangle pSprite = new Rectangle(bb.X - 18, bb.Y - 48, bb.Width + 36, bb.Height + 60);
+                            bool hitBox = pSprite.Contains((int)tapWorldPos.Value.X, (int)tapWorldPos.Value.Y);
+                            float tapDist = Vector2.Distance(pc, tapWorldPos.Value);
+                            if (!hitBox && tapDist > 80f)
+                                continue;
+                            float score = hitBox ? tapDist * 0.25f : tapDist;
+                            if (score < bestScore) { bestScore = score; bestPet = pet; }
+                        }
+                        else
+                        {
+                            float grabDist = Vector2.Distance(pc, grabCenter);
+                            if (grabDist > 84f && distToPlayer > 78f)
+                                continue;
+                            if (grabDist < bestScore) { bestScore = grabDist; bestPet = pet; }
+                        }
+                    }
+
+                    if (bestPet != null)
+                    {
+                        if (bestPet.IsEmoting && bestPet.CurrentEmote != 20)
+                            bestPet.IsEmoting = false;
+                        who.faceGeneralDirection(bestPet.Position);
+                        if (bestPet.checkAction(who, loc))
+                            return true;
+                    }
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
         private bool TryDirectAdjacentTileTap(Vector2 vp)
         {
             Farmer who = Game1.player;
@@ -1391,6 +1856,10 @@ namespace SDVMobileControls
             if (who == null || loc == null) return false;
 
             Vector2 worldPos = ViewportToWorld(vp);
+            // Allow tapping directly on any nearby unpetted FarmAnimal / Pet (even upper body of 2x2 Cows/Pigs!)
+            if (TryDirectPetAnimalOrPet(loc, who, worldPos, onlyIfNoBlockingObject: false))
+                return true;
+
             Point tappedTile = new Point((int)Math.Floor(worldPos.X / 64f), (int)Math.Floor(worldPos.Y / 64f));
             Point playerTile = who.TilePoint;
             int cheb = Math.Max(Math.Abs(playerTile.X - tappedTile.X), Math.Abs(playerTile.Y - tappedTile.Y));
@@ -1399,7 +1868,8 @@ namespace SDVMobileControls
             TileIntent intent = AutoToolAndCombat.InspectTile(loc, tappedTile, who, _cfg.AutoTool);
             if (intent.Kind != TileActionKind.None)
             {
-                TriggerTileIntent(who, tappedTile, intent);
+                Point actionTile = intent.HasResolvedTile ? intent.ResolvedTile : tappedTile;
+                TriggerTileIntent(who, actionTile, intent);
                 return true;
             }
 
@@ -1639,26 +2109,19 @@ namespace SDVMobileControls
                 return true;
             }
 
-            // CRITICAL: Return BEFORE calling TouchPanel.GetState() for vanilla TitleMenu screens!
-            // Exception: If a 3rd-party Mod Menu (e.g. GenericModConfigMenu!) is opened as TitleMenu.subMenu, handle it cleanly!
+            // Handle TitleMenu cleanly WITHOUT falling back to legacy TouchVirtualPad (whose invisible bottom-left
+            // joystick deadzone swallowed the GMCM gear button on iPad & iPhone, and hid CharacterCustomization keyboard!).
             IClickableMenu topMenu = GetTopmostMenu(rawMenu);
             bool isThirdParty = IsThirdPartyModMenu(topMenu);
-            if (rawMenu is TitleMenu && !isThirdParty)
-            {
-                ResetMenuTapState();
-                _invShop.Reset();
-                _lastMenuMouseRaw = null;
-                _hasCarpenterPreview = false;
-                return false;
-            }
+            bool isRootTitleScreen = (rawMenu is TitleMenu && TitleMenu.subMenu == null);
 
             if (!RefreshViewport())
                 return false;
             ComputeLayout();
 
             bool showInvCtx = IsInventoryContextMenu(topMenu);
-            bool showKeyOnly = !showInvCtx && IsTextInputMenu(topMenu);
-            bool showEscOnly = !showInvCtx && !showKeyOnly && IsEscOnlyMenu(topMenu);
+            bool showKeyOnly = !isRootTitleScreen && !showInvCtx && IsTextInputMenu(topMenu);
+            bool showEscOnly = !isRootTitleScreen && !showInvCtx && !showKeyOnly && IsEscOnlyMenu(topMenu);
             bool allowCustomKeys = AllowCustomKeysInCurrentMenu() && !isThirdParty && _cfg.CustomKeys.Count > 0;
 
             // Single TouchPanel.GetState() read per frame — from here on, ALWAYS return true!
@@ -1674,7 +2137,22 @@ namespace SDVMobileControls
                 return true;
             }
             double nowSec = gameTime != null ? gameTime.TotalGameTime.TotalSeconds : Environment.TickCount64 / 1000.0;
-            PollAutoKeyboard(pad, br, nowSec);
+            if (PollNativeKeyboardResult(pad, br))
+            {
+                // Keep game mouse neutral while native iOS 14-27 keyboard alert is presented
+                ApplyToPad(pad, Vector2.Zero, false, false, false);
+                return true;
+            }
+            PollAutoKeyboard(pad, br, nowSec, topMenu);
+
+            // Root Title Screen (NEW / LOAD / CO-OP / EXIT / Bottom-Left GMCM Gear Button / Sound / Language):
+            // 100% zero-deadzone touch-to-mouse so GMCM's SMAPI ButtonPressed(MouseLeft) fires on the very first tap!
+            if (isRootTitleScreen)
+            {
+                _invShop.Reset();
+                UpdateTitleScreenTouches(pad, touches, nowSec);
+                return true;
+            }
 
             if (!ReferenceEquals(_junimoHoverMenu, topMenu as JunimoNoteMenu))
             {
@@ -1788,14 +2266,14 @@ namespace SDVMobileControls
                             if (_ctxX1Rect.Contains(pt)) { br?.ToggleSingleItemMode(pad); _ctxTouchId = tl.Id; sawCtx = true; try { Game1.playSound("smallSelect"); } catch { } continue; }
                             if (_ctxHalfRect.Contains(pt)) { br?.ToggleHalfStackMode(pad); _ctxTouchId = tl.Id; sawCtx = true; try { Game1.playSound("smallSelect"); } catch { } continue; }
                             if (_ctxXferRect.Contains(pt)) { br?.ToggleQuickTransferMode(pad); _ctxTouchId = tl.Id; sawCtx = true; try { Game1.playSound("smallSelect"); } catch { } continue; }
-                            if (_ctxKeyRect.Contains(pt)) { br?.TriggerVirtualKeyboard(pad); _ctxTouchId = tl.Id; sawCtx = true; continue; }
+                            if (_ctxKeyRect.Contains(pt)) { TriggerKeyboardSmart(pad, br, null, topMenu); _ctxTouchId = tl.Id; sawCtx = true; continue; }
                             if (_ctxEscRect.Contains(pt)) { _invShop.Reset(); CloseTopmostMenu(rawMenu, topMenu); _ctxTouchId = tl.Id; sawCtx = true; continue; }
                         }
                         else if (showKeyOnly)
                         {
                             if (_ctxX1Rect.Contains(pt))
                             {
-                                br?.TriggerVirtualKeyboard(pad);
+                                TriggerKeyboardSmart(pad, br, null, topMenu);
                                 _ctxTouchId = tl.Id;
                                 sawCtx = true;
                                 continue;
@@ -2030,6 +2508,10 @@ namespace SDVMobileControls
                         {
                             // Expanded touch target for Mine Elevator floor buttons!
                         }
+                        else if (topMenu is CharacterCustomization ccTap && TryTapCharacterCustomizationTextBox(pad, br, ccTap, ui))
+                        {
+                            // Direct tap on Name / Farm Name / Favorite Thing box -> select & open native iOS 14-27 keyboard immediately!
+                        }
                         else if (_cfg.SafeDialogueAndTooltip && topMenu is DialogueBox db && db.isQuestion && !db.transitioning && db.safetyTimer <= 0 && db.responseCC != null && db.responseCC.Count > 0 && TrySafeDialogueResponseTap(db, ui))
                         {
                             // 1st tap highlights choice, 2nd tap confirms cleanly (prevents Heart Event mis-taps!)
@@ -2053,6 +2535,81 @@ namespace SDVMobileControls
             // Keep SimulatedMousePosition synced in RAW BackBuffer pixels (LeftDown=false so Game1.updateActiveMenu doesn't double-click vanilla menus!)
             EnsureBridge(pad)?.ApplyInputWithMouse(pad, Vector2.Zero, false, false, false, _lastMenuMouseRaw, false, false, _rawW, _rawH);
             return true;
+        }
+
+        /// <summary>
+        /// Zero-deadzone touch-to-mouse dispatcher for Stardew Valley's root TitleMenu screen.
+        /// Fires a crisp 2-frame TRUE Simulated Mouse Left-Click at exact raw BackBuffer coordinates
+        /// so BOTH vanilla TitleMenu buttons (NEW / LOAD / CO-OP / EXIT / Sound / Language) AND
+        /// SMAPI mods using ButtonPressed(SButton.MouseLeft) (like Generic Mod Config Menu's bottom-left gear!) work 100%.
+        /// </summary>
+        private void UpdateTitleScreenTouches(object pad, TouchCollection touches, double nowSec)
+        {
+            Point? outPos = _titleClickRawPos ?? _lastMenuMouseRaw;
+            bool outLeft = false;
+
+            if (_titleClickPulseFrames > 0)
+            {
+                _titleClickPulseFrames--;
+                outLeft = true;
+            }
+
+            bool sawTracked = false;
+            for (int i = 0; i < touches.Count; i++)
+            {
+                TouchLocation tl = touches[i];
+                Vector2 vp = MapRawToViewport(tl.Position);
+                Point rawPt = ViewportToRaw(vp);
+
+                if (tl.State == TouchLocationState.Pressed && _menuTapTouchId < 0)
+                {
+                    _menuTapTouchId = tl.Id;
+                    _menuTapStartVp = vp;
+                    _menuTapStartSec = nowSec;
+                    _lastMenuMouseRaw = rawPt;
+                    _titleClickRawPos = rawPt;
+                    outPos = rawPt;
+                    sawTracked = true;
+                }
+                else if (tl.State == TouchLocationState.Moved && tl.Id == _menuTapTouchId)
+                {
+                    _lastMenuMouseRaw = rawPt;
+                    outPos = rawPt;
+                    sawTracked = true;
+                }
+                else if ((tl.State == TouchLocationState.Released || tl.State == TouchLocationState.Invalid) && tl.Id == _menuTapTouchId)
+                {
+                    sawTracked = true;
+                    Point clickRaw = ViewportToRaw(_menuTapStartVp);
+                    _lastMenuMouseRaw = clickRaw;
+                    _titleClickRawPos = clickRaw;
+                    _titleClickPulseFrames = 1; // Frame 0 (this frame) + Frame 1 -> guarantees Released->Pressed edge for SMAPI & TitleMenu!
+                    outPos = clickRaw;
+                    outLeft = true;
+                    ResetMenuTapState();
+                }
+            }
+
+            if (!sawTracked && _menuTapTouchId >= 0)
+            {
+                // Fast tap where iOS dropped Released between frames
+                if ((nowSec - _menuTapStartSec) < 0.40)
+                {
+                    Point clickRaw = ViewportToRaw(_menuTapStartVp);
+                    _lastMenuMouseRaw = clickRaw;
+                    _titleClickRawPos = clickRaw;
+                    _titleClickPulseFrames = 1;
+                    outPos = clickRaw;
+                    outLeft = true;
+                }
+                ResetMenuTapState();
+            }
+
+            if (outPos.HasValue)
+            {
+                try { Game1.lastCursorMotionWasMouse = true; } catch { }
+            }
+            EnsureBridge(pad)?.ApplyInputWithMouse(pad, Vector2.Zero, false, false, false, outPos, outLeft, false, _rawW, _rawH);
         }
 
         private static void CloseTopmostMenu(IClickableMenu rawMenu, IClickableMenu topMenu)
@@ -2449,7 +3006,7 @@ namespace SDVMobileControls
 
             IClickableMenu topMenu = GetTopmostMenu(rawMenu);
             bool isThirdParty = IsThirdPartyModMenu(topMenu);
-            if (rawMenu is BobberBar || (rawMenu is TitleMenu && !isThirdParty))
+            if (rawMenu is BobberBar || (rawMenu is TitleMenu && TitleMenu.subMenu == null))
                 return;
 
             bool showInvCtx = IsInventoryContextMenu(topMenu);
@@ -2602,7 +3159,12 @@ namespace SDVMobileControls
             if (_toolRippleAlpha > 0f) _toolRippleAlpha = Math.Max(0f, _toolRippleAlpha - 0.12f);
             if (_interactRippleAlpha > 0f) _interactRippleAlpha = Math.Max(0f, _interactRippleAlpha - 0.12f);
 
-            PollAutoKeyboard(pad, br, nowSec);
+            if (PollNativeKeyboardResult(pad, br))
+            {
+                ApplyToPad(pad, Vector2.Zero, false, false, false);
+                return;
+            }
+            PollAutoKeyboard(pad, br, nowSec, null);
             TouchCollection touches = TouchPanel.GetState();
             PollGamepadAutoHide(touches.Count);
 
@@ -2806,7 +3368,7 @@ namespace SDVMobileControls
                         }
                         if (_btnKeyRect.Contains(vpPt))
                         {
-                            br?.TriggerVirtualKeyboard(pad);
+                            TriggerKeyboardSmart(pad, br, null, null);
                             continue;
                         }
                         if (!_btnEmoteRect.IsEmpty && _btnEmoteRect.Contains(vpPt))
@@ -2837,7 +3399,7 @@ namespace SDVMobileControls
                             try
                             {
                                 Game1.chatBox?.activate();
-                                br?.TriggerVirtualKeyboard(pad);
+                                TriggerKeyboardSmart(pad, br, Game1.keyboardDispatcher?.Subscriber, null);
                             }
                             catch { }
                             ClearPath();
@@ -2973,6 +3535,7 @@ namespace SDVMobileControls
                         sawSlingshot = true;
                         _slingshotRawPos = tl.Position;
                         _slingshotVpPos = vp;
+                        _slingshotNorm = new Vector2(vp.X / Math.Max(1f, _vpW), vp.Y / Math.Max(1f, _vpH));
                     }
                     else
                     {
@@ -3157,13 +3720,14 @@ namespace SDVMobileControls
                     bool joyHalf = _cfg.LeftHandedMobile ? (vp.X > _vpW * 0.56f) : (vp.X < _vpW * 0.44f);
                     bool inJoyZoneCheck = useJoy && (IsInvisibleBarMode
                         ? _invJoyRect.Contains(vpPt)
-                        : (Vector2.Distance(vp, _visJoyCenter) <= _visJoyRadius * 1.65f || joyHalf));
+                        : (Vector2.Distance(vp, _visJoyCenter) <= _visJoyRadius * 2.0f || (joyHalf && vp.Y >= _vpH * 0.35f)));
 
                     if (holdingSlingshot && _slingshotTouchId < 0 && !inJoyZoneCheck)
                     {
                         _slingshotTouchId = tl.Id;
                         _slingshotRawPos = tl.Position;
                         _slingshotVpPos = vp;
+                        _slingshotNorm = new Vector2(vp.X / Math.Max(1f, _vpW), vp.Y / Math.Max(1f, _vpH));
                         sawSlingshot = true;
                         ClearPath();
                         continue;
@@ -3207,13 +3771,28 @@ namespace SDVMobileControls
                         _joyTouchId = tl.Id;
                         _joyTouchStart = vp;
                         _joyTouchStartTime = nowSec;
-                        _joyOrigin = (!IsInvisibleBarMode && Vector2.Distance(vp, _visJoyCenter) <= _visJoyRadius * 1.45f)
-                            ? _visJoyCenter
-                            : vp;
-                        _joyKnob = vp;
+                        if (!IsInvisibleBarMode)
+                        {
+                            // Visible 2-Button Pixel mode: ALWAYS stay firmly anchored at _visJoyCenter (never jump to bottom edge!)
+                            _joyOrigin = _visJoyCenter;
+                        }
+                        else
+                        {
+                            // Floating invisible joystick: clamp cleanly inside screen edges so ring never clips off bottom/sides
+                            float jr = _activeJoyRadius;
+                            float cx = Math.Clamp(vp.X, jr + 10f, Math.Max(jr + 10f, _vpW - jr - 10f));
+                            float cy = Math.Clamp(vp.Y, jr + 10f, Math.Max(jr + 10f, _vpH - jr - 10f));
+                            _joyOrigin = new Vector2(cx, cy);
+                        }
+                        _joyOriginNorm = new Vector2(_joyOrigin.X / Math.Max(1f, _vpW), _joyOrigin.Y / Math.Max(1f, _vpH));
+                        _joyKnob = _joyOrigin;
+                        _joyKnobNorm = _joyOriginNorm;
                         _joyActivated = !isHybrid;
                         if (_joyActivated)
+                        {
                             ClearPath();
+                            stickVec = ComputeStick(vp);
+                        }
                         sawJoy = true;
                         continue;
                     }
@@ -3417,9 +3996,20 @@ namespace SDVMobileControls
                 }
             }
 
-            // --- 4. Action Pulses + Auto-Repeat 1-tap chop/mine until broken ---
+            // --- 4. Action Pulses + Direct Animal/Pet Petting Assist + Auto-Repeat 1-tap chop/mine until broken ---
+            bool freshActPress = _interactPressed && !_prevInteractPressed;
+            _prevInteractPressed = _interactPressed;
+            if (!_interactPressed)
+                _suppressActUntilRelease = false;
+            if (freshActPress && Game1.currentLocation != null && Game1.player != null &&
+                TryDirectPetAnimalOrPet(Game1.currentLocation, Game1.player, null, onlyIfNoBlockingObject: true))
+            {
+                // Suppress raw ButtonA until release so petting an animal NEVER double-opens AnimalQueryMenu on the same tap!
+                _suppressActUntilRelease = true;
+            }
+
             bool fireX = _toolPressed || sawSlingshot;
-            bool fireA = _interactPressed;
+            bool fireA = _interactPressed && !_suppressActUntilRelease;
             if (_actionPulseXFrames > 0) { _actionPulseXFrames--; fireX = true; }
             if (_actionPulseAFrames > 0) { _actionPulseAFrames--; fireA = true; }
 
@@ -4226,21 +4816,33 @@ namespace SDVMobileControls
 
         private Vector2 ComputeStick(Vector2 curVp)
         {
+            if (!IsInvisibleBarMode)
+            {
+                _joyOrigin = _visJoyCenter;
+                _joyOriginNorm = new Vector2(_joyOrigin.X / Math.Max(1f, _vpW), _joyOrigin.Y / Math.Max(1f, _vpH));
+            }
+            else
+            {
+                _joyOrigin = new Vector2(_joyOriginNorm.X * _vpW, _joyOriginNorm.Y * _vpH);
+            }
             Vector2 delta = curVp - _joyOrigin;
             float dist = delta.Length();
             float dz = Math.Clamp(_cfg.JoyDeadzone, 0.05f, 0.25f);
             if (dist < _activeJoyRadius * dz)
             {
                 _joyKnob = curVp;
+                _joyKnobNorm = new Vector2(_joyKnob.X / Math.Max(1f, _vpW), _joyKnob.Y / Math.Max(1f, _vpH));
                 return Vector2.Zero;
             }
             Vector2 dir = delta / Math.Max(0.0001f, dist);
             if (dist > _activeJoyRadius)
             {
                 _joyKnob = _joyOrigin + dir * _activeJoyRadius;
+                _joyKnobNorm = new Vector2(_joyKnob.X / Math.Max(1f, _vpW), _joyKnob.Y / Math.Max(1f, _vpH));
                 return dir;
             }
             _joyKnob = curVp;
+            _joyKnobNorm = new Vector2(_joyKnob.X / Math.Max(1f, _vpW), _joyKnob.Y / Math.Max(1f, _vpH));
             // Remap [dz .. 1.0] -> [0.42 .. 1.0] so even a gentle 45-degree diagonal pull (0.42 * 0.707 = 0.297 > 0.25)
             // ALWAYS clears SDViOSTouchControls' 0.25 DPad threshold on both axes without standing still!
             float t = Math.Clamp((dist / _activeJoyRadius - dz) / Math.Max(0.01f, 1.0f - dz), 0f, 1f);
@@ -4904,14 +5506,48 @@ namespace SDVMobileControls
                     Game1.activeClickableMenu == null &&
                     !Game1.dialogueUp && !Game1.eventUp && !Game1.fadeToBlack)
                 {
+                    // Prioritize direct petting of unpetted FarmAnimal / Pet at target tile (works even on eggs/truffles/hay!)
+                    handled = TryDirectPetAnimalOrPet(loc, who, new Vector2(tile.X * 64f + 32f, tile.Y * 64f + 32f), onlyIfNoBlockingObject: false);
+                }
+                if (!handled && loc != null &&
+                    Game1.activeClickableMenu == null &&
+                    !Game1.dialogueUp && !Game1.eventUp && !Game1.fadeToBlack)
+                {
                     ModEntry.SynthesizingTapAction = true;
+                    MouseState savedOldMouse = Game1.oldMouseState;
+                    MouseState savedCurMouse = default;
+                    bool patchedMouseState = false;
                     try
                     {
+                        // Zero-Harmony native right-click synthesis: ensures Game1.didPlayerJustRightClick() returns true
+                        // even on 0% JIT where 0Harmony.dll is a no-op! Fixes ShippingBin, FishPond, Furniture, Well, etc.
+                        if (Game1.input != null && InputCurrentMouseStateField != null)
+                        {
+                            savedCurMouse = Game1.input.GetMouseState();
+                            Game1.oldMouseState = new MouseState(
+                                savedOldMouse.X, savedOldMouse.Y, savedOldMouse.ScrollWheelValue,
+                                savedOldMouse.LeftButton, savedOldMouse.MiddleButton, ButtonState.Released,
+                                savedOldMouse.XButton1, savedOldMouse.XButton2);
+                            InputCurrentMouseStateField.SetValue(Game1.input, new MouseState(
+                                savedCurMouse.X, savedCurMouse.Y, savedCurMouse.ScrollWheelValue,
+                                savedCurMouse.LeftButton, savedCurMouse.MiddleButton, ButtonState.Pressed,
+                                savedCurMouse.XButton1, savedCurMouse.XButton2));
+                            patchedMouseState = true;
+                        }
                         handled = Game1.tryToCheckAt(new Vector2(tile.X, tile.Y), who);
                     }
                     catch { }
                     finally
                     {
+                        if (patchedMouseState && Game1.input != null && InputCurrentMouseStateField != null)
+                        {
+                            try
+                            {
+                                Game1.oldMouseState = savedOldMouse;
+                                InputCurrentMouseStateField.SetValue(Game1.input, savedCurMouse);
+                            }
+                            catch { }
+                        }
                         ModEntry.SynthesizingTapAction = false;
                     }
 
@@ -5314,11 +5950,21 @@ namespace SDVMobileControls
             }
 
             // 3. Mode-specific Pixel-Art Overlay (subtle & low-opacity idle -> zero distraction!)
+            // Reconstruct active joystick strictly from normalized 0..1 coordinates so Update vs Draw Viewport scaling
+            // (e.g., UIScale=1.35 or Zoom=0.90) can NEVER shift the joystick to the bottom edge!
             if (EffectiveMode == MobileControlMode.VisibleJoystick2Btn)
             {
                 bool joyAct = (_joyTouchId >= 0 && _joyActivated);
-                Vector2 jCenter = joyAct ? _joyOrigin : _visJoyCenter;
-                Vector2 jKnob = joyAct ? _joyKnob : jCenter;
+                Vector2 jCenter = _visJoyCenter;
+                Vector2 jKnob = jCenter;
+                if (joyAct)
+                {
+                    Vector2 off = new Vector2((_joyKnobNorm.X - _joyOriginNorm.X) * _vpW, (_joyKnobNorm.Y - _joyOriginNorm.Y) * _vpH);
+                    float len = off.Length();
+                    if (len > _visJoyRadius && len > 0.001f)
+                        off *= (_visJoyRadius / len);
+                    jKnob = jCenter + off;
+                }
                 PixelUi.DrawPixelJoystick(sb, jCenter, _visJoyRadius, jKnob, joyAct, _vpH, 0.92f);
                 DrawActionCircle(sb, _visToolRect, "USE", _toolPressed, isTool: true);
                 DrawActionCircle(sb, _visActRect, "ACT", _interactPressed, isTool: false);
@@ -5327,7 +5973,15 @@ namespace SDVMobileControls
             {
                 if (_joyTouchId >= 0 && _joyActivated)
                 {
-                    PixelUi.DrawPixelJoystick(sb, _joyOrigin, _activeJoyRadius, _joyKnob, true, _vpH, 0.45f);
+                    float jr = _activeJoyRadius;
+                    Vector2 jCenter = new Vector2(
+                        Math.Clamp(_joyOriginNorm.X * _vpW, jr + 8f, Math.Max(jr + 8f, _vpW - jr - 8f)),
+                        Math.Clamp(_joyOriginNorm.Y * _vpH, jr + 8f, Math.Max(jr + 8f, _vpH - jr - 8f)));
+                    Vector2 off = new Vector2((_joyKnobNorm.X - _joyOriginNorm.X) * _vpW, (_joyKnobNorm.Y - _joyOriginNorm.Y) * _vpH);
+                    float len = off.Length();
+                    if (len > jr && len > 0.001f)
+                        off *= (jr / len);
+                    PixelUi.DrawPixelJoystick(sb, jCenter, jr, jCenter + off, true, _vpH, 0.45f);
                 }
                 if (_toolRippleAlpha > 0.02f)
                 {
@@ -5363,11 +6017,12 @@ namespace SDVMobileControls
                 PixelUi.DrawPixelPill(sb, _pixel, _bridge, _btnSpecRect, "SPEC", PixelRole.Special, false, _vpH, Math.Max(1, _vpH / 290), onCd ? 0.40f : 0.88f);
             }
 
-            // 4e. Slingshot Pixel Aiming Reticle while dragging
+            // 4e. Slingshot Pixel Aiming Reticle while dragging (normalized so UIScale never shifts reticle!)
             if (_slingshotTouchId >= 0 && Game1.player?.CurrentTool is Slingshot)
             {
                 float cr = Math.Max(24f, Math.Min(_vpW, _vpH) * 0.036f);
-                PixelUi.DrawPixelCrosshair(sb, _pixel, _slingshotVpPos, cr, _vpH);
+                Vector2 slingDrawPos = new Vector2(_slingshotNorm.X * _vpW, _slingshotNorm.Y * _vpH);
+                PixelUi.DrawPixelCrosshair(sb, _pixel, slingDrawPos, cr, _vpH);
             }
 
             // 5. Stardew-Pixel Multi-Slot Save Menu Modal
@@ -5654,10 +6309,13 @@ namespace SDVMobileControls
             if (_cfg.SwapRightButtons) { _invToolRect = rawActBar; _invActRect = rawToolBar; }
             else { _invToolRect = rawToolBar; _invActRect = rawActBar; }
 
-            // 2. Visible 2-Button Mode: Circle Joystick + 2 Circular Buttons
-            _visJoyCenter = new Vector2(_cfg.VisJoyX * _vpW, _cfg.VisJoyY * _vpH);
+            // 2. Visible 2-Button Mode: Circle Joystick + 2 Circular Buttons (clamped safely inside viewport bounds!)
             _visJoyRadius = Math.Clamp(unit * _cfg.VisJoyR * s, 48f, unit * 0.25f);
             _activeJoyRadius = IsInvisibleBarMode ? Math.Clamp(unit * 0.115f * s, 48f, unit * 0.20f) : _visJoyRadius;
+            float jPad = _visJoyRadius + 10f;
+            _visJoyCenter = new Vector2(
+                Math.Clamp(_cfg.VisJoyX * _vpW, jPad, Math.Max(jPad, _vpW - jPad)),
+                Math.Clamp(_cfg.VisJoyY * _vpH, jPad, Math.Max(jPad, _vpH - jPad)));
 
             int toolD = (int)Math.Clamp(unit * _cfg.VisToolR * 2f * s, 56f, unit * 0.34f);
             int actD = (int)Math.Clamp(unit * _cfg.VisActR * 2f * s, 56f, unit * 0.34f);

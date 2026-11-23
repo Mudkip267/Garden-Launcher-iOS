@@ -1802,6 +1802,7 @@ static NSArray<NSDictionary *> *sdvDiagnoseMods(NSString *root) {
     NSMutableDictionary<NSString *, NSDictionary *> *activeById = [NSMutableDictionary dictionary];
     NSMutableDictionary<NSString *, NSMutableArray<NSString *> *> *idFolders = [NSMutableDictionary dictionary];
     NSMutableDictionary<NSString *, NSSet<NSString *> *> *cpLoads = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSDictionary *> *portraitPacks = [NSMutableDictionary dictionary];
     NSMutableDictionary<NSString *, NSSet<NSString *> *> *modHookDomains = [NSMutableDictionary dictionary];
     NSMutableSet<NSString *> *topWithManifest = [NSMutableSet set];
     NSDictionary<NSString *, NSString *> *disabledMap = disabledModsById(root);
@@ -1846,6 +1847,11 @@ static NSArray<NSDictionary *> *sdvDiagnoseMods(NSString *root) {
                     [NSString stringWithFormat:@"Biên dịch cho SMAPI %@ — có thể không tương thích Stardew 1.6.15.", minApi], nil);
             }
             if (entryDll.length) {
+                if ([uidLow containsString:@"portraiture"] || [uidLow containsString:@"hdportraits"] || [uidLow containsString:@"hd.portraits"]) {
+                    addIssue([@"harmonyportrait:" stringByAppendingString:uidLow], @"warn",
+                        [NSString stringWithFormat:@"Mod chân dung cần Harmony/JIT: %@", dispName],
+                        @"Trên iOS 0% JIT (không bật Harmony), Portraiture / HD Portraits không thể móc nối vẽ chân dung. Hãy dùng gói chân dung dạng Content Patcher ([CP]) chuẩn (như [CP] OhoDavi Anime).", nil);
+                }
                 NSString *dllFull = join(packDir, entryDll);
                 if (![fm() fileExistsAtPath:dllFull]) {
                     addIssue([@"missdll:" stringByAppendingString:uidLow], @"error",
@@ -1880,6 +1886,17 @@ static NSArray<NSDictionary *> *sdvDiagnoseMods(NSString *root) {
                         addIssue([@"mobileatlas:" stringByAppendingString:uidLow], @"warn",
                             [NSString stringWithFormat:@"Content Pack bản Mobile: %@", dispName],
                             @"Chỉnh sửa tài nguyên MobileAtlas riêng của bản Mobile — khuyên tải bản PC 1.6.", nil);
+                    }
+                    // Detect villager Portrait packs (EditImage/Load on Portraits/* or Seasonal Cute Characters Data/Characters redirect)
+                    NSString *metaLow = [[NSString stringWithFormat:@"%@ %@ %@", dispName, uid, field(m, @"Description")] lowercaseString];
+                    BOOL editsPortraits = sdvDataContainsAscii(cjd, "Portraits/") || sdvDataContainsAscii(cjd, "portraits/");
+                    BOOL isSeasonalChar = [uidLow containsString:@"seasonalcutecharacters"] ||
+                                          ([metaLow containsString:@"seasonal"] && [metaLow containsString:@"character"]) ||
+                                          (sdvDataContainsAscii(cjd, "Data/Characters") && ([metaLow containsString:@"outfit"] || [metaLow containsString:@"portrait"] || [metaLow containsString:@"seasonal"]));
+                    BOOL isPortraitPack = isSeasonalChar ||
+                                          (editsPortraits && ([metaLow containsString:@"portrait"] || [metaLow containsString:@"anime"] || [metaLow containsString:@"ohodavi"] || [metaLow containsString:@"chân dung"] || [metaLow containsString:@"dcburger"] || [metaLow containsString:@"character"] || sdvDataContainsAscii(cjd, "Portraits/Abigail")));
+                    if (isPortraitPack) {
+                        portraitPacks[uidLow] = @{@"name": dispName, @"seasonal": @(isSeasonalChar)};
                     }
                 }
             }
@@ -1995,6 +2012,24 @@ static NSArray<NSDictionary *> *sdvDiagnoseMods(NSString *root) {
                 addIssue([NSString stringWithFormat:@"hookconf:%@:%@", k1, k2], @"warn",
                     [NSString stringWithFormat:@"Có thể xung đột hiển thị/hook: %@ ↔ %@", n1, n2],
                     [NSString stringWithFormat:@"Cả 2 mod C# cùng can thiệp vào %@. Nếu bị mất hiệu ứng hoặc lỗi hình ảnh, hãy thử tắt bớt 1 trong 2 mod.", [sharedLabels componentsJoinedByString:@", "]], nil);
+            }
+        }
+    }
+
+    // 5c. Villager Portrait / Anime Pack conflict detection (e.g. Seasonal Cute Characters overrides OhoDavi Anime Portraits!)
+    if (portraitPacks.count >= 2) {
+        NSArray<NSString *> *pKeys = [portraitPacks.allKeys sortedArrayUsingSelector:@selector(compare:)];
+        for (NSUInteger i = 0; i < pKeys.count; i++) {
+            for (NSUInteger j = i + 1; j < pKeys.count; j++) {
+                NSDictionary *p1 = portraitPacks[pKeys[i]];
+                NSDictionary *p2 = portraitPacks[pKeys[j]];
+                BOOL hasSeasonal = [p1[@"seasonal"] boolValue] || [p2[@"seasonal"] boolValue];
+                NSString *detail = hasSeasonal
+                    ? @"Gói trang phục theo mùa (như Seasonal Cute Characters) đổi đường dẫn trong Data/Characters sang Portraits/*_Spring/_Summer… nên sẽ ĐÈ HOÀN TOÀN ảnh Anime/Portrait của gói còn lại! Hãy tắt bớt 1 gói trong Thư viện rồi khởi động lại game."
+                    : @"Cả 2 gói đều chỉnh sửa Portraits/* của dân làng nên sẽ đè lên nhau — chỉ 1 gói hiện đầy đủ. Hãy tắt bớt 1 gói trong Thư viện.";
+                addIssue([NSString stringWithFormat:@"portraitconf:%@:%@", pKeys[i], pKeys[j]], @"warn",
+                    [NSString stringWithFormat:@"Xung đột chân dung (Portrait): %@ ↔ %@", p1[@"name"], p2[@"name"]],
+                    detail, nil);
             }
         }
     }
@@ -2401,6 +2436,29 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
             for (NSString *choice in preferences) {
                 for (NSString *a in matches) if ([parent(a) isEqual:choice]) dst = a;
                 if (dst) break;
+            }
+            // Auto-prefer Content/Portraits for flat XNB portrait packs (e.g. OhoDavi Portrait xnb)
+            // when archive name or sibling portrait-only XNBs identify it unambiguously as Portraits!
+            if (!dst) {
+                BOOL looksLikePortraitPack = NO;
+                for (NSString *sn in stagedFileNames) {
+                    NSString *sl = sn.lowercaseString;
+                    if ([sl containsString:@"portrait"] || [sl containsString:@"anime"]) { looksLikePortraitPack = YES; break; }
+                }
+                if (!looksLikePortraitPack) {
+                    for (NSString *it in items) {
+                        NSString *il = it.lastPathComponent.lowercaseString;
+                        if ([il isEqualToString:@"answeringmachine.xnb"] || [il isEqualToString:@"dobson.xnb"] || [il isEqualToString:@"gil.xnb"]) {
+                            looksLikePortraitPack = YES;
+                            break;
+                        }
+                    }
+                }
+                if (looksLikePortraitPack) {
+                    for (NSString *a in matches) {
+                        if ([[parent(a) lowercaseString] isEqualToString:@"portraits"]) { dst = a; break; }
+                    }
+                }
             }
             if (!dst) {
                 for (NSString *a in matches) if (![choices containsObject:parent(a)]) [choices addObject:parent(a)];

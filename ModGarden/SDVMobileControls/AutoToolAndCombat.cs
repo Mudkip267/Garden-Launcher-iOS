@@ -56,35 +56,53 @@ namespace SDVMobileControls
                 return intent;
             }
 
-            // 2. NPC near tapped tile -> talk / gift
+            // 2. NPC (including Dog/Cat Pet!) near tapped tile -> talk / gift / pet
             if (loc.characters != null)
             {
+                NPC hitNpc = null;
+                float bestNpcD = 78f;
                 foreach (NPC npc in loc.characters)
                 {
                     if (npc == null || npc is Monster)
                         continue;
-                    if (Vector2.Distance(npc.GetBoundingBox().Center.ToVector2(), tileCenter) <= 72f)
+                    Rectangle nbb = npc.GetBoundingBox();
+                    // Also cover upper body/head of standing NPCs & Pets (48px above feet!)
+                    Rectangle nSprite = new Rectangle(nbb.X - 12, nbb.Y - 48, nbb.Width + 24, nbb.Height + 56);
+                    float d = nSprite.Contains((int)tileCenter.X, (int)tileCenter.Y)
+                        ? 0f
+                        : Vector2.Distance(nbb.Center.ToVector2(), tileCenter);
+                    if (d < bestNpcD)
                     {
-                        intent.Kind = TileActionKind.Interact;
-                        intent.StopAdjacent = true;
-                        intent.AllowSameTile = true;
-                        return intent;
+                        bestNpcD = d;
+                        hitNpc = npc;
                     }
+                }
+                if (hitNpc != null)
+                {
+                    Rectangle nbb = hitNpc.GetBoundingBox();
+                    intent.Kind = TileActionKind.Interact;
+                    intent.StopAdjacent = true;
+                    intent.AllowSameTile = true;
+                    intent.HasResolvedTile = true;
+                    intent.ResolvedTile = new Point((int)Math.Floor(nbb.Center.X / 64f), (int)Math.Floor(nbb.Center.Y / 64f));
+                    return intent;
                 }
             }
 
-            // 2b. FarmAnimal near tapped tile -> pet first, then auto-select Milk Pail / Shears if ready!
+            // 2b. FarmAnimal near tapped tile -> pet first (using full sprite/cursor hitbox!), then auto-select Milk Pail / Shears if ready!
             try
             {
                 if (loc.Animals != null && loc.Animals.Length > 0)
                 {
                     FarmAnimal hitAnimal = null;
-                    float bestD = 76f;
+                    float bestD = 88f;
                     foreach (FarmAnimal animal in loc.Animals.Values)
                     {
                         if (animal == null) continue;
                         Rectangle bb = animal.GetBoundingBox();
-                        float d = bb.Contains((int)tileCenter.X, (int)tileCenter.Y)
+                        Rectangle petBox = animal.GetCursorPetBoundingBox();
+                        petBox.Inflate(16, 16);
+                        float d = (bb.Contains((int)tileCenter.X, (int)tileCenter.Y) || petBox.Contains((int)tileCenter.X, (int)tileCenter.Y))
                             ? 0f
                             : Vector2.Distance(bb.Center.ToVector2(), tileCenter);
                         if (d < bestD)
@@ -95,8 +113,11 @@ namespace SDVMobileControls
                     }
                     if (hitAnimal != null)
                     {
+                        Rectangle bb = hitAnimal.GetBoundingBox();
                         intent.StopAdjacent = true;
                         intent.AllowSameTile = true;
+                        intent.HasResolvedTile = true;
+                        intent.ResolvedTile = new Point((int)Math.Floor(bb.Center.X / 64f), (int)Math.Floor(bb.Center.Y / 64f));
                         if (!hitAnimal.wasPet.Value)
                         {
                             intent.Kind = TileActionKind.Interact;

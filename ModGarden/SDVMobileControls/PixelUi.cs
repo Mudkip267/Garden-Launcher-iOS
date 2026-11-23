@@ -360,9 +360,11 @@ namespace SDVMobileControls
             int kd = Math.Max(6, (int)(kr * 2f));
             var knobR = new Rectangle((int)(knob.X - kr), (int)(knob.Y - kr), kd, kd);
             var knobOut = new Rectangle(knobR.X - px, knobR.Y - px, knobR.Width + px * 2, knobR.Height + px * 2);
-            sb.Draw(_pxCircleFill, knobR, (active ? new Color(220, 178, 96) : new Color(214, 192, 154)) * ((active ? 0.62f : 0.34f) * opacityScale));
+            float knobFillA = (active ? 0.62f : 0.36f) * gOp;
+            float knobRimA = (active ? 0.80f : 0.46f) * gOp;
+            sb.Draw(_pxCircleFill, knobR, (active ? new Color(220, 178, 96) : new Color(214, 192, 154)) * knobFillA);
             sb.Draw(_pxCircleRing, knobOut, new Color(26, 16, 10) * (ringA * 0.85f));
-            sb.Draw(_pxCircleRing, knobR, new Color(255, 236, 184) * ((active ? 0.78f : 0.40f) * opacityScale));
+            sb.Draw(_pxCircleRing, knobR, new Color(255, 236, 184) * knobRimA);
         }
 
         /// <summary>

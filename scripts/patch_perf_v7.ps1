@@ -790,6 +790,46 @@ foreach ($tt in $tMod.Types) {
 if ($touchHidden -lt 3) { throw "Expected >=3 hidden .garden path patches in TouchControls, got $touchHidden!" }
 Write-Host "  Hidden Documents Layout (TouchControls): redirected $touchHidden config/relocate paths into Documents/.garden/!"
 
+# 1.10 Fix startup UpdateTicking NullReferenceException in SDViOSTouchControls.ModEntry.OnUpdateTicking
+# Guard TouchVirtualPad.Instance.Update(Game1.currentGameTime) against null Instance or null currentGameTime on tick 0!
+$mOnUt = $meType.Methods | Where-Object { $_.Name -eq "OnUpdateTicking" } | Select-Object -First 1
+if ($mOnUt -and $mOnUt.HasBody) {
+    Expand-ShortBranches $mOnUt
+    $utIL = $mOnUt.Body.GetILProcessor()
+    $utIns = $mOnUt.Body.Instructions
+    $utPatched = $false
+    for ($i = 0; $i -lt $utIns.Count - 2; $i++) {
+        if ($utIns[$i].OpCode.Name -eq "call" -and "$($utIns[$i].Operand)" -like "*TouchVirtualPad::get_Instance*" -and
+            $utIns[$i+1].OpCode.Name -eq "ldsfld" -and "$($utIns[$i+1].Operand)" -like "*Game1::currentGameTime*" -and
+            $utIns[$i+2].OpCode.Name -eq "callvirt" -and "$($utIns[$i+2].Operand)" -like "*TouchVirtualPad::Update*") {
+            $callInst  = $utIns[$i]
+            $mGetInst  = $utIns[$i].Operand
+            $fGameTime = $utIns[$i+1].Operand
+            $afterCall = $utIns[$i+3]
+            $vPad = New-Object Mono.Cecil.Cil.VariableDefinition($mGetInst.ReturnType)
+            $vGt  = New-Object Mono.Cecil.Cil.VariableDefinition($fGameTime.FieldType)
+            $mOnUt.Body.Variables.Add($vPad)
+            $mOnUt.Body.Variables.Add($vGt)
+            $mOnUt.Body.InitLocals = $true
+
+            $ldInst = $utIL.Create([Mono.Cecil.Cil.OpCodes]::Call, $mGetInst)
+            $utIL.InsertBefore($callInst, $ldInst)
+            $utIL.InsertBefore($callInst, $utIL.Create([Mono.Cecil.Cil.OpCodes]::Stloc, $vPad))
+            $utIL.InsertBefore($callInst, $utIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vPad))
+            $utIL.InsertBefore($callInst, $utIL.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $afterCall))
+            $utIL.InsertBefore($callInst, $utIL.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fGameTime))
+            $utIL.InsertBefore($callInst, $utIL.Create([Mono.Cecil.Cil.OpCodes]::Stloc, $vGt))
+            $utIL.InsertBefore($callInst, $utIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vGt))
+            $utIL.InsertBefore($callInst, $utIL.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $afterCall))
+            Retarget-Branches $mOnUt $callInst $ldInst
+            $utPatched = $true
+            break
+        }
+    }
+    if (-not $utPatched) { throw "Could not find TouchVirtualPad.Instance.Update(Game1.currentGameTime) in OnUpdateTicking!" }
+    Write-Host "  Startup NRE Fix (TouchControls): Guarded OnUpdateTicking against null Instance / currentGameTime!"
+}
+
 Write-Host "  v7 TouchControls: Native 3x/2x + Direct MobileHooks + PrefixClientBounds + MenuLag(stackSkip, GC 140MB x$gmLowered) + Poll 45f + Watchdog $bumped"
 $tAsm.Write($outTouch)
 $tAsm.Dispose()
@@ -1168,6 +1208,28 @@ if ($hostHiddenGame -ne 3 -or $hostHiddenGarden -lt 3 -or $hostSmapiInternalSwap
     throw "Unexpected hidden layout patch counts in SDViOS.dll: game=$hostHiddenGame (want 3), garden=$hostHiddenGarden (want >=3), smapiInternal=$hostSmapiInternalSwap (want 4)!"
 }
 Write-Host "  Hidden Documents Layout (Host): .game x$hostHiddenGame, .garden x$hostHiddenGarden, smapi-internal->GameRootDir x$hostSmapiInternalSwap!"
+
+# 2.11 Prevent RuntimeHarmonyPatcher.EnsureHarmonyPatched from trying to overwrite read-only .app bundle 0Harmony.dll
+# (eliminates spurious UnauthorizedAccessException stack trace on every launch!)
+$tRhp = $hMod.GetType("SDViOS.Compatibility.RuntimeHarmonyPatcher")
+$mEhp = if ($tRhp) { $tRhp.Methods | Where-Object { $_.Name -eq "EnsureHarmonyPatched" } | Select-Object -First 1 } else { $null }
+if ($mEhp -and $mEhp.HasBody) {
+    Expand-ShortBranches $mEhp
+    $mStrContains = New-Object Mono.Cecil.MethodReference("Contains", $hMod.TypeSystem.Boolean, $hMod.TypeSystem.String)
+    $mStrContains.HasThis = $true
+    $mStrContains.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition($hMod.TypeSystem.String)))
+    $rhpIL = $mEhp.Body.GetILProcessor()
+    $firstIns = $mEhp.Body.Instructions[0]
+    $gStart = $rhpIL.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0)
+    $rhpIL.InsertBefore($firstIns, $gStart)
+    $rhpIL.InsertBefore($firstIns, $rhpIL.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $firstIns))
+    $rhpIL.InsertBefore($firstIns, $rhpIL.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+    $rhpIL.InsertBefore($firstIns, $rhpIL.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, ".app/"))
+    $rhpIL.InsertBefore($firstIns, $rhpIL.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mStrContains))
+    $rhpIL.InsertBefore($firstIns, $rhpIL.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $firstIns))
+    $rhpIL.InsertBefore($firstIns, $rhpIL.Create([Mono.Cecil.Cil.OpCodes]::Ret))
+    Write-Host "  Read-Only Bundle Guard (Host): RuntimeHarmonyPatcher skips read-only .app/ bundle paths (zero UnauthorizedAccessException)!"
+}
 
 $hAsm.Write($outHost)
 $hAsm.Dispose()
@@ -1866,6 +1928,16 @@ if ($mCapInit -and $fGlMaj -and $mSetNpot) {
     }
     if (-not $npotPatched) { throw "Failed to patch SupportsNonPowerOfTwo in GraphicsCapabilities.PlatformInitialize!" }
     Write-Host "  iOS DynamicShader Fix #3 (MonoGame): Enabled SupportsNonPowerOfTwo for OpenGL ES 3.0+!"
+}
+
+# 3.10 Fix SVE & Mod Data/AudioChanges NullReferenceException (MonoGame iOS SoundBank stub):
+# SoundBank.Exists(string) returned true while SoundBank.GetCueDefinition(string) returned null,
+# causing StardewValley.Audio.AudioCueModificationManager.ApplyCueModification to throw NullReferenceException!
+$tSoundBank = $mgMod.GetType("Microsoft.Xna.Framework.Audio.SoundBank")
+$mSbExists = if ($tSoundBank) { $tSoundBank.Methods | Where-Object { $_.Name -eq "Exists" -and $_.Parameters.Count -eq 1 } | Select-Object -First 1 } else { $null }
+if ($mSbExists -and $mSbExists.HasBody -and $mSbExists.Body.Instructions.Count -eq 2 -and $mSbExists.Body.Instructions[0].OpCode.Name -eq "ldc.i4.1") {
+    $mSbExists.Body.Instructions[0].OpCode = [Mono.Cecil.Cil.OpCodes]::Ldc_I4_0
+    Write-Host "  iOS AudioChanges Fix (MonoGame): SoundBank.Exists now returns false when GetCueDefinition is stubbed (fixes SVE Data/AudioChanges NRE)!"
 }
 
 $mgAsm.Write($outMG)

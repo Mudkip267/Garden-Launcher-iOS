@@ -94,8 +94,9 @@ static long long sdvNextRev(void) {
     SDVUiConfig *cfg = [SDVUiConfig new];
     if (!docsPath.length) return cfg;
 
-    // 1. Read sdv_menubar.cfg (14 comma-separated floats + rev)
-    NSString *mbPath = [docsPath stringByAppendingPathComponent:@"sdv_menubar.cfg"];
+    // 1. Read .garden/sdv_menubar.cfg (14 comma-separated floats + rev)
+    NSString *gd = sdvHiddenGardenDir(docsPath);
+    NSString *mbPath = [gd stringByAppendingPathComponent:@"sdv_menubar.cfg"];
     NSString *mbRaw = [NSString stringWithContentsOfFile:mbPath encoding:NSUTF8StringEncoding error:nil];
     if (mbRaw.length) {
         NSArray<NSString *> *p = [mbRaw componentsSeparatedByString:@","];
@@ -123,8 +124,8 @@ static long long sdvNextRev(void) {
         }
     }
 
-    // 2. Read touch_overlay_config.json
-    NSString *ovPath = [docsPath stringByAppendingPathComponent:@"touch_overlay_config.json"];
+    // 2. Read .garden/touch_overlay_config.json
+    NSString *ovPath = [gd stringByAppendingPathComponent:@"touch_overlay_config.json"];
     NSString *ovRaw = [NSString stringWithContentsOfFile:ovPath encoding:NSUTF8StringEncoding error:nil];
     if (ovRaw.length) {
         NSCharacterSet *trim = [NSCharacterSet whitespaceAndNewlineCharacterSet];
@@ -162,8 +163,8 @@ static long long sdvNextRev(void) {
 
 -(void)saveLiveCfgOnlyToDocuments:(NSString *)docsPath {
     if (!docsPath.length) return;
-    [NSFileManager.defaultManager createDirectoryAtPath:docsPath withIntermediateDirectories:YES attributes:nil error:nil];
-    NSString *mbPath = [docsPath stringByAppendingPathComponent:@"sdv_menubar.cfg"];
+    NSString *gd = sdvHiddenGardenDir(docsPath);
+    NSString *mbPath = [gd stringByAppendingPathComponent:@"sdv_menubar.cfg"];
     NSString *content = [NSString stringWithFormat:@"%.2f,%.0f,%.0f,%.0f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%lld",
         sdvClampf(_menuBarScale,   0.55f, 2.20f),
         sdvClampf(_menuBarTopY,    4.0f, 160.0f),
@@ -185,9 +186,9 @@ static long long sdvNextRev(void) {
 
 -(void)saveToDocuments:(NSString *)docsPath {
     if (!docsPath.length) return;
-    [NSFileManager.defaultManager createDirectoryAtPath:docsPath withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *gd = sdvHiddenGardenDir(docsPath);
 
-    NSString *ovPath = [docsPath stringByAppendingPathComponent:@"touch_overlay_config.json"];
+    NSString *ovPath = [gd stringByAppendingPathComponent:@"touch_overlay_config.json"];
     NSString *mouseStr = (_mouseMode == 1) ? @"\"Trackpad\"" : ((_mouseMode == 2) ? @"\"Disabled\"" : @"\"PointAndClick\"");
     NSDictionary<NSString *, NSString *> *updates = @{
         @"Opacity": [NSString stringWithFormat:@"%.2f", sdvClampf(_opacity, 0.15f, 1.00f)],
@@ -316,7 +317,7 @@ static long long sdvNextRev(void) {
     c.autoKeyboard = YES;
     c.safeCrafting = YES;
     c.autoSaveMinutes = 0; // Default OFF (zero stutter while playing; user can pick 3/5/10 min)
-    c.reduceWeather = YES;
+    c.reduceWeather = NO; // Default OFF (keeps full rain/wind particles unless user enables optimization)
     c.uiScaleOverride = 0.0f; // 0 = game default
     c.buttonScale = 1.00f;
     c.showEmoteButton = YES;
@@ -349,7 +350,7 @@ static long long sdvNextRev(void) {
 +(instancetype)loadFromDocuments:(NSString *)docsPath {
     SDVMobileCtrlConfig *c = [self defaults];
     if (!docsPath.length) return c;
-    NSString *p = [docsPath stringByAppendingPathComponent:@"sdv_mobile_ctrl.cfg"];
+    NSString *p = [sdvHiddenGardenDir(docsPath) stringByAppendingPathComponent:@"sdv_mobile_ctrl.cfg"];
     NSString *raw = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil];
     if (!raw.length) return c;
     for (NSString *line in [raw componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
@@ -359,7 +360,7 @@ static long long sdvNextRev(void) {
         NSString *v = [[line substringFromIndex:eq.location + 1] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
         if ([k isEqualToString:@"mode"]) {
             NSInteger m = v.integerValue;
-            if (m >= 0 && m <= 4) c.mode = m;
+            c.mode = (m >= 1 && m <= 4) ? m : 1;
         } else if ([k isEqualToString:@"autotool"]) {
             c.autoTool = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
         } else if ([k isEqualToString:@"autoattack"]) {
@@ -509,7 +510,7 @@ static long long sdvNextRev(void) {
 -(void)saveToDocuments:(NSString *)docsPath {
     if (!docsPath.length) return;
     [NSFileManager.defaultManager createDirectoryAtPath:docsPath withIntermediateDirectories:YES attributes:nil error:nil];
-    NSString *p = [docsPath stringByAppendingPathComponent:@"sdv_mobile_ctrl.cfg"];
+    NSString *p = [sdvHiddenGardenDir(docsPath) stringByAppendingPathComponent:@"sdv_mobile_ctrl.cfg"];
 
     // Preserve custom Edit Layout coordinates (inv_*, vis_*, topbar_*) saved by SDVMobileControls.dll
     NSMutableArray<NSString *> *extraLines = [NSMutableArray array];
@@ -532,7 +533,7 @@ static long long sdvNextRev(void) {
 
     NSMutableString *s = [NSMutableString stringWithFormat:
         @"mode=%ld\nautotool=%d\nautoattack=%d\npinchzoom=%d\ntouchhint2=%d\ntoputility=%d\nswapbuttons=%d\nmobileshopdrag=%d\nautokeyboard=%d\nsafecrafting=%d\nautosavemin=%ld\nreduceweather=%d\nuiscale=%.2f\nbuttonscale=%.2f\nemotebtn=%d\nautorepeat=%d\nrestoretool=%d\nspecbtn=%d\nautocombatmode=%d\nautohidegp=%d\nautopause=%d\nfishhaptic=%d\nsafepadding=%ld\nsafedialogue=%d\nverticaltb=%d\ntbsize=%.2f\ntbopacity=%.2f\ntbcols=%ld\ntbrows=%ld\ntbside=%ld\ntby=%.3f\ntoolhitbox=%d\nsaver30fps=%d\npixelopacity=%.2f\nlefthanded=%d\njoydeadzone=%.2f\nrespectmute=%d\n",
-        (long)self.mode, self.autoTool ? 1 : 0, self.autoAttack ? 1 : 0,
+        (long)MAX(1, MIN(4, self.mode)), self.autoTool ? 1 : 0, self.autoAttack ? 1 : 0,
         self.pinchZoom ? 1 : 0, self.showTouchHint ? 1 : 0,
         self.showTopUtility ? 1 : 0, self.swapRightButtons ? 1 : 0,
         self.mobileShopAndDrag ? 1 : 0, self.autoKeyboard ? 1 : 0,
@@ -568,8 +569,7 @@ static long long sdvNextRev(void) {
 
 +(void)triggerEditLayoutInDocs:(NSString *)docsPath {
     if (!docsPath.length) return;
-    [NSFileManager.defaultManager createDirectoryAtPath:docsPath withIntermediateDirectories:YES attributes:nil error:nil];
-    NSString *flag = [docsPath stringByAppendingPathComponent:@"sdv_mobile_edit.flag"];
+    NSString *flag = [sdvHiddenGardenDir(docsPath) stringByAppendingPathComponent:@"sdv_mobile_edit.flag"];
     [@"1" writeToFile:flag atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 

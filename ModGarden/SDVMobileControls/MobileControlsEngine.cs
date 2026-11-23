@@ -127,6 +127,9 @@ namespace SDVMobileControls
         private double _tapStartTime;
         private bool _holdWalking;
         private bool _tapChargingTool;
+        private bool _tapHoldSwinging;
+        private Point _tapHoldTile;
+        private int _tapHoldCooldown;
         private List<Point> _path;
         private int _pathIdx;
         private Point _targetTile;
@@ -231,6 +234,11 @@ namespace SDVMobileControls
         private bool _repeatActive;
         private Point _repeatTile;
         private int _repeatCooldown;
+        private int _repeatSwings;
+        private int _repeatStartHudCount;
+        private float _repeatLastHealth;
+        private int _repeatNoProgressSwings;
+        private bool _repeatObservedSwing;
         private int _autoToolPrevSlot = -1;
         private int _autoToolRestoreTimer;
 
@@ -353,7 +361,7 @@ namespace SDVMobileControls
         }
 
         public MobileControlMode CurrentMode => EffectiveMode;
-        public bool IsMobileModeActive => _cfg.Mode != MobileControlMode.VirtualGamepad;
+        public bool IsMobileModeActive => true;
 
         private MobileControlMode EffectiveMode =>
             (_inCombatAutoSwitched && _cfg.AutoCombatMode && _cfg.Mode == MobileControlMode.TapToMove)
@@ -533,6 +541,57 @@ namespace SDVMobileControls
             }
         }
 
+        public bool IsMobileModeForBobberPhysics => IsMobileModeActive;
+
+        /// <summary>
+        /// When the Mobile Vertical Toolbar is enabled, relocates Stardew's bottom-left HUDMessage
+        /// item-pickup popups neatly to the upper-left area clear of both the vertical toolbar and joystick!
+        /// </summary>
+        public bool TryGetHudMessageRelocation(out float targetX, out float topStartY)
+        {
+            targetX = 0f;
+            topStartY = 0f;
+            if (!IsMobileModeActive || !_cfg.VerticalToolbar || _guiHidden)
+                return false;
+            if (!Context.IsWorldReady || Game1.activeClickableMenu != null)
+                return false;
+
+            try
+            {
+                int uiW = Game1.uiViewport.Width;
+                int uiH = Game1.uiViewport.Height;
+                if (uiW < 320 || uiH < 200 || _vpW < 100 || _vpH < 100)
+                    return false;
+
+                float scaleX = (float)uiW / _vpW;
+                float scaleY = (float)uiH / _vpH;
+
+                // Top clearance: sit neatly below Top Utility Bar (if visible)
+                float topVp = _cfg.ShowTopUtility
+                    ? Math.Max(_btnBagRect.Bottom + 10f, _vpH * 0.11f)
+                    : Math.Max(14f, _vpH * 0.04f);
+                topStartY = Math.Clamp(topVp * scaleY, 24f, Math.Max(48f, uiH * 0.24f));
+
+                // Horizontal clearance: clear of left-docked Vertical Toolbar (or left safe-area when toolbar is on right)
+                Rectangle vtBounds = _verticalToolbar.Bounds;
+                float leftVp;
+                if (_cfg.ToolbarSide == 0 && !vtBounds.IsEmpty)
+                {
+                    leftVp = vtBounds.Right + 14f;
+                }
+                else
+                {
+                    leftVp = Math.Max(_safeLeftPx + 14f, 16f);
+                }
+                targetX = Math.Clamp(leftVp * scaleX, 16f, Math.Max(32f, uiW * 0.45f));
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         public bool IsFishingCastButtonHeld()
         {
             if (!Context.IsWorldReady || Game1.player == null ||
@@ -544,6 +603,23 @@ namespace SDVMobileControls
             {
                 if (_toolPressed || _tapChargingTool)
                     return true;
+                var ext = ModEntry.ExternalInput;
+                if (ext != null && ext.IsExternalDeviceActive)
+                {
+                    if (ext.IsPhysicalGamepadActive && ext.CurrentGamePadState.Buttons.X == ButtonState.Pressed)
+                        return true;
+                    if (ext.IsExternalMouseActive && ext.CurrentMouseState.LeftButton == ButtonState.Pressed)
+                        return true;
+                    if (ext.HasPhysicalKeysPressed)
+                    {
+                        var pk = ext.PhysicalKeys;
+                        for (int i = 0; i < pk.Count; i++)
+                        {
+                            if (pk[i] == Keys.C || pk[i] == Keys.Space)
+                                return true;
+                        }
+                    }
+                }
                 if (_gamepadHideHud && _hasPhysicalGamePadState && _lastPhysicalGamePadState.Buttons.X == ButtonState.Pressed)
                     return true;
                 return false;
@@ -577,6 +653,8 @@ namespace SDVMobileControls
             _tapTouchId = -1;
             _holdWalking = false;
             _tapChargingTool = false;
+            _tapHoldSwinging = false;
+            _tapHoldCooldown = 0;
             _slingshotTouchId = -1;
             _toolbarTouchId = -1;
             _toolbarTappedSlot = -1;
@@ -584,6 +662,10 @@ namespace SDVMobileControls
             _verticalToolbar.ResetTouch();
             _repeatActive = false;
             _repeatCooldown = 0;
+            _repeatSwings = 0;
+            _repeatNoProgressSwings = 0;
+            _repeatObservedSwing = false;
+            _repeatLastHealth = -1f;
             _unstickHoldTicks = 0;
             _unstickStillTicks = 0;
             _fishBendTouchId = -1;
@@ -656,6 +738,10 @@ namespace SDVMobileControls
             _stuckFrames = 0;
             _repeatActive = false;
             _repeatCooldown = 0;
+            _repeatSwings = 0;
+            _repeatNoProgressSwings = 0;
+            _repeatObservedSwing = false;
+            _repeatLastHealth = -1f;
         }
 
         private bool IsInventoryContextMenu(IClickableMenu topMenu)
@@ -1002,8 +1088,38 @@ namespace SDVMobileControls
             return false;
         }
 
+        public void OnExternalInputModeChanged(ExternalInputMode mode)
+        {
+            double nowSec = Environment.TickCount64 / 1000.0;
+            if (mode == ExternalInputMode.Gamepad)
+            {
+                _gamepadHideHud = _cfg.AutoHideOnGamepad;
+                ShowSaveToast("TAY CAM NGOAI (FULL)", nowSec);
+            }
+            else if (mode == ExternalInputMode.KeyboardMouse)
+            {
+                _gamepadHideHud = _cfg.AutoHideOnGamepad;
+                ShowSaveToast("BAN PHIM / CHUOT NGOAI", nowSec);
+            }
+            else
+            {
+                _gamepadHideHud = false;
+            }
+        }
+
         private void PollGamepadAutoHide(int touchCount)
         {
+            var ext = ModEntry.ExternalInput;
+            if (ext != null)
+            {
+                ext.PollFrame(touchCount);
+                _hasPhysicalGamePadState = ext.IsPhysicalGamepadActive;
+                if (_hasPhysicalGamePadState)
+                    _lastPhysicalGamePadState = ext.CurrentGamePadState;
+                _gamepadHideHud = _cfg.AutoHideOnGamepad && ext.IsExternalDeviceActive && touchCount == 0;
+                return;
+            }
+
             if (!_cfg.AutoHideOnGamepad)
             {
                 _gamepadHideHud = false;
@@ -1430,6 +1546,12 @@ namespace SDVMobileControls
                 {
                     ComputeLayout();
                     TouchCollection evTouches = TouchPanel.GetState();
+                    PollGamepadAutoHide(evTouches.Count);
+                    if (ModEntry.ExternalInput != null && ModEntry.ExternalInput.IsExternalDeviceActive && evTouches.Count == 0)
+                    {
+                        br?.ResetVirtualPad(pad);
+                        return true;
+                    }
                     Point? evMouse = null;
                     bool evLeft = false;
                     for (int i = 0; i < evTouches.Count; i++)
@@ -1456,11 +1578,66 @@ namespace SDVMobileControls
                 return false;
             }
 
-            // CRITICAL: Return BEFORE calling TouchPanel.GetState() for BobberBar & vanilla TitleMenu screens!
+            // Handle BobberBar (Fishing Minigame) directly with 0ms instant press & 0ms instant release!
+            // Bypassing SDViOSTouchControls.HandleBackgroundTouch eliminates its 2-frame sticky
+            // `_pointClickHoldFrames` release delay that made the fishing bar feel slippery and overshoot!
+            if (rawMenu is BobberBar)
+            {
+                ResetMenuTapState();
+                _invShop.Reset();
+                _lastMenuMouseRaw = null;
+                _hasCarpenterPreview = false;
+
+                if (!RefreshViewport())
+                    return false;
+
+                TouchCollection fishTouches = TouchPanel.GetState();
+                PollGamepadAutoHide(fishTouches.Count);
+                if (ModEntry.ExternalInput != null && ModEntry.ExternalInput.IsExternalDeviceActive && fishTouches.Count == 0)
+                {
+                    br?.ResetVirtualPad(pad);
+                    return true;
+                }
+                bool fingerDown = false;
+                Point touchPos = new Point(Math.Max(1, _rawW / 2), Math.Max(1, _rawH / 2));
+                for (int i = 0; i < fishTouches.Count; i++)
+                {
+                    TouchLocation ftl = fishTouches[i];
+                    if (ftl.State == TouchLocationState.Pressed || ftl.State == TouchLocationState.Moved)
+                    {
+                        fingerDown = true;
+                        touchPos = new Point((int)ftl.Position.X, (int)ftl.Position.Y);
+                        break;
+                    }
+                }
+                // Also support physical Bluetooth controller X/A button during BobberBar
+                if (!fingerDown && _hasPhysicalGamePadState &&
+                    (_lastPhysicalGamePadState.Buttons.X == ButtonState.Pressed || _lastPhysicalGamePadState.Buttons.A == ButtonState.Pressed))
+                {
+                    fingerDown = true;
+                }
+
+                // Drive BOTH MouseState.LeftButton AND ButtonX with zero trailing hold frames!
+                EnsureBridge(pad)?.ApplyInputWithMouse(
+                    pad,
+                    Vector2.Zero,
+                    btnX: fingerDown,
+                    btnA: false,
+                    btnMenu: false,
+                    mousePos: touchPos,
+                    mouseLeftDown: fingerDown,
+                    mouseRightDown: false,
+                    rawW: _rawW,
+                    rawH: _rawH);
+                Game1.lastCursorMotionWasMouse = false;
+                return true;
+            }
+
+            // CRITICAL: Return BEFORE calling TouchPanel.GetState() for vanilla TitleMenu screens!
             // Exception: If a 3rd-party Mod Menu (e.g. GenericModConfigMenu!) is opened as TitleMenu.subMenu, handle it cleanly!
             IClickableMenu topMenu = GetTopmostMenu(rawMenu);
             bool isThirdParty = IsThirdPartyModMenu(topMenu);
-            if (rawMenu is BobberBar || (rawMenu is TitleMenu && !isThirdParty))
+            if (rawMenu is TitleMenu && !isThirdParty)
             {
                 ResetMenuTapState();
                 _invShop.Reset();
@@ -1480,6 +1657,16 @@ namespace SDVMobileControls
 
             // Single TouchPanel.GetState() read per frame — from here on, ALWAYS return true!
             TouchCollection touches = TouchPanel.GetState();
+            PollGamepadAutoHide(touches.Count);
+            if (ModEntry.ExternalInput != null && ModEntry.ExternalInput.IsExternalDeviceActive && touches.Count == 0)
+            {
+                ResetMenuTapState();
+                _invShop.Reset();
+                _lastMenuMouseRaw = null;
+                _hasCarpenterPreview = false;
+                br?.ResetVirtualPad(pad);
+                return true;
+            }
             double nowSec = gameTime != null ? gameTime.TotalGameTime.TotalSeconds : Environment.TickCount64 / 1000.0;
             PollAutoKeyboard(pad, br, nowSec);
 
@@ -2236,6 +2423,8 @@ namespace SDVMobileControls
         {
             if (sb == null || sb.GraphicsDevice == null)
                 return;
+            if (_gamepadHideHud)
+                return;
 
             IClickableMenu rawMenu = Game1.activeClickableMenu;
             if (rawMenu == null)
@@ -2352,7 +2541,15 @@ namespace SDVMobileControls
             {
                 ClearCustomButtonTouches();
                 ResetGameplayState();
-                Vector2 mgStick = _minigamePad.Update(arcadeKind, TouchPanel.GetState(), MapRawToViewport, _vpW, _vpH);
+                TouchCollection mgTouches = TouchPanel.GetState();
+                PollGamepadAutoHide(mgTouches.Count);
+                if (ModEntry.ExternalInput != null && ModEntry.ExternalInput.IsExternalDeviceActive && mgTouches.Count == 0)
+                {
+                    _minigamePad.Reset();
+                    br?.ResetVirtualPad(pad);
+                    return;
+                }
+                Vector2 mgStick = _minigamePad.Update(arcadeKind, mgTouches, MapRawToViewport, _vpW, _vpH);
                 Point? mgMouseRaw = null;
                 if (_minigamePad.MousePos.HasValue)
                     mgMouseRaw = ViewportToRaw(new Vector2(_minigamePad.MousePos.Value.X, _minigamePad.MousePos.Value.Y));
@@ -2403,8 +2600,15 @@ namespace SDVMobileControls
             TouchCollection touches = TouchPanel.GetState();
             PollGamepadAutoHide(touches.Count);
 
-            // Physical Bluetooth Controller active (PS5/Xbox/Backbone) with no screen touch:
-            // hide touch overlay AND forward real GCController sticks/buttons cleanly into Stardew!
+            // Physical External Peripheral active (Full Gamepad / Keyboard / Mouse) with no direct screen touch:
+            // yield completely to Harmony ExternalInputBridge so Stardew & SMAPI receive 100% real controller/keyboard/mouse state!
+            if (ModEntry.ExternalInput != null && ModEntry.ExternalInput.IsExternalDeviceActive && touches.Count == 0 && !_guiHidden)
+            {
+                br?.ResetVirtualPad(pad);
+                return;
+            }
+
+            // Legacy fallback when native ExternalInputBridge is unavailable
             if (_gamepadHideHud && _hasPhysicalGamePadState && touches.Count == 0 && !_guiHidden)
             {
                 var gs = _lastPhysicalGamePadState;
@@ -2501,6 +2705,8 @@ namespace SDVMobileControls
                 _tapTouchId = -1;
                 _holdWalking = false;
                 _tapChargingTool = false;
+                _tapHoldSwinging = false;
+                _tapHoldCooldown = 0;
                 _toolTouchId = -1;
                 _interactTouchId = -1;
                 _toolPressed = false;
@@ -2811,7 +3017,7 @@ namespace SDVMobileControls
                     continue;
                 }
 
-                // Existing active tap-to-move / hold-to-walk / long-press charge-tool finger
+                // Existing active tap-to-move / hold-to-walk / mobile hold-to-mine-chop-dig / long-press charge-tool finger
                 if (useTap && tl.Id == _tapTouchId)
                 {
                     if (active)
@@ -2819,31 +3025,83 @@ namespace SDVMobileControls
                         sawTap = true;
                         _tapCurScreen = vp;
                         float moved = Vector2.Distance(vp, _tapStartScreen);
-                        float chargeWobble = Math.Max(52f, _vpH * 0.055f);
-                        if (!_tapChargingTool && !_holdWalking)
+                        float chargeWobble = Math.Max(56f, _vpH * 0.060f);
+                        float tapWobble = Math.Max(38f, _vpH * 0.042f);
+                        if (!_tapChargingTool && !_holdWalking && !_tapHoldSwinging)
                         {
+                            double heldSec = nowSec - _tapStartTime;
                             bool canChargeNow = CanChargeCurrentTool();
-                            bool canCharge = canChargeNow && moved < chargeWobble && (nowSec - _tapStartTime) >= 0.16;
-                            if (canCharge)
+                            bool isFishingRod = Game1.player?.CurrentTool is FishingRod;
+
+                            if (isFishingRod)
                             {
-                                _tapChargingTool = true;
-                                ClearPath();
-                                if (Game1.player != null)
-                                    Game1.player.faceGeneralDirection(ViewportToWorld(_tapStartScreen));
+                                if (canChargeNow && moved < chargeWobble && heldSec >= 0.16)
+                                {
+                                    _tapChargingTool = true;
+                                    ClearPath();
+                                    if (Game1.player != null)
+                                        Game1.player.faceGeneralDirection(ViewportToWorld(_tapStartScreen));
+                                }
+                                else if (moved >= chargeWobble)
+                                {
+                                    _holdWalking = true;
+                                    ClearPath();
+                                }
                             }
-                            else if (moved >= (canChargeNow ? chargeWobble : 24f) || (!canChargeNow && (nowSec - _tapStartTime) >= 0.22))
+                            else
                             {
-                                _holdWalking = true;
-                                ClearPath();
+                                // Check if finger is holding on a mineable/choppable/diggable target (Stardew Mobile Hold-to-Mine/Chop/Dig!)
+                                Vector2 startWorld = ViewportToWorld(_tapStartScreen);
+                                Point startTile = new Point((int)Math.Floor(startWorld.X / 64f), (int)Math.Floor(startWorld.Y / 64f));
+                                TileIntent holdIntent = AutoToolAndCombat.InspectHoldToolTarget(Game1.currentLocation, startTile, Game1.player, _cfg.AutoTool);
+                                bool isHoldToolTarget = holdIntent.Kind == TileActionKind.UseTool;
+
+                                // Keep 3x1 / 5x1 / 3x3 / 6x3 / 5x5 charge hold for upgraded Hoe (dirt) or upgraded WateringCan (crops/ground)
+                                int curIdx = Game1.player != null ? Game1.player.CurrentToolIndex : -1;
+                                bool usesHeldTool = holdIntent.PreferredToolSlot < 0 || holdIntent.PreferredToolSlot == curIdx;
+                                bool preferChargeUpgraded = canChargeNow && usesHeldTool &&
+                                    ((Game1.player?.CurrentTool is Hoe && !holdIntent.Repeatable) ||
+                                     (Game1.player?.CurrentTool is WateringCan));
+
+                                if (preferChargeUpgraded && moved < chargeWobble && heldSec >= 0.18)
+                                {
+                                    _tapChargingTool = true;
+                                    ClearPath();
+                                    if (Game1.player != null)
+                                        Game1.player.faceGeneralDirection(startWorld);
+                                }
+                                else if (isHoldToolTarget && !preferChargeUpgraded && moved < chargeWobble && heldSec >= 0.14)
+                                {
+                                    _tapHoldSwinging = true;
+                                    _tapHoldTile = holdIntent.HasResolvedTile ? holdIntent.ResolvedTile : startTile;
+                                    _tapHoldCooldown = 0;
+                                    ClearPath();
+                                }
+                                else if (canChargeNow && !isHoldToolTarget && moved < chargeWobble && heldSec >= 0.20)
+                                {
+                                    _tapChargingTool = true;
+                                    ClearPath();
+                                    if (Game1.player != null)
+                                        Game1.player.faceGeneralDirection(startWorld);
+                                }
+                                else if (moved >= ((isHoldToolTarget || preferChargeUpgraded) ? chargeWobble : tapWobble) || (!isHoldToolTarget && !canChargeNow && heldSec >= 0.28))
+                                {
+                                    _holdWalking = true;
+                                    ClearPath();
+                                }
                             }
                         }
                     }
                     else
                     {
-                        if (!_holdWalking && !_tapChargingTool)
+                        if (!_holdWalking && !_tapChargingTool && !_tapHoldSwinging)
                             HandleWorldTap(vp);
+                        if (_tapHoldSwinging)
+                            ClearPath();
                         _holdWalking = false;
                         _tapChargingTool = false;
+                        _tapHoldSwinging = false;
+                        _tapHoldCooldown = 0;
                         _tapTouchId = -1;
                     }
                     continue;
@@ -2962,6 +3220,8 @@ namespace SDVMobileControls
                         _tapStartTime = nowSec;
                         _holdWalking = false;
                         _tapChargingTool = false;
+                        _tapHoldSwinging = false;
+                        _tapHoldCooldown = 0;
                         sawTap = true;
 
                         // Tap-to-Move Instant Fishing Rod Charge:
@@ -2997,7 +3257,7 @@ namespace SDVMobileControls
             if (!sawJoy) { _joyTouchId = -1; _joyActivated = false; }
             if (!sawTool) _toolTouchId = -1;
             if (!sawInteract) _interactTouchId = -1;
-            if (!sawTap) { _tapTouchId = -1; _holdWalking = false; _tapChargingTool = false; }
+            if (!sawTap) { _tapTouchId = -1; _holdWalking = false; _tapChargingTool = false; _tapHoldSwinging = false; _tapHoldCooldown = 0; }
             if (!sawSlingshot) _slingshotTouchId = -1;
 
             _toolPressed = sawTool || _tapChargingTool;
@@ -3006,6 +3266,82 @@ namespace SDVMobileControls
             // Lock movement strictly to zero while charging a tool (prevents wobble cancelling FishingRod cast!)
             if (_tapChargingTool)
                 stickVec = Vector2.Zero;
+
+            // --- 1b. Stardew Mobile-style Hold-to-Mine / Hold-to-Chop / Hold-to-Dig ---
+            // While holding finger on any rock/ore/boulder/stump/tree/twig/weed/barrel/monster/artifact/diggable tile:
+            // smoothly walk up (if >1 tile away) and continuously swing until broken or finger is lifted!
+            if (_tapHoldSwinging && !_tapChargingTool && Game1.player != null && Game1.currentLocation != null)
+            {
+                Farmer hw = Game1.player;
+                GameLocation hloc = Game1.currentLocation;
+
+                // Allow dragging finger from one rock/tree/dirt tile to the next while holding (just like Stardew Mobile!)
+                Vector2 curWorld = ViewportToWorld(_tapCurScreen);
+                Point curTile = new Point((int)Math.Floor(curWorld.X / 64f), (int)Math.Floor(curWorld.Y / 64f));
+                if (curTile != _tapHoldTile)
+                {
+                    TileIntent dragIntent = AutoToolAndCombat.InspectHoldToolTarget(hloc, curTile, hw, _cfg.AutoTool);
+                    if (dragIntent.Kind == TileActionKind.UseTool)
+                    {
+                        _tapHoldTile = dragIntent.HasResolvedTile ? dragIntent.ResolvedTile : curTile;
+                        ClearPath();
+                    }
+                }
+
+                TileIntent curHoldIntent = AutoToolAndCombat.InspectHoldToolTarget(hloc, _tapHoldTile, hw, _cfg.AutoTool);
+                if (curHoldIntent.Kind == TileActionKind.UseTool)
+                {
+                    Point holdTarget = curHoldIntent.HasResolvedTile ? curHoldIntent.ResolvedTile : _tapHoldTile;
+                    int hdx = Math.Abs(hw.TilePoint.X - holdTarget.X);
+                    int hdy = Math.Abs(hw.TilePoint.Y - holdTarget.Y);
+                    int hCheb = Math.Max(hdx, hdy);
+                    bool inHoldReach = (hCheb == 1) || (hCheb == 0 && (hw.CurrentTool is WateringCan || hw.CurrentTool is MeleeWeapon));
+
+                    if (inHoldReach)
+                    {
+                        ClearPath();
+                        stickVec = Vector2.Zero;
+                        if (curHoldIntent.PreferredToolSlot >= 0 && curHoldIntent.PreferredToolSlot < hw.Items.Count)
+                        {
+                            if (_cfg.RestoreToolAfterAuto && hw.CurrentToolIndex != curHoldIntent.PreferredToolSlot && _autoToolPrevSlot < 0)
+                            {
+                                _autoToolPrevSlot = hw.CurrentToolIndex;
+                                _autoToolRestoreTimer = 36;
+                            }
+                            hw.CurrentToolIndex = curHoldIntent.PreferredToolSlot;
+                        }
+                        if (!hw.UsingTool)
+                        {
+                            if (_tapHoldCooldown > 0)
+                                _tapHoldCooldown--;
+                            else if (hw.Stamina > 2f || hw.CurrentTool is MeleeWeapon)
+                            {
+                                if (FireTargetedToolSwing(hw, holdTarget))
+                                    _tapHoldCooldown = 3;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // Walk smoothly up to the held rock/tree/dirt tile, then automatically start swinging on arrival!
+                        if (_path == null || !_hasTargetTile || _targetTile != holdTarget)
+                        {
+                            List<Point> approach = PathFinder.FindPath(hloc, hw.TilePoint, holdTarget, hw, stopAdjacent: true, preferCardinal: curHoldIntent.PreferCardinal);
+                            if (approach != null && approach.Count > 0)
+                            {
+                                ClearPath();
+                                _path = approach;
+                                _pathIdx = 0;
+                                _targetTile = holdTarget;
+                                _hasTargetTile = true;
+                                _pendingIntent = new TileIntent { Kind = TileActionKind.None, PreferredToolSlot = -1 };
+                                _lastPlayerPos = hw.Position;
+                                _stuckFrames = 0;
+                            }
+                        }
+                    }
+                }
+            }
 
             // --- 2. Hold-to-Walk (+ Smooth Auto-Harvest/Machine Sweep in Tap-to-Move!) ---
             if (_holdWalking && !_tapChargingTool && stickVec == Vector2.Zero && Game1.player != null)
@@ -3085,11 +3421,32 @@ namespace SDVMobileControls
             {
                 Farmer rw = Game1.player;
                 GameLocation rloc = Game1.currentLocation;
-                if (!_cfg.AutoRepeat || rw == null || rloc == null || stickVec.LengthSquared() > 0.04f || _toolPressed || _interactPressed || sawSlingshot || rw.Stamina <= 2f)
+                int errHudNow = CountErrorHudMessages();
+                if (!_cfg.AutoRepeat ||
+                    rw == null ||
+                    rloc == null ||
+                    rw.isRidingHorse() ||
+                    !rw.CanMove ||
+                    Game1.activeClickableMenu != null ||
+                    Game1.dialogueUp ||
+                    Game1.eventUp ||
+                    Game1.fadeToBlack ||
+                    stickVec.LengthSquared() > 0.04f ||
+                    _toolPressed ||
+                    _interactPressed ||
+                    _tapHoldSwinging ||
+                    sawSlingshot ||
+                    rw.Stamina <= 4f ||
+                    _repeatSwings >= 24 ||
+                    errHudNow > _repeatStartHudCount)
                 {
                     _repeatActive = false;
                 }
-                else if (!rw.UsingTool)
+                else if (rw.UsingTool)
+                {
+                    _repeatObservedSwing = true;
+                }
+                else
                 {
                     if (_repeatCooldown > 0)
                     {
@@ -3097,22 +3454,56 @@ namespace SDVMobileControls
                     }
                     else
                     {
-                        int cheb = Math.Max(Math.Abs(rw.TilePoint.X - _repeatTile.X), Math.Abs(rw.TilePoint.Y - _repeatTile.Y));
-                        if (cheb <= 1)
+                        int rdx = Math.Abs(rw.TilePoint.X - _repeatTile.X);
+                        int rdy = Math.Abs(rw.TilePoint.Y - _repeatTile.Y);
+                        int cheb = Math.Max(rdx, rdy);
+                        bool inReach = (cheb == 1);
+                        if (inReach)
                         {
-                            TileIntent nextIntent = AutoToolAndCombat.InspectTile(rloc, _repeatTile, rw, _cfg.AutoTool);
-                            if (nextIntent.Repeatable && nextIntent.Kind == TileActionKind.UseTool)
+                            // Zero-progress detector: if 2 completed swings failed to reduce target health, stop immediately!
+                            if (_repeatObservedSwing)
                             {
-                                if (nextIntent.PreferredToolSlot >= 0 && nextIntent.PreferredToolSlot < rw.Items.Count)
-                                    rw.CurrentToolIndex = nextIntent.PreferredToolSlot;
-                                rw.faceGeneralDirection(new Vector2(_repeatTile.X * 64f + 32f, _repeatTile.Y * 64f + 32f));
-                                _actionPulseXFrames = 2;
-                                fireX = true;
-                                _repeatCooldown = 7;
+                                float curHp = AutoToolAndCombat.GetTargetHealth(rloc, _repeatTile);
+                                if (curHp > 0f && _repeatLastHealth > 0f && curHp >= _repeatLastHealth - 0.001f)
+                                {
+                                    if (++_repeatNoProgressSwings >= 2)
+                                    {
+                                        _repeatActive = false;
+                                    }
+                                }
+                                else
+                                {
+                                    _repeatNoProgressSwings = 0;
+                                    _repeatLastHealth = curHp;
+                                }
+                                _repeatObservedSwing = false;
                             }
-                            else
+
+                            if (_repeatActive)
                             {
-                                _repeatActive = false;
+                                TileIntent nextIntent = AutoToolAndCombat.InspectTile(rloc, _repeatTile, rw, _cfg.AutoTool);
+                                if (nextIntent.Repeatable && nextIntent.Kind == TileActionKind.UseTool)
+                                {
+                                    if (nextIntent.PreferredToolSlot >= 0 && nextIntent.PreferredToolSlot < rw.Items.Count)
+                                        rw.CurrentToolIndex = nextIntent.PreferredToolSlot;
+                                    if (FireTargetedToolSwing(rw, _repeatTile))
+                                    {
+                                        _repeatSwings++;
+                                        _repeatCooldown = 4;
+                                    }
+                                    else
+                                    {
+                                        FaceTargetTile(rw, _repeatTile);
+                                        _actionPulseXFrames = 2;
+                                        fireX = true;
+                                        _repeatSwings++;
+                                        _repeatCooldown = 6;
+                                    }
+                                }
+                                else
+                                {
+                                    _repeatActive = false;
+                                }
                             }
                         }
                         else
@@ -3275,21 +3666,58 @@ namespace SDVMobileControls
                     _unstickLastPos = Game1.player.Position;
             }
 
+            // Direct Mobile FishingRod Cast-Charge Initiation (exact same clean path as FishingRod.tickUpdate recast!):
+            // Calling Farmer.BeginUsingTool() directly when holding USE with an idle FishingRod avoids
+            // Game1.pressUseToolButton() / TouchDelegatingModHooks double-fire & stale cursor facing, so
+            // isTimingCast starts on Frame 1 with continuous power charging until finger is lifted!
+            if ((_toolPressed || _tapChargingTool) &&
+                !sawSlingshot &&
+                Game1.player != null &&
+                Game1.player.CurrentTool is FishingRod idleRod &&
+                !Game1.player.UsingTool &&
+                Game1.player.CanMove &&
+                !Game1.player.isEating &&
+                !Game1.player.isRidingHorse() &&
+                !Game1.player.IsSitting() &&
+                !idleRod.isTimingCast &&
+                !idleRod.isCasting &&
+                !idleRod.castedButBobberStillInAir &&
+                !idleRod.isFishing &&
+                !idleRod.isNibbling &&
+                !idleRod.isReeling &&
+                !idleRod.pullingOutOfWater &&
+                !idleRod.fishCaught &&
+                !idleRod.showingTreasure &&
+                Game1.activeClickableMenu == null &&
+                !Game1.dialogueUp &&
+                !Game1.eventUp &&
+                !Game1.fadeToBlack)
+            {
+                try
+                {
+                    Game1.player.Halt();
+                    Game1.player.BeginUsingTool();
+                }
+                catch { }
+            }
+
             if (sawSlingshot)
             {
                 Point aimRaw = new Point((int)_slingshotRawPos.X, (int)_slingshotRawPos.Y);
                 EnsureBridge(pad)?.ApplyInputWithMouse(pad, stickVec, true, false, false, aimRaw, true, false, _rawW, _rawH);
             }
-            else if (fireX && Game1.player?.CurrentTool is FishingRod timingRod && timingRod.isTimingCast)
+            else if ((_toolPressed || _tapChargingTool) && Game1.player?.CurrentTool is FishingRod timingRod && timingRod.isTimingCast)
             {
-                // Keep MouseState.LeftButton == Pressed alongside ButtonX while charging cast bar so FishingRod.tickUpdate
-                // NEVER prematurely triggers startCasting() on iOS!
+                // Keep BOTH ButtonX (Keys.C / useToolButton) AND MouseState.LeftButton == Pressed continuously
+                // from Frame 1 while charging cast power so FishingRod.tickUpdate never prematurely casts!
                 Point holdPos = new Point(Math.Max(1, _rawW / 2), Math.Max(1, _rawH / 2));
                 EnsureBridge(pad)?.ApplyInputWithMouse(pad, Vector2.Zero, true, false, false, holdPos, true, false, _rawW, _rawH);
                 Game1.lastCursorMotionWasMouse = false;
             }
             else
             {
+                if (fireX)
+                    Game1.lastCursorMotionWasMouse = false;
                 ApplyToPad(pad, stickVec, fireX, fireA, false);
             }
         }
@@ -3967,12 +4395,16 @@ namespace SDVMobileControls
             Point playerTile = who.TilePoint;
             int cheb = Math.Max(Math.Abs(playerTile.X - tappedTile.X), Math.Abs(playerTile.Y - tappedTile.Y));
 
+            TileIntent intent = AutoToolAndCombat.InspectTile(loc, tappedTile, who, _cfg.AutoTool);
+
             // Tap directly on farmer (cheb == 0):
-            // - If currently A* walking -> cleanly stop walking (never accidentally eat food!)
-            // - If standing still -> Dismount Horse OR Eat/Drink/Trigger usable item (Food, Coffee, Bomb, Staircase, Totem)
+            // - If currently auto-chopping/mining or A* walking -> cleanly stop (never accidentally eat food!)
+            // - If riding horse -> dismount cleanly
+            // - If an actionable target sits right under our feet (crop/soil/forage/monster/ladder/bed) -> handle that first!
+            // - Otherwise if holding usable item (Food, Coffee, Bomb, Staircase, Totem) -> eat/use!
             if (cheb == 0)
             {
-                if (_path != null && _path.Count > 0)
+                if (_repeatActive || (_path != null && _path.Count > 0))
                 {
                     ClearPath();
                     return;
@@ -3983,15 +4415,13 @@ namespace SDVMobileControls
                     _actionPulseAFrames = 1;
                     return;
                 }
-                if (IsSelfUsableObject(who.ActiveObject))
+                if ((intent.Kind == TileActionKind.None || !intent.AllowSameTile) && IsSelfUsableObject(who.ActiveObject))
                 {
                     ClearPath();
                     _actionPulseAFrames = 1;
                     return;
                 }
             }
-
-            TileIntent intent = AutoToolAndCombat.InspectTile(loc, tappedTile, who, _cfg.AutoTool);
 
             // Check interior/exterior loc.doors (e.g. villager bedroom doors) if not already an Action tile
             if (intent.Kind == TileActionKind.None)
@@ -4023,9 +4453,9 @@ namespace SDVMobileControls
                 intent.StopAdjacent = false;
             }
 
-            bool closeEnoughNow = intent.PreferCardinal
-                ? (actionManh == 1)
-                : (actionCheb <= 1);
+            bool closeEnoughNow = (intent.Kind == TileActionKind.UseTool)
+                ? (intent.AllowSameTile ? (actionCheb <= 1) : (actionCheb == 1))
+                : (intent.PreferCardinal ? (actionManh == 1 || (intent.AllowSameTile && actionCheb == 0)) : (actionCheb <= 1));
             if (!tappedWarp && intent.Kind != TileActionKind.None && closeEnoughNow)
             {
                 ClearPath();
@@ -4033,13 +4463,20 @@ namespace SDVMobileControls
                 return;
             }
 
-            // Tap empty adjacent tile while holding a placeable object (Chest, Keg, Fence, Path, Sprinkler, Furniture, Bomb, etc.)!
+            // Tap empty adjacent tile while holding a placeable object (Chest, Keg, Fence, Path, Sprinkler, Furniture, Bomb, Seeds, etc.)!
             if (!tappedWarp && intent.Kind == TileActionKind.None && cheb == 1 && who.ActiveObject != null &&
                 (who.ActiveObject.isPlaceable() || who.ActiveObject.bigCraftable.Value))
             {
                 ClearPath();
-                who.faceGeneralDirection(new Vector2(tappedTile.X * 64f + 32f, tappedTile.Y * 64f + 32f));
-                _actionPulseAFrames = 1;
+                FaceTargetTile(who, tappedTile);
+                bool placed = false;
+                try
+                {
+                    placed = Utility.tryToPlaceItem(loc, who.ActiveObject, tappedTile.X * 64 + 32, tappedTile.Y * 64 + 32);
+                }
+                catch { }
+                if (!placed)
+                    _actionPulseAFrames = 1;
                 return;
             }
 
@@ -4047,6 +4484,8 @@ namespace SDVMobileControls
             List<Point> path = PathFinder.FindPath(loc, playerTile, pathGoal, who, intent.StopAdjacent, intent.PreferCardinal);
             if (path == null)
             {
+                // Any new world tap immediately cancels an active auto-chop loop
+                _repeatActive = false;
                 // Even if A* couldn't path directly to an out-of-bounds door edge, if player is right beside the warp, push through!
                 if (tappedWarp && Math.Max(Math.Abs(playerTile.X - warpGoal.X), Math.Abs(playerTile.Y - warpGoal.Y)) <= 2)
                 {
@@ -4070,11 +4509,13 @@ namespace SDVMobileControls
                 }
                 if (intent.Kind != TileActionKind.None)
                 {
+                    ClearPath();
                     TriggerTileIntent(who, actionTile, intent);
                     return;
                 }
             }
 
+            ClearPath();
             _path = path;
             _pathIdx = 0;
             _targetTile = tappedWarp ? warpGoal : actionTile;
@@ -4282,7 +4723,11 @@ namespace SDVMobileControls
             Vector2 playerCenter = who.GetBoundingBox().Center.ToVector2();
             Vector2 diff = wpCenter - playerCenter;
 
-            if (diff.Length() <= 16f)
+            bool isFinalCardinalStop = (_pathIdx == _path.Count - 1) && _pendingIntent.PreferCardinal && _pendingIntent.Kind != TileActionKind.None;
+            float arrivalRadius = isFinalCardinalStop ? 11f : 16f;
+            if (diff.Length() <= arrivalRadius ||
+                (isFinalCardinalStop && _stuckFrames >= 12 &&
+                 Math.Abs(who.TilePoint.X - _targetTile.X) + Math.Abs(who.TilePoint.Y - _targetTile.Y) == 1))
             {
                 _pathIdx++;
                 if (_pathIdx >= _path.Count)
@@ -4325,19 +4770,95 @@ namespace SDVMobileControls
 
             if (intent.Kind != TileActionKind.None)
             {
-                int cheb = Math.Max(Math.Abs(who.TilePoint.X - target.X), Math.Abs(who.TilePoint.Y - target.Y));
-                if (cheb <= 1)
+                int dx = Math.Abs(who.TilePoint.X - target.X);
+                int dy = Math.Abs(who.TilePoint.Y - target.Y);
+                int cheb = Math.Max(dx, dy);
+                int manh = dx + dy;
+                bool reachedAction = (intent.Kind == TileActionKind.UseTool)
+                    ? (intent.AllowSameTile ? (cheb <= 1) : (cheb == 1))
+                    : (intent.PreferCardinal ? (manh == 1 || (intent.AllowSameTile && cheb == 0)) : (cheb <= 1));
+                if (reachedAction)
                     TriggerTileIntent(who, target, intent);
             }
             else if (intent.StopAdjacent)
             {
                 // e.g., walked to water shoreline while holding FishingRod -> face the water ready to hold-charge!
-                who.faceGeneralDirection(new Vector2(target.X * 64f + 32f, target.Y * 64f + 32f));
+                FaceTargetTile(who, target);
             }
+        }
+
+        private static int CountErrorHudMessages()
+        {
+            var list = Game1.hudMessages;
+            if (list == null) return 0;
+            int count = 0;
+            for (int i = 0; i < list.Count; i++)
+            {
+                HUDMessage m = list[i];
+                if (m != null && (m.whatType == HUDMessage.error_type || m.noIcon))
+                    count++;
+            }
+            return count;
+        }
+
+        private static bool FireTargetedToolSwing(Farmer who, Point tile)
+        {
+            if (who == null || who.CurrentTool == null ||
+                who.CurrentTool is FishingRod || who.CurrentTool is Slingshot ||
+                who.UsingTool || !who.CanMove || who.isEating || who.isRidingHorse() || who.IsSitting() ||
+                Game1.activeClickableMenu != null || Game1.dialogueUp || Game1.eventUp || Game1.fadeToBlack)
+                return false;
+
+            try
+            {
+                who.Halt();
+                FaceTargetTile(who, tile);
+                who.toolPower.Value = 0;
+                who.toolHold.Value = 0;
+                who.lastClick = new Vector2(tile.X * 64f + 32f, tile.Y * 64f + 32f);
+                Game1.lastCursorMotionWasMouse = false;
+                who.BeginUsingTool();
+                // Upgraded Hoe / WateringCan pause in windup until EndUsingTool(); finish single-tile swing cleanly!
+                if (who.UsingTool && (who.CurrentTool is Hoe || who.CurrentTool is WateringCan) && who.CurrentTool.UpgradeLevel > 0)
+                    who.EndUsingTool();
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static void FaceTargetTile(Farmer who, Point tile)
+        {
+            if (who == null) return;
+            int dtx = tile.X - who.TilePoint.X;
+            int dty = tile.Y - who.TilePoint.Y;
+            if (dtx == 0 && dty == 0)
+                return;
+            // Exact cardinal direction when standing orthogonally adjacent so pixel edge offsets never aim wrong!
+            if (Math.Abs(dtx) + Math.Abs(dty) == 1)
+            {
+                if (dty < 0) who.FacingDirection = 0;
+                else if (dtx > 0) who.FacingDirection = 1;
+                else if (dty > 0) who.FacingDirection = 2;
+                else if (dtx < 0) who.FacingDirection = 3;
+                return;
+            }
+            who.faceGeneralDirection(new Vector2(tile.X * 64f + 32f, tile.Y * 64f + 32f));
         }
 
         private void TriggerTileIntent(Farmer who, Point tile, TileIntent intent)
         {
+            if (intent.Kind == TileActionKind.UseTool)
+            {
+                if (who.isRidingHorse() || !who.CanMove)
+                    return;
+                int cheb = Math.Max(Math.Abs(who.TilePoint.X - tile.X), Math.Abs(who.TilePoint.Y - tile.Y));
+                if (cheb > 1)
+                    return;
+            }
+
             if (intent.PreferredToolSlot >= 0 && intent.PreferredToolSlot < who.Items.Count)
             {
                 if (_cfg.RestoreToolAfterAuto && who.CurrentToolIndex != intent.PreferredToolSlot && _autoToolPrevSlot < 0)
@@ -4348,41 +4869,60 @@ namespace SDVMobileControls
                 who.CurrentToolIndex = intent.PreferredToolSlot;
             }
 
-            Vector2 targetCenter = new Vector2(tile.X * 64f + 32f, tile.Y * 64f + 32f);
-            who.faceGeneralDirection(targetCenter);
+            FaceTargetTile(who, tile);
 
             if (intent.Kind == TileActionKind.UseTool)
             {
-                _actionPulseXFrames = 2;
+                if (!FireTargetedToolSwing(who, tile))
+                    _actionPulseXFrames = 2;
                 if (_cfg.AutoRepeat && intent.Repeatable)
                 {
                     _repeatActive = true;
                     _repeatTile = tile;
-                    _repeatCooldown = 8;
+                    _repeatCooldown = 5;
+                    _repeatSwings = 1;
+                    _repeatStartHudCount = CountErrorHudMessages();
+                    _repeatLastHealth = AutoToolAndCombat.GetTargetHealth(Game1.currentLocation, tile);
+                    _repeatNoProgressSwings = 0;
+                    _repeatObservedSwing = false;
                 }
             }
             else if (intent.Kind == TileActionKind.Interact)
             {
-                // Directly invoke loc.checkAction ONCE (identical to PC right-click!) so Mailboxes, Building doors
-                // (Farmhouse/Coop/Barn/Shed), Town shops/LockedDoorWarp, TV, Calendar, and Shipping Bins trigger
-                // cleanly ONCE without ever missing on diagonals or spamming 3x locked-door/eat dialogues!
+                // Directly invoke loc.checkAction ONCE with SynthesizingTapAction=true (so Game1.didPlayerJustRightClick
+                // returns true identically to PC right-click!). This fixes ShippingBin, FishPond, Furniture (TV/Bed/Dresser),
+                // JunimoHut, MineShaft ladders/shafts, Mailboxes, Building doors, Shops, and modded buildings cleanly in 1 tap!
                 bool handled = false;
-                if (Game1.currentLocation != null &&
+                GameLocation loc = Game1.currentLocation;
+                if (loc != null &&
                     Game1.activeClickableMenu == null &&
                     !Game1.dialogueUp && !Game1.eventUp && !Game1.fadeToBlack)
                 {
+                    ModEntry.SynthesizingTapAction = true;
                     try
                     {
-                        handled = Game1.currentLocation.checkAction(
-                            new xTile.Dimensions.Location(tile.X, tile.Y),
-                            Game1.viewport,
-                            who);
+                        handled = Game1.tryToCheckAt(new Vector2(tile.X, tile.Y), who);
                     }
                     catch { }
+                    finally
+                    {
+                        ModEntry.SynthesizingTapAction = false;
+                    }
+
+                    // Seeds / Fertilizer on HoeDirt, Crab Pots on water, and placeable objects use Utility.tryToPlaceItem!
+                    if (!handled && who.ActiveObject != null &&
+                        Game1.activeClickableMenu == null && !Game1.dialogueUp && !Game1.eventUp && !Game1.fadeToBlack)
+                    {
+                        try
+                        {
+                            handled = Utility.tryToPlaceItem(loc, who.ActiveObject, tile.X * 64 + 32, tile.Y * 64 + 32);
+                        }
+                        catch { }
+                    }
                 }
 
-                if (!handled)
-                    _actionPulseAFrames = 1;
+                if (!handled && Game1.activeClickableMenu == null && !Game1.dialogueUp && !Game1.eventUp && !Game1.fadeToBlack)
+                    _actionPulseAFrames = 2;
             }
         }
 
@@ -4694,7 +5234,8 @@ namespace SDVMobileControls
 
             if (MobileMinigamePad.DetectCurrentArcadeMinigame() != MobileMinigamePad.ArcadeKind.None)
             {
-                _minigamePad.Draw(sb, _pixel, _circle, _ring, _bridge, _vpW, _vpH);
+                if (!_gamepadHideHud)
+                    _minigamePad.Draw(sb, _pixel, _circle, _ring, _bridge, _vpW, _vpH);
                 return;
             }
 
@@ -5097,7 +5638,8 @@ namespace SDVMobileControls
         private void ComputeLayout()
         {
             float s = _cfg.ButtonScale;
-            float unit = Math.Min(_vpW, _vpH);
+            // On 16:9 / 19.5:9 iPhones _vpW * 0.56f >= _vpH (unchanged!); on 4:3 iPads it keeps touch buttons nicely proportioned instead of oversized!
+            float unit = Math.Min(Math.Min(_vpW, _vpH), _vpW * 0.56f);
 
             // 1. Invisible Mode: Left Joystick Rect + 2 Tall Vertical Rectangular Bars on Right
             _invJoyRect = NormToRect(_cfg.InvJoyX, _cfg.InvJoyY, _cfg.InvJoyW, _cfg.InvJoyH);

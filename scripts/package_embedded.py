@@ -136,7 +136,7 @@ def build(base, library, signer, output, host_dll=None, touch_dll=None, lidgren_
         prepare_binary(fw/FRAMEWORK, sig_capacity=48*1024)
         (fw/"Info.plist").write_bytes(plistlib.dumps(dict(CFBundleExecutable=FRAMEWORK,
             CFBundleName=FRAMEWORK,CFBundleIdentifier="dev.stardewmobile.gardenkit",
-            CFBundlePackageType="FMWK",CFBundleVersion="11",CFBundleShortVersionString="7.10",
+            CFBundlePackageType="FMWK",CFBundleVersion="101",CFBundleShortVersionString="1.0.1",
             MinimumOSVersion=min_ios,CFBundleSupportedPlatforms=["iPhoneOS"])))
         # Remove stale debug get-task-allow archived-expanded-entitlements.xcent (can conflict with Enterprise/TXM signers on iOS 26/27)
         stale_xcent = app / "archived-expanded-entitlements.xcent"
@@ -151,6 +151,10 @@ def build(base, library, signer, output, host_dll=None, touch_dll=None, lidgren_
             mc_dst.mkdir(parents=True, exist_ok=True)
             (mc_dst / "manifest.json").write_bytes(mc_man.read_bytes())
             (mc_dst / "SDVMobileControls.dll").write_bytes(mc_dll.read_bytes())
+        for boot_asset in ("boot_bg.jpg", "boot_title_main.png", "boot_title_sub.png"):
+            ba_path = mod_root / boot_asset
+            if ba_path.is_file():
+                (fw / boot_asset).write_bytes(ba_path.read_bytes())
         (app/"orchard.png").write_bytes((mod_root/"orchard.png").read_bytes())
         if host_dll:
             (app/"SDViOS.dll").write_bytes(Path(host_dll).read_bytes())
@@ -172,9 +176,12 @@ def build(base, library, signer, output, host_dll=None, touch_dll=None, lidgren_
         info = plistlib.loads((app/"Info.plist").read_bytes())
         info.update(
             MinimumOSVersion=min_ios,
-            CFBundleVersion="1.6.27",
+            CFBundleShortVersionString="1.0.1",
+            CFBundleVersion="1.0.1",
             UIFileSharingEnabled=True,
             LSSupportsOpeningDocumentsInPlace=True,
+            UIApplicationSupportsIndirectInputEvents=True,
+            NSPhotoLibraryUsageDescription="Garden Launcher cần truy cập Thư viện Ảnh/Video khi bạn đính kèm ảnh chụp màn hình hoặc video minh họa vào báo lỗi.",
             LSEnvironment={"MONO_GC_PARAMS": "nursery-size=4m,soft-heap-limit=384m,evacuation-threshold=66"},
             NSLocalNetworkUsageDescription="Stardew Mobile cần quyền mạng cục bộ để tạo phòng (Host) và kết nối chơi chung Co-op qua LAN / IP trực tiếp.",
             NSBonjourServices=["_stardew._udp", "_lidgren._udp"],

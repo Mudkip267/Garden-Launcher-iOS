@@ -89,6 +89,171 @@ static id jsonAt(NSString *p) {
     return j;
 }
 
+static NSString *sdvHiddenGameDir(NSString *docsPath) {
+    if (!docsPath.length) return @"";
+    NSString *d = join(docsPath, @".game");
+    [fm() createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
+    NSURL *u = [NSURL fileURLWithPath:d isDirectory:YES];
+    [u setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
+    return d;
+}
+
+static NSString *sdvHiddenGardenDir(NSString *docsPath) {
+    if (!docsPath.length) return @"";
+    NSString *d = join(docsPath, @".garden");
+    [fm() createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
+    return d;
+}
+
+static BOOL sdvIsUnusedGameRootJunk(NSString *fileLow, NSString *extLow) {
+    if (!fileLow.length) return YES;
+    if ([extLow isEqualToString:@"xml"] || [extLow isEqualToString:@"pdb"] ||
+        [extLow isEqualToString:@"exe"] || [extLow isEqualToString:@"so"] ||
+        [extLow isEqualToString:@"dylib"] || [extLow isEqualToString:@"bat"] ||
+        [extLow isEqualToString:@"sh"] || [extLow isEqualToString:@"cmd"] ||
+        [extLow isEqualToString:@"ini"] || [extLow isEqualToString:@"cdx"] ||
+        [extLow isEqualToString:@"md"] || [fileLow containsString:@".so."]) {
+        return YES;
+    }
+    if ([fileLow hasSuffix:@"_license.txt"] || [fileLow hasPrefix:@"license"] ||
+        [fileLow hasPrefix:@"readme"] || [fileLow hasPrefix:@"notice"] ||
+        [fileLow hasPrefix:@"api-ms-win-"] || [fileLow hasPrefix:@"mscordaccore_"] ||
+        [fileLow hasPrefix:@"microsoft.diasymreader"]) {
+        return YES;
+    }
+    static NSSet<NSString *> *desktopJunk = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        desktopJunk = [NSSet setWithArray:@[
+            @"coreclr.dll", @"clrjit.dll", @"clrgc.dll", @"clretwrc.dll",
+            @"hostfxr.dll", @"hostpolicy.dll", @"ucrtbase.dll", @"msquic.dll",
+            @"mscordaccore.dll", @"mscordbi.dll", @"mscorrc.dll", @"dbgshim.dll",
+            @"steamworks.net.dll", @"galaxycsharp.dll", @"galaxy64.dll", @"galaxycsharpglue.dll",
+            @"steam_api64.dll", @"steam_api64.cdx", @"steam_emu.ini",
+            @"sdl2.dll", @"faudio.dll", @"soft_oal.dll", @"libskiasharp.dll",
+            @"liblwjgl_lz4.dll", @"stb_png_writer.dll", @"system.io.compression.native.dll",
+            @"system.private.corelib.dll"
+        ]];
+    });
+    return [desktopJunk containsObject:fileLow];
+}
+
+static void sdvMoveMergeDir(NSString *srcDir, NSString *dstDir) {
+    if (!dir(srcDir)) return;
+    if (![fm() fileExistsAtPath:dstDir]) {
+        [fm() createDirectoryAtPath:dstDir.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+        if ([fm() moveItemAtPath:srcDir toPath:dstDir error:nil]) return;
+    }
+    [fm() createDirectoryAtPath:dstDir withIntermediateDirectories:YES attributes:nil error:nil];
+    for (NSString *sub in ([fm() contentsOfDirectoryAtPath:srcDir error:nil] ?: @[])) {
+        NSString *sp = join(srcDir, sub);
+        NSString *dp = join(dstDir, sub);
+        if (dir(sp)) {
+            sdvMoveMergeDir(sp, dp);
+        } else {
+            if ([fm() fileExistsAtPath:dp]) [fm() removeItemAtPath:dp error:nil];
+            [fm() moveItemAtPath:sp toPath:dp error:nil];
+        }
+    }
+    [fm() removeItemAtPath:srcDir error:nil];
+}
+
+// Automatically hides all non-user game/runtime/config files inside Documents/.game/ and Documents/.garden/
+// so Apple's Files app (Tệp -> Trên iPhone -> Garden Launcher) stays super clean with only Mods, Saves, ErrorLogs!
+static void sdvMigrateDocumentsToHiddenLayout(NSString *docsPath) {
+    if (!docsPath.length) return;
+    @try {
+        NSString *gameDir = sdvHiddenGameDir(docsPath);
+        NSString *gardenDir = sdvHiddenGardenDir(docsPath);
+
+        // 1. Move internal launcher/controller config & IPC flag files -> Documents/.garden/
+        NSArray<NSString *> *gardenFiles = @[
+            @"sdv_perf.cfg", @"sdv_menubar.cfg", @"sdv_mobile_ctrl.cfg",
+            @"sdv_mobile_edit.flag", @"sdv_ram_alert.txt", @"sdv_pause_now.flag",
+            @"sdv_haptic_bite.flag", @"sdv_safe_area.cfg", @"sdv_boot_stage.txt",
+            @"sdv_boot_ready.flag", @"sdv_gc_now.flag", @"sdv_prune_now.flag",
+            @"touch_overlay_config.json"
+        ];
+        for (NSString *gf in gardenFiles) {
+            NSString *src = join(docsPath, gf);
+            NSString *dst = join(gardenDir, gf);
+            if ([fm() fileExistsAtPath:src]) {
+                if (![fm() fileExistsAtPath:dst]) {
+                    [fm() moveItemAtPath:src toPath:dst error:nil];
+                } else {
+                    [fm() removeItemAtPath:src error:nil];
+                }
+            }
+        }
+        NSString *oldDisabled = join(docsPath, @"DisabledMods");
+        if (dir(oldDisabled)) {
+            sdvMoveMergeDir(oldDisabled, join(gardenDir, @"DisabledMods"));
+        }
+
+        // 2. Migrate any legacy Documents/StardewValley/ subfolder into Documents/.game/
+        NSString *legacySub = join(docsPath, @"StardewValley");
+        if (dir(legacySub)) {
+            if ([fm() fileExistsAtPath:join(legacySub, @"Stardew Valley.dll")] || dir(join(legacySub, @"Content"))) {
+                sdvMoveMergeDir(legacySub, gameDir);
+            }
+        }
+
+        // 3. Move loose PC game files & folders from Documents/ -> Documents/.game/, and delete unused PC doc/license junk
+        NSArray<NSString *> *rootItems = [fm() contentsOfDirectoryAtPath:docsPath error:nil] ?: @[];
+        for (NSString *item in rootItems) {
+            if ([item hasPrefix:@"."]) continue;
+            NSString *low = item.lowercaseString;
+            if ([low isEqualToString:@"mods"] || [low isEqualToString:@"saves"] || [low isEqualToString:@"errorlogs"]) continue;
+            NSString *src = join(docsPath, item);
+            if (dir(src)) {
+                if ([low isEqualToString:@"content"]) {
+                    sdvMoveMergeDir(src, join(gameDir, @"Content"));
+                } else if ([low isEqualToString:@"smapi-internal"]) {
+                    NSString *dstSi = join(gameDir, @"smapi-internal");
+                    if (!dir(dstSi)) {
+                        [fm() moveItemAtPath:src toPath:dstSi error:nil];
+                    } else {
+                        NSString *srcCfg = join(src, @"config.user.json");
+                        NSString *dstCfg = join(dstSi, @"config.user.json");
+                        if ([fm() fileExistsAtPath:srcCfg] && ![fm() fileExistsAtPath:dstCfg]) {
+                            [fm() moveItemAtPath:srcCfg toPath:dstCfg error:nil];
+                        }
+                        [fm() removeItemAtPath:src error:nil];
+                    }
+                }
+                continue;
+            }
+            NSString *ext = item.pathExtension.lowercaseString;
+            if (sdvIsUnusedGameRootJunk(low, ext)) {
+                [fm() removeItemAtPath:src error:nil];
+                continue;
+            }
+            BOOL isGameRuntimeFile =
+                [ext isEqualToString:@"dll"] ||
+                [low hasPrefix:@"stardew valley."] ||
+                [low hasPrefix:@"stardewmoddingapi."] ||
+                [low isEqualToString:@"force_vanilla.txt"];
+            if (isGameRuntimeFile) {
+                NSString *dst = join(gameDir, item);
+                if (![fm() fileExistsAtPath:dst]) {
+                    [fm() moveItemAtPath:src toPath:dst error:nil];
+                } else {
+                    [fm() removeItemAtPath:src error:nil];
+                }
+            }
+        }
+
+        // 4. Also prune unused desktop doc/license junk inside .game/ root
+        for (NSString *gitem in ([fm() contentsOfDirectoryAtPath:gameDir error:nil] ?: @[])) {
+            NSString *gp = join(gameDir, gitem);
+            if (dir(gp)) continue;
+            if (sdvIsUnusedGameRootJunk(gitem.lowercaseString, gitem.pathExtension.lowercaseString)) {
+                [fm() removeItemAtPath:gp error:nil];
+            }
+        }
+    } @catch (NSException *ex) { }
+}
+
 static void syncBundledLidgren(NSString *docsPath) {
     if (!docsPath.length) return;
     @try {
@@ -106,17 +271,12 @@ static void syncBundledLidgren(NSString *docsPath) {
         if (!srcData.length) return;
         NSString *srcHash = hashData(srcData);
 
-        NSMutableArray<NSString *> *targets = [NSMutableArray arrayWithObject:docsPath];
-        NSString *subSdv = join(docsPath, @"StardewValley");
-        if (dir(subSdv)) [targets addObject:subSdv];
-
-        for (NSString *base in targets) {
-            NSString *dst = join(base, @"Lidgren.Network.dll");
-            NSData *dstData = [fm() fileExistsAtPath:dst] ? [NSData dataWithContentsOfFile:dst options:NSDataReadingMappedIfSafe error:nil] : nil;
-            if (!dstData || dstData.length != srcData.length || ![srcHash isEqualToString:hashData(dstData)]) {
-                [fm() createDirectoryAtPath:base withIntermediateDirectories:YES attributes:nil error:nil];
-                [srcData writeToFile:dst options:NSDataWritingAtomic error:nil];
-            }
+        NSString *base = sdvHiddenGameDir(docsPath);
+        NSString *dst = join(base, @"Lidgren.Network.dll");
+        NSData *dstData = [fm() fileExistsAtPath:dst] ? [NSData dataWithContentsOfFile:dst options:NSDataReadingMappedIfSafe error:nil] : nil;
+        if (!dstData || dstData.length != srcData.length || ![srcHash isEqualToString:hashData(dstData)]) {
+            [fm() createDirectoryAtPath:base withIntermediateDirectories:YES attributes:nil error:nil];
+            [srcData writeToFile:dst options:NSDataWritingAtomic error:nil];
         }
     } @catch (NSException *ex) { }
 }
@@ -145,11 +305,7 @@ static NSString *syncBundledSmapi(NSString *docsPath) {
         NSData *srcToolkitData = [fm() fileExistsAtPath:srcToolkit] ? [NSData dataWithContentsOfFile:srcToolkit options:NSDataReadingMappedIfSafe error:nil] : nil;
         NSString *srcToolkitHash = srcToolkitData.length ? hashData(srcToolkitData) : nil;
 
-        NSMutableArray<NSString *> *targets = [NSMutableArray arrayWithObject:docsPath];
-        NSString *subSdv = join(docsPath, @"StardewValley");
-        if (dir(subSdv) && ([fm() fileExistsAtPath:join(subSdv, @"Stardew Valley.dll")] || [fm() fileExistsAtPath:join(subSdv, @"StardewModdingAPI.dll")])) {
-            [targets addObject:subSdv];
-        }
+        NSArray<NSString *> *targets = @[sdvHiddenGameDir(docsPath)];
 
         NSMutableArray<NSString *> *notes = [NSMutableArray array];
         for (NSString *base in targets) {
@@ -428,15 +584,27 @@ static NSDictionary *gameDataStatus(NSString *docsPath) {
     if (!docsPath.length) {
         return @{@"hasSdvDll": @NO, @"hasContent": @NO, @"hasSmapi": @NO, @"hasSmapiInternal": @NO, @"ready": @NO, @"gameDir": @""};
     }
+    NSString *hiddenGame = join(docsPath, @".game");
     NSString *sub = join(docsPath, @"StardewValley");
-    NSString *gameDir = ([fm() fileExistsAtPath:join(docsPath, @"Stardew Valley.dll")] || ![fm() fileExistsAtPath:join(sub, @"Stardew Valley.dll")]) ? docsPath : sub;
+    NSString *gameDir = hiddenGame;
+    if ([fm() fileExistsAtPath:join(hiddenGame, @"Stardew Valley.dll")] || dir(join(hiddenGame, @"Content"))) {
+        gameDir = hiddenGame;
+    } else if ([fm() fileExistsAtPath:join(docsPath, @"Stardew Valley.dll")] || dir(join(docsPath, @"Content"))) {
+        gameDir = docsPath;
+    } else if ([fm() fileExistsAtPath:join(sub, @"Stardew Valley.dll")] || dir(join(sub, @"Content"))) {
+        gameDir = sub;
+    }
     BOOL hasSdv = [fm() fileExistsAtPath:join(gameDir, @"Stardew Valley.dll")];
     NSString *contentDir = join(gameDir, @"Content");
     BOOL hasContent = dir(contentDir) && ([fm() contentsOfDirectoryAtPath:contentDir error:nil].count > 0);
-    BOOL hasSmapi = [fm() fileExistsAtPath:join(gameDir, @"StardewModdingAPI.dll")] || [fm() fileExistsAtPath:join(docsPath, @"StardewModdingAPI.dll")];
+    BOOL hasSmapi = [fm() fileExistsAtPath:join(gameDir, @"StardewModdingAPI.dll")] ||
+                    [fm() fileExistsAtPath:join(hiddenGame, @"StardewModdingAPI.dll")] ||
+                    [fm() fileExistsAtPath:join(docsPath, @"StardewModdingAPI.dll")];
+    NSString *si0 = join(hiddenGame, @"smapi-internal");
     NSString *si1 = join(gameDir, @"smapi-internal");
     NSString *si2 = join(docsPath, @"smapi-internal");
-    BOOL hasSi = (dir(si1) && [fm() contentsOfDirectoryAtPath:si1 error:nil].count > 0) ||
+    BOOL hasSi = (dir(si0) && [fm() contentsOfDirectoryAtPath:si0 error:nil].count > 0) ||
+                 (dir(si1) && [fm() contentsOfDirectoryAtPath:si1 error:nil].count > 0) ||
                  (dir(si2) && [fm() contentsOfDirectoryAtPath:si2 error:nil].count > 0);
     return @{
         @"hasSdvDll": @(hasSdv),
@@ -976,8 +1144,9 @@ static NSUInteger importGameDataWithLibArchive(NSURL *url, NSString *docsPath) {
         fail(@"SMAPI 4.5.2 bản iOS đã tích hợp sẵn trong Garden Launcher — bạn không cần nhập gói SMAPI từ PC! Hãy chọn gói dữ liệu game PC chứa Stardew Valley.dll và thư mục Content/.");
     }
 
-    // Pass 2: Stream-extract into Documents/
+    // Pass 2: Stream-extract into hidden Documents/.game/ (and visible Mods/ if included), skipping unused PC files!
     mkdirs(docsPath);
+    NSString *gameRoot = sdvHiddenGameDir(docsPath);
     mkdirs(join(docsPath, @"Mods"));
     mkdirs(join(docsPath, @"Saves"));
     mkdirs(join(docsPath, @"ErrorLogs"));
@@ -986,16 +1155,6 @@ static NSUInteger importGameDataWithLibArchive(NSURL *url, NSString *docsPath) {
     for (NSString *bf in ([fm() contentsOfDirectoryAtPath:NSBundle.mainBundle.bundlePath error:nil] ?: @[])) {
         if ([bf.pathExtension.lowercaseString isEqualToString:@"dll"]) [bundleRuntimeFiles addObject:bf.lowercaseString];
     }
-    NSSet<NSString *> *desktopJunk = [NSSet setWithArray:@[
-        @"coreclr.dll", @"clrjit.dll", @"clrgc.dll", @"clretwrc.dll",
-        @"hostfxr.dll", @"hostpolicy.dll", @"ucrtbase.dll", @"msquic.dll",
-        @"mscordaccore.dll", @"mscordbi.dll", @"mscorrc.dll", @"dbgshim.dll",
-        @"steamworks.net.dll", @"galaxycsharp.dll", @"galaxy64.dll", @"galaxycsharpglue.dll",
-        @"steam_api64.dll", @"steam_api64.cdx", @"steam_emu.ini",
-        @"sdl2.dll", @"faudio.dll", @"soft_oal.dll", @"libskiasharp.dll",
-        @"liblwjgl_lz4.dll", @"stb_png_writer.dll", @"system.io.compression.native.dll",
-        @"system.private.corelib.dll"
-    ]];
 
     void *a = api->read_new();
     api->support_filter_all(a);
@@ -1049,12 +1208,13 @@ static NSUInteger importGameDataWithLibArchive(NSURL *url, NSString *docsPath) {
                     ([topLow isEqualToString:@"mods"] && relParts.count >= 2 &&
                      ([relParts[1] caseInsensitiveCompare:@"SDViOSTouchControls"] == NSOrderedSame ||
                       [relParts[1] caseInsensitiveCompare:@"SDVMobileControls"] == NSOrderedSame)) ||
-                    (relParts.count == 1 && ([fileLow hasPrefix:@"stardewmoddingapi"] || [extLow isEqualToString:@"exe"] || [extLow isEqualToString:@"so"] || [extLow isEqualToString:@"dylib"] || [extLow isEqualToString:@"pdb"] || [fileLow containsString:@".so."] || [fileLow hasPrefix:@"api-ms-win-"] || [fileLow hasPrefix:@"mscordaccore_"] || [fileLow hasPrefix:@"microsoft.diasymreader"] || [desktopJunk containsObject:fileLow] || [bundleRuntimeFiles containsObject:fileLow]))) {
+                    (relParts.count == 1 && ([fileLow hasPrefix:@"stardewmoddingapi"] || sdvIsUnusedGameRootJunk(fileLow, extLow) || [bundleRuntimeFiles containsObject:fileLow]))) {
                     if (api->data_skip) api->data_skip(a);
                     continue;
                 }
 
-                NSString *dst = inside(docsPath, rel);
+                NSString *targetBase = [topLow isEqualToString:@"mods"] ? docsPath : gameRoot;
+                NSString *dst = inside(targetBase, rel);
                 mkdirs(dst.stringByDeletingLastPathComponent);
                 FILE *fp = fopen(dst.fileSystemRepresentation, "wb");
                 if (!fp) fail(@"Không tạo được tệp dữ liệu game.");
@@ -1074,6 +1234,7 @@ static NSUInteger importGameDataWithLibArchive(NSURL *url, NSString *docsPath) {
         api->read_free(a);
     }
     if (written == 0) fail(@"Không giải nén được tệp nào từ gói dữ liệu.");
+    sdvMigrateDocumentsToHiddenLayout(docsPath);
     syncBundledLidgren(docsPath);
     syncBundledSmapi(docsPath);
     syncBundledMobileControls(docsPath);
@@ -1137,9 +1298,10 @@ static NSUInteger importGameDataZip(NSURL *url, NSString *docsPath) {
             fail(@"SMAPI 4.5.2 bản iOS đã tích hợp sẵn trong Garden Launcher — bạn không cần nhập gói SMAPI từ PC! Hãy chọn gói dữ liệu game PC chứa Stardew Valley.dll và thư mục Content/.");
         }
 
-        // Pass 2: Extract cleanly into Documents/ (never overwrite existing Saves/, skip conflicting desktop runtime binaries!)
+        // Pass 2: Extract cleanly into hidden Documents/.game/ (visible Mods/ only, skip unused PC doc/license/runtime files!)
         uint64_t totalBytes = 0;
         mkdirs(docsPath);
+        NSString *gameRoot = sdvHiddenGameDir(docsPath);
         mkdirs(join(docsPath, @"Mods"));
         mkdirs(join(docsPath, @"Saves"));
         mkdirs(join(docsPath, @"ErrorLogs"));
@@ -1151,16 +1313,6 @@ static NSUInteger importGameDataZip(NSURL *url, NSString *docsPath) {
                 [bundleRuntimeFiles addObject:bf.lowercaseString];
             }
         }
-        NSSet<NSString *> *desktopJunk = [NSSet setWithArray:@[
-            @"coreclr.dll", @"clrjit.dll", @"clrgc.dll", @"clretwrc.dll",
-            @"hostfxr.dll", @"hostpolicy.dll", @"ucrtbase.dll", @"msquic.dll",
-            @"mscordaccore.dll", @"mscordbi.dll", @"mscorrc.dll", @"dbgshim.dll",
-            @"steamworks.net.dll", @"galaxycsharp.dll", @"galaxy64.dll", @"galaxycsharpglue.dll",
-            @"steam_api64.dll", @"steam_api64.cdx", @"steam_emu.ini",
-            @"sdl2.dll", @"faudio.dll", @"soft_oal.dll", @"libskiasharp.dll",
-            @"liblwjgl_lz4.dll", @"stb_png_writer.dll", @"system.io.compression.native.dll",
-            @"system.private.corelib.dll"
-        ]];
 
         for (unsigned i = 0; i < count; i++) { @autoreleasepool {
             mz_zip_archive_file_stat st;
@@ -1195,19 +1347,18 @@ static NSUInteger importGameDataZip(NSURL *url, NSString *docsPath) {
                 ([relParts[1] caseInsensitiveCompare:@"SDViOSTouchControls"] == NSOrderedSame ||
                  [relParts[1] caseInsensitiveCompare:@"SDVMobileControls"] == NSOrderedSame)) continue;
 
-            // Skip PC Windows SMAPI, desktop native binaries & desktop .NET BCL DLLs already provided by SDViOS.app for iOS
+            // Skip PC Windows SMAPI, unused XML/license junk, desktop native binaries & BCL DLLs already provided by SDViOS.app
             if (relParts.count == 1) {
                 if ([fileLow hasPrefix:@"stardewmoddingapi"]) continue;
-                if ([extLow isEqualToString:@"exe"] || [extLow isEqualToString:@"so"] || [extLow isEqualToString:@"dylib"] || [extLow isEqualToString:@"pdb"] || [fileLow containsString:@".so."]) continue;
-                if ([fileLow hasPrefix:@"api-ms-win-"] || [fileLow hasPrefix:@"mscordaccore_"] || [fileLow hasPrefix:@"microsoft.diasymreader"]) continue;
-                if ([desktopJunk containsObject:fileLow] || [bundleRuntimeFiles containsObject:fileLow]) continue;
+                if (sdvIsUnusedGameRootJunk(fileLow, extLow) || [bundleRuntimeFiles containsObject:fileLow]) continue;
             }
 
             // Allow large single files like Content/XACT/Wave Bank.xwb (~440 MB) up to 2 GB each / 8 GB total
             if (st.m_uncomp_size > 2ULL * 1024 * 1024 * 1024 || (totalBytes += st.m_uncomp_size) > 8ULL * 1024 * 1024 * 1024) {
                 fail(@"Gói dữ liệu vượt quá giới hạn dung lượng (tối đa 2 GB/tệp, 8 GB tổng).");
             }
-            NSString *dst = inside(docsPath, rel);
+            NSString *targetBase = [topLow isEqualToString:@"mods"] ? docsPath : gameRoot;
+            NSString *dst = inside(targetBase, rel);
             mkdirs(dst.stringByDeletingLastPathComponent);
             if (!mz_zip_reader_extract_to_file(&z, i, dst.fileSystemRepresentation, 0)) {
                 fail(@"Giải nén dữ liệu game thất bại. Kiểm tra dung lượng trống trên iPhone.");
@@ -1218,6 +1369,7 @@ static NSUInteger importGameDataZip(NSURL *url, NSString *docsPath) {
         mz_zip_reader_end(&z);
     }
     if (written == 0) fail(@"Không giải nén được tệp nào từ gói ZIP.");
+    sdvMigrateDocumentsToHiddenLayout(docsPath);
     syncBundledLidgren(docsPath);
     syncBundledSmapi(docsPath);
     syncBundledMobileControls(docsPath);
@@ -1264,7 +1416,14 @@ static BOOL childScope(NSString *root) {
     return [root.lastPathComponent isEqual:@"Mods"] || [root.lastPathComponent isEqual:@"Content"];
 }
 static NSString *gamePath(NSString *root, NSString *relative) {
-    if (!childScope(root)) return inside(root,relative);
+    if (!childScope(root)) {
+        NSString *cr = clean(relative);
+        if (([cr isEqualToString:@"Content"] || [cr hasPrefix:@"Content/"]) &&
+            dir(join(join(root, @".game"), @"Content")) && !dir(join(root, @"Content"))) {
+            return inside(join(root, @".game"), cr);
+        }
+        return inside(root, cr);
+    }
     NSArray *parts=clean(relative).pathComponents;
     if (![parts.firstObject isEqual:root.lastPathComponent]) fail([NSString stringWithFormat:@"Gói này cần thư mục %@. Nhấn Đổi thư mục rồi chọn %@ trong Stardew Mobile.", parts.firstObject, parts.firstObject]);
     if (parts.count==1) return root;
@@ -1493,19 +1652,34 @@ static NSInteger sdvCompareSemver(NSString *a, NSString *b) {
     return 0;
 }
 
-static NSSet<NSString *> *sdvExtractCpLoadTargetsFromFile(NSString *contentJsonPath) {
-    NSMutableSet<NSString *> *targets = [NSMutableSet set];
+static void sdvExtractCpLoadTargetsRecursive(NSString *jsonPath, NSString *packDir, NSMutableSet<NSString *> *targets, NSMutableSet<NSString *> *visited, int depth) {
+    if (depth > 2 || !jsonPath.length || [visited containsObject:jsonPath]) return;
+    [visited addObject:jsonPath];
     @try {
         struct stat st;
-        if (stat(contentJsonPath.fileSystemRepresentation, &st) != 0 || st.st_size <= 0 || st.st_size > 2 * 1024 * 1024) return targets;
-        id parsed = jsonAt(contentJsonPath);
-        if (![parsed isKindOfClass:NSDictionary.class]) return targets;
+        if (stat(jsonPath.fileSystemRepresentation, &st) != 0 || st.st_size <= 0 || st.st_size > 2 * 1024 * 1024) return;
+        id parsed = jsonAt(jsonPath);
+        if (![parsed isKindOfClass:NSDictionary.class]) return;
         id changes = dictValueCI((NSDictionary *)parsed, @"Changes");
-        if (![changes isKindOfClass:NSArray.class]) return targets;
+        if (![changes isKindOfClass:NSArray.class]) return;
         for (id item in (NSArray *)changes) {
             if (![item isKindOfClass:NSDictionary.class]) continue;
             NSDictionary *ch = (NSDictionary *)item;
             NSString *act = field(ch, @"Action").lowercaseString;
+            if ([act isEqualToString:@"include"] && packDir.length && depth < 2) {
+                NSString *fromFile = field(ch, @"FromFile");
+                if (!fromFile.length || [fromFile containsString:@"{{"]) continue;
+                for (NSString *part in [fromFile componentsSeparatedByString:@","]) {
+                    NSString *rel = [[part stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]
+                        stringByReplacingOccurrencesOfString:@"\\" withString:@"/"];
+                    if (!rel.length || [rel containsString:@".."]) continue;
+                    NSString *incPath = join(packDir, rel);
+                    if ([fm() fileExistsAtPath:incPath]) {
+                        sdvExtractCpLoadTargetsRecursive(incPath, packDir, targets, visited, depth + 1);
+                    }
+                }
+                continue;
+            }
             if (![act isEqualToString:@"load"]) continue;
             NSString *rawTarget = field(ch, @"Target");
             if (!rawTarget.length) continue;
@@ -1518,7 +1692,56 @@ static NSSet<NSString *> *sdvExtractCpLoadTargetsFromFile(NSString *contentJsonP
             }
         }
     } @catch (NSException *ex) { }
+}
+
+static NSSet<NSString *> *sdvExtractCpLoadTargetsFromFile(NSString *contentJsonPath) {
+    NSMutableSet<NSString *> *targets = [NSMutableSet set];
+    NSMutableSet<NSString *> *visited = [NSMutableSet set];
+    NSString *packDir = contentJsonPath.stringByDeletingLastPathComponent;
+    sdvExtractCpLoadTargetsRecursive(contentJsonPath, packDir, targets, visited, 0);
     return targets;
+}
+
+// Generic byte-level scan of ANY C# mod DLL + its folder to detect shared rendering/Harmony hook domains (0% hardcoded mod IDs!)
+static NSSet<NSString *> *sdvExtractModHookDomains(NSString *packDir, NSString *entryDll, NSData *dllData) {
+    NSMutableSet<NSString *> *domains = [NSMutableSet set];
+    if (!packDir.length || !entryDll.length) return domains;
+
+    // Detect if the mod bundles compiled shaders (.mgfxo / .xnb shader assets)
+    BOOL hasShaderFiles = NO;
+    @try {
+        for (NSString *rel in files(packDir)) {
+            NSString *low = rel.lowercaseString;
+            if ([low hasSuffix:@".mgfxo"] || [low hasSuffix:@".fxc"] || [low hasSuffix:@".fx"]) {
+                hasShaderFiles = YES;
+                break;
+            }
+        }
+    } @catch (NSException *ex) { }
+
+    BOOL usesHarmony = dllData.length > 0 && (sdvDataContainsAscii(dllData, "HarmonyLib") || sdvDataContainsAscii(dllData, "0Harmony"));
+    if (!usesHarmony && !hasShaderFiles) return domains;
+
+    if (usesHarmony) {
+        if (sdvDataContainsAscii(dllData, "drawWater") || sdvDataContainsAscii(dllData, "DrawWater")) {
+            [domains addObject:@"water:Mặt nước (GameLocation.drawWater)"];
+        }
+        if (sdvDataContainsAscii(dllData, "renderScreenBuffer")) {
+            [domains addObject:@"screenbuf:Hậu kỳ màn hình (Game1.renderScreenBuffer)"];
+        }
+        if (sdvDataContainsAscii(dllData, "DrawLighting") || sdvDataContainsAscii(dllData, "lightmap")) {
+            if (hasShaderFiles || sdvDataContainsAscii(dllData, "DrawLighting")) {
+                [domains addObject:@"lighting:Ánh sáng & bóng đổ (Game1.DrawLighting)"];
+            }
+        }
+        if (sdvDataContainsAscii(dllData, "BobberBar") && (sdvDataContainsAscii(dllData, "Postfix") || sdvDataContainsAscii(dllData, "Prefix") || sdvDataContainsAscii(dllData, "Transpiler"))) {
+            [domains addObject:@"fishing:Minigame câu cá (BobberBar)"];
+        }
+    }
+    if (hasShaderFiles) {
+        [domains addObject:@"shader:Hiệu ứng Shader tùy chỉnh (.mgfxo)"];
+    }
+    return domains;
 }
 
 static NSDictionary<NSString *, NSSet<NSString *> *> *sdvCollectInstalledCpLoadTargets(NSString *root) {
@@ -1575,10 +1798,11 @@ static NSArray<NSDictionary *> *sdvDiagnoseMods(NSString *root) {
         [issues addObject:d];
     };
 
-    // 1. Scan active mods, detect duplicate UniqueIDs, orphan folders, legacy DLLs, Mobile mods, and CP Load targets
+    // 1. Scan active mods, detect duplicate UniqueIDs, orphan folders, legacy DLLs, Mobile mods, CP Load targets & C# hook domains
     NSMutableDictionary<NSString *, NSDictionary *> *activeById = [NSMutableDictionary dictionary];
     NSMutableDictionary<NSString *, NSMutableArray<NSString *> *> *idFolders = [NSMutableDictionary dictionary];
     NSMutableDictionary<NSString *, NSSet<NSString *> *> *cpLoads = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSSet<NSString *> *> *modHookDomains = [NSMutableDictionary dictionary];
     NSMutableSet<NSString *> *topWithManifest = [NSMutableSet set];
     NSDictionary<NSString *, NSString *> *disabledMap = disabledModsById(root);
     NSSet<NSString *> *sysIds = [NSSet setWithArray:@[@"com.deadakj.sdviostouchcontrols", @"gardenlauncher.mobilecontrols"]];
@@ -1622,11 +1846,20 @@ static NSArray<NSDictionary *> *sdvDiagnoseMods(NSString *root) {
                     [NSString stringWithFormat:@"Biên dịch cho SMAPI %@ — có thể không tương thích Stardew 1.6.15.", minApi], nil);
             }
             if (entryDll.length) {
-                NSData *dd = [NSData dataWithContentsOfFile:join(packDir, entryDll) options:NSDataReadingMappedIfSafe error:nil];
-                if (sdvDataContainsAscii(dd, "Mono.Android") || sdvDataContainsAscii(dd, "SMAPI.Android")) {
-                    addIssue([@"androiddll:" stringByAppendingString:uidLow], @"error",
-                        [NSString stringWithFormat:@"Mod biên dịch riêng Android: %@", dispName],
-                        [NSString stringWithFormat:@"%@ dùng SMAPI Android, có thể lỗi trên bản PC 1.6.15 — khuyên tải bản PC.", entryDll], nil);
+                NSString *dllFull = join(packDir, entryDll);
+                if (![fm() fileExistsAtPath:dllFull]) {
+                    addIssue([@"missdll:" stringByAppendingString:uidLow], @"error",
+                        [NSString stringWithFormat:@"Thiếu tệp DLL: %@", dispName],
+                        [NSString stringWithFormat:@"manifest.json khai báo %@ nhưng không tìm thấy tệp trong thư mục mod (có thể giải nén thiếu hoặc nhầm mã nguồn).", entryDll], nil);
+                } else {
+                    NSData *dd = [NSData dataWithContentsOfFile:dllFull options:NSDataReadingMappedIfSafe error:nil];
+                    if (sdvDataContainsAscii(dd, "Mono.Android") || sdvDataContainsAscii(dd, "SMAPI.Android")) {
+                        addIssue([@"androiddll:" stringByAppendingString:uidLow], @"error",
+                            [NSString stringWithFormat:@"Mod biên dịch riêng Android: %@", dispName],
+                            [NSString stringWithFormat:@"%@ dùng SMAPI Android, có thể lỗi trên bản PC 1.6.15 — khuyên tải bản PC.", entryDll], nil);
+                    }
+                    NSSet<NSString *> *doms = sdvExtractModHookDomains(packDir, entryDll, dd);
+                    if (doms.count) modHookDomains[uidLow] = doms;
                 }
             }
             if (sdvHasMobileEditionMarker(dispName) || sdvHasMobileEditionMarker(uid) ||
@@ -1741,11 +1974,36 @@ static NSArray<NSDictionary *> *sdvDiagnoseMods(NSString *root) {
         }
     }
 
-    // 6. Live SMAPI-latest.txt Skipped mods & runtime ERROR parser (ground truth from last launch)
+    // 5b. Generic C# Harmony / Shader / Rendering pipeline conflict detection across ALL active mods (0% hardcoded mod IDs!)
+    NSArray<NSString *> *hookModKeys = [modHookDomains.allKeys sortedArrayUsingSelector:@selector(compare:)];
+    for (NSUInteger i = 0; i < hookModKeys.count; i++) {
+        for (NSUInteger j = i + 1; j < hookModKeys.count; j++) {
+            NSString *k1 = hookModKeys[i], *k2 = hookModKeys[j];
+            NSSet<NSString *> *d1 = modHookDomains[k1], *d2 = modHookDomains[k2];
+            NSMutableArray<NSString *> *sharedLabels = [NSMutableArray array];
+            for (NSString *dom in d1) {
+                if ([d2 containsObject:dom]) {
+                    NSRange sep = [dom rangeOfString:@":"];
+                    NSString *label = (sep.location != NSNotFound) ? [dom substringFromIndex:sep.location + 1] : dom;
+                    [sharedLabels addObject:label];
+                }
+            }
+            if (sharedLabels.count) {
+                [sharedLabels sortUsingSelector:@selector(compare:)];
+                NSString *n1 = activeById[k1][@"name"] ?: k1;
+                NSString *n2 = activeById[k2][@"name"] ?: k2;
+                addIssue([NSString stringWithFormat:@"hookconf:%@:%@", k1, k2], @"warn",
+                    [NSString stringWithFormat:@"Có thể xung đột hiển thị/hook: %@ ↔ %@", n1, n2],
+                    [NSString stringWithFormat:@"Cả 2 mod C# cùng can thiệp vào %@. Nếu bị mất hiệu ứng hoặc lỗi hình ảnh, hãy thử tắt bớt 1 trong 2 mod.", [sharedLabels componentsJoinedByString:@", "]], nil);
+            }
+        }
+    }
+
+    // 6. Live SMAPI-latest.txt Skipped mods & runtime ERROR parser (ground truth from last launch for ALL mods)
     NSString *smapiLog = join(join(root, @"ErrorLogs"), @"SMAPI-latest.txt");
     @try {
         struct stat st;
-        if (stat(smapiLog.fileSystemRepresentation, &st) == 0 && st.st_size > 0 && st.st_size <= 1024 * 1024) {
+        if (stat(smapiLog.fileSystemRepresentation, &st) == 0 && st.st_size > 0 && st.st_size <= 2 * 1024 * 1024) {
             NSString *txt = [NSString stringWithContentsOfFile:smapiLog encoding:NSUTF8StringEncoding error:nil];
             if (txt.length) {
                 BOOL inSkipped = NO;
@@ -1753,7 +2011,11 @@ static NSArray<NSDictionary *> *sdvDiagnoseMods(NSString *root) {
                 for (NSString *rawLine in [txt componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
                     NSString *line = [rawLine stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
                     if (!line.length) { inSkipped = NO; continue; }
-                    if ([line containsString:@"ERROR SMAPI]    Skipped mods"]) { inSkipped = YES; continue; }
+                    if ([line containsString:@"ERROR SMAPI]    Skipped mods"] ||
+                        [line containsString:@"ERROR SMAPI]    These mods could not be added"]) {
+                        inSkipped = YES;
+                        continue;
+                    }
                     if (inSkipped) {
                         if (![line containsString:@"ERROR SMAPI]"]) { inSkipped = NO; continue; }
                         NSRange dashR = [line rangeOfString:@"   - "];
@@ -1769,7 +2031,7 @@ static NSArray<NSDictionary *> *sdvDiagnoseMods(NSString *root) {
                                 [NSString stringWithFormat:@"SMAPI bỏ qua: %@", modTitle],
                                 sdvTranslateSmapiSkipReason(reason), nil);
                         }
-                    } else if (errLinesAdded < 4 && [line containsString:@" ERROR "] && ![line containsString:@"ERROR SMAPI]"]) {
+                    } else if (errLinesAdded < 12 && [line containsString:@" ERROR "] && ![line containsString:@"ERROR SMAPI]"]) {
                         // Extract mod name & concise error snippet from runtime mod errors
                         NSRange errR = [line rangeOfString:@" ERROR "];
                         if (errR.location != NSNotFound) {
@@ -1778,7 +2040,7 @@ static NSArray<NSDictionary *> *sdvDiagnoseMods(NSString *root) {
                             if (brR.location != NSNotFound) {
                                 NSString *modSrc = [[after substringToIndex:brR.location] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
                                 NSString *msg = [after substringFromIndex:brR.location + brR.length];
-                                if (msg.length > 160) msg = [[msg substringToIndex:160] stringByAppendingString:@"…"];
+                                if (msg.length > 180) msg = [[msg substringToIndex:180] stringByAppendingString:@"…"];
                                 addIssue([NSString stringWithFormat:@"rt:%@", modSrc.lowercaseString], @"error",
                                     [NSString stringWithFormat:@"Lỗi khi chạy: %@", modSrc], msg, nil);
                                 errLinesAdded++;

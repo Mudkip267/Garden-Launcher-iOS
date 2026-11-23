@@ -12,6 +12,7 @@
 #import "AppleTheme.m"
 #import "RamMonitor.m"
 #import "SaveManager.m"
+#import "BugReport.m"
 
 static NSString *sdvAppDisplayName(void) {
     NSString *n = NSBundle.mainBundle.infoDictionary[@"CFBundleDisplayName"];
@@ -260,9 +261,10 @@ static NSString *sdvProbeLocalNetwork(void) {
     UILabel *_navTitleLabel;
     UIScrollView *_scroll;
     UIStackView *_pane;
+    SDVBugReportViewController *_bugTabVC;
     UIView *_veil;
 
-    // 0 = Cài Mod, 1 = Thư viện, 2 = File Save, 3 = Hiệu năng & Nút, 4 = Co-op LAN, 5 = Hướng dẫn, 6 = Credit
+    // 0 = Cài Mod, 1 = Thư viện, 2 = File Save, 3 = Hiệu năng & Nút, 4 = Co-op LAN, 5 = Hướng dẫn, 6 = Báo lỗi, 7 = Credit
     NSInteger _tab;
     NSInteger _uiSubTab; // 0 = Menu Bar, 1 = Nút & Joystick, 2 = Bảng SET/MODS
     NSArray<SDVAppleButton *> *_tabButtons;
@@ -414,7 +416,7 @@ static NSString *sdvProbeLocalNetwork(void) {
     _navTitleLabel.numberOfLines = 1;
     [topBarRow addArrangedSubview:_navTitleLabel];
     [topBarRow addArrangedSubview:[UIView new]];
-    UILabel *verPill = mkBadgePill(@"v7.10 · Native", [kTintBlue colorWithAlphaComponent:0.12], kTintBlue, 11);
+    UILabel *verPill = mkBadgePill(@"v1.0.1 · Native", [kTintBlue colorWithAlphaComponent:0.12], kTintBlue, 11);
     [topBarRow addArrangedSubview:verPill];
     [topBar.contentView addSubview:topBarRow];
     pinInsets(topBarRow, topBar.contentView, UIEdgeInsetsMake(0, 16, 0, 16));
@@ -429,6 +431,16 @@ static NSString *sdvProbeLocalNetwork(void) {
     _pane = mkVStack(12);
     _pane.translatesAutoresizingMaskIntoConstraints = NO;
     [_scroll addSubview:_pane];
+
+    // Embedded dedicated Bug Report tab (Tab 6)
+    _bugTabVC = [SDVBugReportViewController new];
+    _bugTabVC.embeddedInTab = YES;
+    _bugTabVC.docsPath = _root.path ?: [fm() URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject.path;
+    [self addChildViewController:_bugTabVC];
+    _bugTabVC.view.translatesAutoresizingMaskIntoConstraints = NO;
+    _bugTabVC.view.hidden = YES;
+    [self.view addSubview:_bugTabVC.view];
+    [_bugTabVC didMoveToParentViewController:self];
 
     // Scene-safe layout width (no deprecated UIScreen.mainScreen!)
     CGFloat sideW = 196.0;
@@ -453,6 +465,11 @@ static NSString *sdvProbeLocalNetwork(void) {
         [_scroll.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
         [_scroll.topAnchor constraintEqualToAnchor:topBar.bottomAnchor],
         [_scroll.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+
+        [_bugTabVC.view.leadingAnchor constraintEqualToAnchor:divider.trailingAnchor],
+        [_bugTabVC.view.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+        [_bugTabVC.view.topAnchor constraintEqualToAnchor:topBar.bottomAnchor],
+        [_bugTabVC.view.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
 
         [_pane.leadingAnchor constraintEqualToAnchor:_scroll.contentLayoutGuide.leadingAnchor constant:16],
         [_pane.trailingAnchor constraintEqualToAnchor:_scroll.contentLayoutGuide.trailingAnchor constant:-16],
@@ -499,13 +516,30 @@ static NSString *sdvProbeLocalNetwork(void) {
     pinInsets(brandRow, brandWrap, UIEdgeInsetsMake(2, 4, 4, 2));
     [sideStack addArrangedSubview:brandWrap];
 
-    // 7 Native iOS Split-View Sidebar Rows (Cài Mod | Thư viện | File Save | Hiệu năng & Nút | Co-op LAN | Hướng dẫn | Credit)
-    _sidebarTabs = mkVStack(2.0);
+    // 8 Native iOS Split-View Sidebar Rows (Cài Mod | Thư viện | File Save | Hiệu năng & Nút | Co-op LAN | Hướng dẫn | Báo lỗi | Credit)
+    UIScrollView *tabScroll = [UIScrollView new];
+    tabScroll.showsVerticalScrollIndicator = NO;
+    tabScroll.alwaysBounceVertical = NO;
+    tabScroll.translatesAutoresizingMaskIntoConstraints = NO;
+    [tabScroll setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisVertical];
+    [tabScroll setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisVertical];
+
+    _sidebarTabs = mkVStack(1.5);
+    _sidebarTabs.translatesAutoresizingMaskIntoConstraints = NO;
+    [tabScroll addSubview:_sidebarTabs];
+    [NSLayoutConstraint activateConstraints:@[
+        [_sidebarTabs.leadingAnchor constraintEqualToAnchor:tabScroll.contentLayoutGuide.leadingAnchor],
+        [_sidebarTabs.trailingAnchor constraintEqualToAnchor:tabScroll.contentLayoutGuide.trailingAnchor],
+        [_sidebarTabs.topAnchor constraintEqualToAnchor:tabScroll.contentLayoutGuide.topAnchor],
+        [_sidebarTabs.bottomAnchor constraintEqualToAnchor:tabScroll.contentLayoutGuide.bottomAnchor],
+        [_sidebarTabs.widthAnchor constraintEqualToAnchor:tabScroll.frameLayoutGuide.widthAnchor]
+    ]];
+
     NSMutableArray *tBtns = [NSMutableArray array];
-    for (NSInteger i = 0; i < 7; i++) {
+    for (NSInteger i = 0; i < 8; i++) {
         SDVAppleButton *b = [SDVAppleButton buttonWithType:UIButtonTypeCustom];
         b.tag = i;
-        b.layer.cornerRadius = 9.0;
+        b.layer.cornerRadius = 8.5;
         b.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeading;
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
@@ -513,17 +547,13 @@ static NSString *sdvProbeLocalNetwork(void) {
         b.imageEdgeInsets = UIEdgeInsetsMake(0, 0, 0, 8);
         b.titleEdgeInsets = UIEdgeInsetsMake(0, 8, 0, -8);
 #pragma clang diagnostic pop
-        [b.heightAnchor constraintEqualToConstant:29.5].active = YES;
+        [b.heightAnchor constraintEqualToConstant:28.0].active = YES;
         [b addTarget:self action:@selector(selectTab:) forControlEvents:UIControlEventTouchUpInside];
         [_sidebarTabs addArrangedSubview:b];
         [tBtns addObject:b];
     }
     _tabButtons = tBtns;
-    [sideStack addArrangedSubview:_sidebarTabs];
-
-    UIView *spacer = [UIView new];
-    [spacer setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisVertical];
-    [sideStack addArrangedSubview:spacer];
+    [sideStack addArrangedSubview:tabScroll];
 
     UILabel *hint = mkLabel(@"Chạm 3 ngón × 2 để mở", 11, UIFontWeightRegular, kInkTertiary);
     hint.textAlignment = NSTextAlignmentCenter;
@@ -551,11 +581,12 @@ static NSString *sdvProbeLocalNetwork(void) {
         @"Hiệu năng & Nút",
         @"Co-op LAN",
         @"Hướng dẫn",
+        @"Báo lỗi",
         @"Credit"
     ];
-    NSArray *navTitles = @[@"Cài đặt Mod", @"Thư viện Mod", @"Quản lý File Save", @"Hiệu năng & Điều khiển", @"Co-op LAN / IP", @"Hướng dẫn sử dụng", @"Credit & Cộng đồng"];
-    NSArray *icons = @[@"square.and.arrow.down.fill", @"square.stack.3d.up.fill", @"externaldrive.fill", @"slider.horizontal.3", @"wifi", @"book.fill", @"heart.fill"];
-    NSArray *iconTints = @[kTintBlue, kTintIndigo, kTintOrange, kTintGreen, kTintTeal, kTintPurple, kTintPink];
+    NSArray *navTitles = @[@"Cài đặt Mod", @"Thư viện Mod", @"Quản lý File Save", @"Hiệu năng & Điều khiển", @"Co-op LAN / IP", @"Hướng dẫn sử dụng", @"Báo lỗi cho Admin", @"Credit & Cộng đồng"];
+    NSArray *icons = @[@"square.and.arrow.down.fill", @"square.stack.3d.up.fill", @"externaldrive.fill", @"slider.horizontal.3", @"wifi", @"book.fill", @"ladybug.fill", @"heart.fill"];
+    NSArray *iconTints = @[kTintBlue, kTintIndigo, kTintOrange, kTintGreen, kTintTeal, kTintPurple, kTintRed, kTintPink];
 
     if (_tab >= 0 && _tab < (NSInteger)navTitles.count) {
         _navTitleLabel.text = navTitles[_tab];
@@ -576,6 +607,7 @@ static NSString *sdvProbeLocalNetwork(void) {
 
 -(void)selectTab:(UIButton *)sender {
     if (_tab == sender.tag) return;
+    if (_tab == 6) [self.view endEditing:YES];
     _tab = sender.tag;
     [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
     if (_tab == 2) {
@@ -624,6 +656,23 @@ static NSString *sdvProbeLocalNetwork(void) {
         banner.backgroundColor = [tint colorWithAlphaComponent:0.12];
         [_pane addArrangedSubview:banner];
     }
+
+    if (_tab == 6) {
+        _scroll.hidden = YES;
+        _bugTabVC.docsPath = _root.path ?: [fm() URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject.path;
+        _bugTabVC.view.hidden = NO;
+        [_bugTabVC refreshBundleIfNeeded];
+        if (animate && !UIAccessibilityIsReduceMotionEnabled()) {
+            _bugTabVC.view.alpha = 0.35;
+            [UIView animateWithDuration:0.16 delay:0 options:UIViewAnimationOptionCurveEaseOut animations:^{
+                self->_bugTabVC.view.alpha = 1.0;
+            } completion:nil];
+        }
+        return;
+    }
+
+    _bugTabVC.view.hidden = YES;
+    _scroll.hidden = NO;
 
     if (_tab == 0) [self renderInstallTab];
     else if (_tab == 1) [self renderLibraryTab];
@@ -695,7 +744,7 @@ static NSString *sdvProbeLocalNetwork(void) {
         ], 44)];
 
         [_pane addArrangedSubview:mkSectionTitle(@"Hướng dẫn nạp dữ liệu PC")];
-        UILabel *howLbl = mkLabel([NSString stringWithFormat:@"• Cách 1 (Nhanh nhất): Nén thư mục Stardew Valley PC 1.6.15 thành 1 tệp .ZIP rồi bấm Nhập gói dữ liệu game (.ZIP).\n• Cách 2 (Thủ công): Mở ứng dụng Tệp → Trên iPhone của tôi → %@ rồi chép Content/, Stardew Valley.dll, xTile.dll, BmFont.dll và StardewValley.GameData.dll vào đó.\n• Hoàn tất: Vuốt tắt hẳn ứng dụng rồi mở lại để vào game.", appNm], 13, UIFontWeightRegular, kInkSecondary);
+        UILabel *howLbl = mkLabel([NSString stringWithFormat:@"• Cách 1 (Nhanh nhất): Nén thư mục Stardew Valley PC 1.6.15 thành 1 tệp .ZIP rồi bấm Nhập gói dữ liệu game (.ZIP). Hệ thống sẽ tự động ẩn gọn tệp lõi game, trong Tệp chỉ còn Mods, Saves và ErrorLogs.\n• Cách 2 (Thủ công): Mở ứng dụng Tệp → Trên iPhone của tôi → %@ rồi chép Content/, Stardew Valley.dll, xTile.dll, BmFont.dll và StardewValley.GameData.dll vào đó — app sẽ tự gom ẩn gọn khi kiểm tra/mở lại.\n• Hoàn tất: Vuốt tắt hẳn ứng dụng rồi mở lại để vào game.", appNm], 13, UIFontWeightRegular, kInkSecondary);
         [_pane addArrangedSubview:mkGroupedCard(howLbl, UIEdgeInsetsMake(12, 14, 12, 14))];
         return;
     }
@@ -1269,25 +1318,24 @@ static NSString *sdvProbeLocalNetwork(void) {
         [mcHdr addArrangedSubview:mkBadgePill(@"Đổi trực tiếp", [kTintBlue colorWithAlphaComponent:0.14], kTintBlue, 11)];
         [mcTop addArrangedSubview:mcHdr];
 
-        // Segment order: 0=Vô hình (mode 1), 1=2 Nút (mode 2), 2=Chạm đi (mode 3), 3=Kết hợp (mode 4), 4=Tay cầm (mode 0)
-        UISegmentedControl *mcSeg = [[UISegmentedControl alloc] initWithItems:@[@"Vô hình", @"2 Nút", @"Chạm đi", @"Kết hợp", @"Tay cầm"]];
-        NSInteger segIdx = (_mobileCfg.mode == 0) ? 4 : (_mobileCfg.mode - 1);
-        mcSeg.selectedSegmentIndex = MAX(0, MIN(4, segIdx));
+        // Segment order: 0=Vô hình (mode 1), 1=2 Nút (mode 2), 2=Chạm đi (mode 3), 3=Kết hợp (mode 4)
+        NSInteger effMode = (_mobileCfg.mode >= 1 && _mobileCfg.mode <= 4) ? _mobileCfg.mode : 1;
+        UISegmentedControl *mcSeg = [[UISegmentedControl alloc] initWithItems:@[@"Vô hình", @"2 Nút", @"Chạm đi", @"Kết hợp"]];
+        mcSeg.selectedSegmentIndex = effMode - 1;
         [mcSeg addTarget:self action:@selector(mobileModeChanged:) forControlEvents:UIControlEventValueChanged];
         [mcTop addArrangedSubview:mcSeg];
 
         NSString *modeDesc = @"";
-        switch (_mobileCfg.mode) {
-            case 1: modeDesc = @"Vô hình + 2 thanh dọc: Joystick động bên trái · 2 thanh dọc ẩn bên phải (USE / ACT). Dùng Edit Layout để kéo vị trí & cỡ."; break;
+        switch (effMode) {
             case 2: modeDesc = @"Joystick + 2 nút Pixel: Hiện Joystick và 2 nút huy hiệu Pixel tối giản dịu mắt (USE / ACT)."; break;
             case 3: modeDesc = @"Chạm đâu đi đó (Tap-to-Move): Chạm đất tìm đường A*, giữ kéo lướt thu hoạch, giữ gồng Cần câu/Cuốc/Bình tưới, chạm mình ăn đồ/xuống ngựa."; break;
             case 4: modeDesc = @"Kết hợp: Vừa chạm để đi/tương tác/câu cá, vừa kéo Joystick vô hình bên trái + 2 thanh dọc bên phải."; break;
-            default: modeDesc = @"Tay cầm ảo gốc (Joystick + X/Y/A/B + LT/RT) của SDViOSTouchControls."; break;
+            default: modeDesc = @"Vô hình + 2 thanh dọc: Joystick động bên trái · 2 thanh dọc ẩn bên phải (USE / ACT). Dùng Edit Layout để kéo vị trí & cỡ."; break;
         }
         [mcTop addArrangedSubview:mkLabel(modeDesc, 12, UIFontWeightRegular, kInkSecondary)];
 
         NSMutableArray<UIView *> *modeRows = [NSMutableArray arrayWithObject:mcTop];
-        if (_mobileCfg.mode != 0) {
+        {
             UIStackView *editRow = mkHStack(10);
             [editRow addArrangedSubview:mkSettingsIconBadge(@"slider.horizontal.below.rectangle", kTintBlue, 28)];
             UIStackView *editTxt = mkVStack(1);
@@ -1302,22 +1350,22 @@ static NSString *sdvProbeLocalNetwork(void) {
         }
         [_pane addArrangedSubview:mkGroupedRows(modeRows, 48)];
 
-        if (_mobileCfg.mode != 0) {
+        {
             // Card 2: Bố cục & Cảm giác tay
             [_pane addArrangedSubview:mkSectionTitle(@"Bố cục & Cảm giác tay")];
             NSMutableArray<UIView *> *feelRows = [NSMutableArray array];
             [feelRows addObject:[self mkSliderRow:@"Kích thước nút / vùng chạm" min:0.75f max:1.45f val:_mobileCfg.buttonScale valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_mobileCfg.buttonScale * 100)] tag:17]];
             [feelRows addObject:[self mkSliderRow:@"Độ rõ (Opacity) bộ nút Pixel" min:0.25f max:1.00f val:_mobileCfg.pixelOpacity valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_mobileCfg.pixelOpacity * 100)] tag:20]];
-            if (_mobileCfg.mode != 3) {
+            if (effMode != 3) {
                 [feelRows addObject:[self mkSliderRow:@"Vùng chết Joystick (Deadzone)" min:0.05f max:0.25f val:_mobileCfg.joyDeadzone valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_mobileCfg.joyDeadzone * 100)] tag:21]];
                 [feelRows addObject:[self mkSettingsSwitchRow:@"Đổi vị trí 2 nút hành động (Đánh ↔ Tương tác)" icon:@"arrow.left.arrow.right" color:kTintPurple on:_mobileCfg.swapRightButtons tag:35]];
                 [feelRows addObject:[self mkSettingsSwitchRow:@"Đảo bố cục tay trái 1 chạm (Joystick phải · Nút trái)" icon:@"hand.raised.fingers.spread.fill" color:kTintPurple on:_mobileCfg.leftHandedMobile tag:51]];
             }
-            if (_mobileCfg.mode == 1 || _mobileCfg.mode == 4) {
+            if (effMode == 1 || effMode == 4) {
                 [feelRows addObject:[self mkSettingsSwitchRow:@"Chớp khung mờ khi chạm (chế độ Vô hình)" icon:@"circle.dashed" color:kTintIndigo on:_mobileCfg.showTouchHint tag:33]];
             }
             [feelRows addObject:[self mkSettingsSwitchRow:@"Chụm 2 ngón phóng to/nhỏ (Pinch Zoom)" icon:@"arrow.up.left.and.arrow.down.right" color:kTintBlue on:_mobileCfg.pinchZoom tag:32]];
-            [feelRows addObject:[self mkSettingsSwitchRow:@"Tự ẩn nút cảm ứng khi dùng tay cầm Bluetooth" icon:@"gamecontroller.fill" color:kTintPurple on:_mobileCfg.autoHideOnGamepad tag:50]];
+            [feelRows addObject:[self mkSettingsSwitchRow:@"Tự ẩn nút cảm ứng khi dùng Tay cầm / Phím / Chuột ngoài" icon:@"gamecontroller.fill" color:kTintPurple on:_mobileCfg.autoHideOnGamepad tag:50]];
             [_pane addArrangedSubview:mkGroupedRows(feelRows, 48)];
 
             // Card 3: Tự động & Chiến đấu
@@ -1330,125 +1378,6 @@ static NSString *sdvProbeLocalNetwork(void) {
                 [self mkSettingsSwitchRow:@"Hiện nút chiêu đặc biệt SPEC (đỡ Kiếm / đập Búa)" icon:@"shield.lefthalf.filled" color:kTintRed on:_mobileCfg.showSpecButton tag:43],
                 [self mkSettingsSwitchRow:@"Tự sang Joystick khi vào Mỏ/Núi lửa + nút đổi nhanh CTL" icon:@"flame.fill" color:kTintRed on:_mobileCfg.autoCombatMode tag:44]
             ], 48)];
-        } else {
-            // Legacy Virtual Gamepad Studio (ONLY shown when user selects mode 0 = Tay cầm!)
-#ifdef GARDEN_IN_GAME
-            UIStackView *liveRow = mkHStack(10);
-            [liveRow addArrangedSubview:mkSettingsIconBadge(@"sparkles", kTintBlue, 32)];
-            UIStackView *liveTxt = mkVStack(1);
-            [liveTxt addArrangedSubview:mkLabel(@"Chỉnh trực tiếp trên game", 14, UIFontWeightSemibold, kInkPrimary)];
-            [liveTxt addArrangedSubview:mkLabel(@"Thu gọn thành thanh kính nổi dưới đáy để vừa chơi vừa kéo cỡ & độ rõ.", 12, UIFontWeightRegular, kInkSecondary)];
-            SDVAppleButton *liveBtn = mkIOSButton(@"Mở thanh nổi", nil, kTintBlue, UIColor.whiteColor, 13, UIEdgeInsetsMake(8, 12, 8, 12));
-            [liveBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
-            [liveBtn addTarget:self action:@selector(enterLiveMenuBarMode) forControlEvents:UIControlEventTouchUpInside];
-            [liveRow addArrangedSubview:liveTxt];
-            [liveRow addArrangedSubview:liveBtn];
-            [_pane addArrangedSubview:mkGroupedCard(liveRow, UIEdgeInsetsMake(11, 14, 11, 14))];
-#endif
-            [_pane addArrangedSubview:mkSectionTitle(@"Tùy chỉnh tay cầm ảo gốc")];
-            UISegmentedControl *subSeg = [[UISegmentedControl alloc] initWithItems:@[@"Menu Bar", @"Nút & Joystick", @"Bảng SET / MODS"]];
-            subSeg.selectedSegmentIndex = _uiSubTab;
-            [subSeg addTarget:self action:@selector(uiSubTabChanged:) forControlEvents:UIControlEventValueChanged];
-            [_pane addArrangedSubview:subSeg];
-
-            if (_uiSubTab == 0) {
-                UIStackView *prevCard = mkVStack(8);
-                UIStackView *prevHdr = mkHStack(8);
-                [prevHdr addArrangedSubview:mkLabel(@"Xem trước thanh Menu Bar", 13.5, UIFontWeightSemibold, kInkPrimary)];
-                [prevHdr addArrangedSubview:[UIView new]];
-                _lblPreviewMeta = mkLabel([NSString stringWithFormat:@"%d%% · Rõ %d%% · L%d T%d",
-                    (int)roundf(_uiCfg.menuBarScale * 100), (int)roundf(_uiCfg.menuBarOpacity * 100),
-                    (int)roundf(_uiCfg.menuBarLeftX), (int)roundf(_uiCfg.menuBarTopY)], 12, UIFontWeightMedium, kTintBlue);
-                _lblPreviewMeta.font = iosMonoDigits(12, UIFontWeightMedium);
-                [prevHdr addArrangedSubview:_lblPreviewMeta];
-                [prevCard addArrangedSubview:prevHdr];
-
-                _preview = [[SDVMenuBarPreviewView alloc] initWithFrame:CGRectZero];
-                [_preview.heightAnchor constraintEqualToConstant:68].active = YES;
-                [_preview updateWithConfig:_uiCfg];
-                [prevCard addArrangedSubview:_preview];
-
-                UIStackView *presetRow = mkHStack(6);
-                presetRow.distribution = UIStackViewDistributionFillEqually;
-                NSArray *presetNames = @[@"Gọn 75%", @"Chuẩn 100%", @"Lớn 135%", @"Rất lớn 175%"];
-                float presetVals[4] = {0.75f, 1.00f, 1.35f, 1.75f};
-                NSMutableArray *pBtns = [NSMutableArray array];
-                for (int i = 0; i < 4; i++) {
-                    BOOL sel = fabsf(_uiCfg.menuBarScale - presetVals[i]) < 0.04f;
-                    SDVAppleButton *pb = mkIOSButton(presetNames[i], nil, sel ? kTintBlue : kBgCardSubtle, sel ? UIColor.whiteColor : kInkPrimary, 12, UIEdgeInsetsMake(7, 4, 7, 4));
-                    pb.layer.cornerRadius = 8.5;
-                    pb.tag = 100 + i;
-                    [pb addTarget:self action:@selector(applyPreset:) forControlEvents:UIControlEventTouchUpInside];
-                    [presetRow addArrangedSubview:pb];
-                    [pBtns addObject:pb];
-                }
-                _presetButtons = pBtns;
-                [prevCard addArrangedSubview:presetRow];
-                [_pane addArrangedSubview:mkGroupedCard(prevCard, UIEdgeInsetsMake(12, 14, 12, 14))];
-
-                [_pane addArrangedSubview:mkGroupedRows(@[
-                    [self mkSliderRow:@"Kích thước Menu Bar" min:0.55f max:2.20f val:_uiCfg.menuBarScale valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.menuBarScale * 100)] tag:1],
-                    [self mkSliderRow:@"Độ rõ / trong suốt" min:0.10f max:1.00f val:_uiCfg.menuBarOpacity valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.menuBarOpacity * 100)] tag:7],
-                    [self mkSliderRow:@"Lề trái (tránh Dynamic Island)" min:8.0f max:240.0f val:_uiCfg.menuBarLeftX valText:[NSString stringWithFormat:@"%d px", (int)roundf(_uiCfg.menuBarLeftX)] tag:2],
-                    [self mkSliderRow:@"Lề trên" min:4.0f max:160.0f val:_uiCfg.menuBarTopY valText:[NSString stringWithFormat:@"%d px", (int)roundf(_uiCfg.menuBarTopY)] tag:3],
-                    [self mkSliderRow:@"Khoảng cách giữa các nút" min:2.0f max:22.0f val:_uiCfg.menuBarGap valText:[NSString stringWithFormat:@"%d px", (int)roundf(_uiCfg.menuBarGap)] tag:4]
-                ], 14)];
-
-                [_pane addArrangedSubview:mkSectionTitle(@"Nút hiển thị trên Menu Bar")];
-                [_pane addArrangedSubview:mkGroupedRows(@[
-                    [self mkSettingsSwitchRow:@"Nút KEY (Bàn phím ảo)" icon:@"keyboard" color:kTintTeal on:_uiCfg.showKeyboardBtn tag:10],
-                    [self mkSettingsSwitchRow:@"Nút MENU (Túi đồ / ESC)" icon:@"line.3.horizontal" color:kTintOrange on:_uiCfg.showMenuBtn tag:11],
-                    [self mkSettingsSwitchRow:@"Nút MODS (Ngăn phím tắt)" icon:@"square.grid.2x2.fill" color:kTintIndigo on:_uiCfg.showHotkeyDrawerBtn tag:12]
-                ], 52)];
-            } else if (_uiSubTab == 1) {
-                [_pane addArrangedSubview:mkSectionTitle(@"Cụm nút X · Y · A · B & LT · RT")];
-                [_pane addArrangedSubview:mkGroupedRows(@[
-                    [self mkSliderRow:@"Kích thước nút X / Y / A / B" min:0.50f max:2.20f val:_uiCfg.abxyScale valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.abxyScale * 100)] tag:8],
-                    [self mkSliderRow:@"Độ rõ / trong suốt (5%–100%)" min:0.05f max:1.00f val:_uiCfg.abxyOpacity valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.abxyOpacity * 100)] tag:9],
-                    [self mkSliderRow:@"Khoảng cách giãn nút" min:0.60f max:1.80f val:_uiCfg.abxySpacing valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.abxySpacing * 100)] tag:10],
-                    [self mkSliderRow:@"Kích thước nút LT / RT" min:0.50f max:2.20f val:_uiCfg.trigScale valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.trigScale * 100)] tag:11],
-                    [self mkSliderRow:@"Độ rõ LT / RT (5%–100%)" min:0.05f max:1.00f val:_uiCfg.trigOpacity valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.trigOpacity * 100)] tag:12]
-                ], 14)];
-
-                [_pane addArrangedSubview:mkSectionTitle(@"Joystick & Chuột")];
-                UIStackView *mRow = mkHStack(10);
-                [mRow addArrangedSubview:mkLabel(@"Chế độ chuột", 13.5, UIFontWeightRegular, kInkPrimary)];
-                [mRow addArrangedSubview:[UIView new]];
-                UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"Chạm", @"Trackpad", @"Tắt"]];
-                seg.selectedSegmentIndex = _uiCfg.mouseMode;
-                [seg addTarget:self action:@selector(mouseModeChanged:) forControlEvents:UIControlEventValueChanged];
-                [mRow addArrangedSubview:seg];
-
-                [_pane addArrangedSubview:mkGroupedRows(@[
-                    [self mkSliderRow:@"Kích thước Joystick" min:0.50f max:2.20f val:_uiCfg.joyScale valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.joyScale * 100)] tag:13],
-                    [self mkSliderRow:@"Độ rõ Joystick" min:0.05f max:1.00f val:_uiCfg.joyOpacity valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.joyOpacity * 100)] tag:14],
-                    [self mkSliderRow:@"Tỉ lệ chung toàn bộ tay cầm" min:0.50f max:2.00f val:_uiCfg.padScale valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.padScale * 100)] tag:5],
-                    [self mkSettingsSwitchRow:@"Bố cục thuận tay trái" icon:@"hand.raised.fill" color:kTintPurple on:_uiCfg.leftHanded tag:13],
-                    mRow
-                ], 14)];
-            } else {
-                [_pane addArrangedSubview:mkSectionTitle(@"Kích thước bảng SET & MODS")];
-                UIStackView *mPresets = mkHStack(8);
-                mPresets.distribution = UIStackViewDistributionFillEqually;
-                NSArray *mpTitles = @[@"Vừa (125%)", @"To rõ (155%)", @"Rất to (185%)"];
-                for (int i = 0; i < 3; i++) {
-                    SDVAppleButton *b = mkIOSButton(mpTitles[i], nil, kBgCardSubtle, kInkPrimary, 12.5, UIEdgeInsetsMake(8, 6, 8, 6));
-                    b.layer.cornerRadius = 9;
-                    b.tag = 150 + i;
-                    [b addTarget:self action:@selector(applyModalPreset:) forControlEvents:UIControlEventTouchUpInside];
-                    [mPresets addArrangedSubview:b];
-                }
-                [_pane addArrangedSubview:mkGroupedRows(@[
-                    [self mkSliderRow:@"Cỡ bảng Touch Settings (nút SET)" min:1.00f max:2.00f val:_uiCfg.modalScale valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.modalScale * 100)] tag:15],
-                    [self mkSliderRow:@"Cỡ ngăn phím tắt MODS" min:0.80f max:2.00f val:_uiCfg.drawerScale valText:[NSString stringWithFormat:@"%d%%", (int)roundf(_uiCfg.drawerScale * 100)] tag:16],
-                    mPresets
-                ], 14)];
-
-                SDVAppleButton *resetBtn = mkIOSButton(@"Khôi phục mặc định tay cầm ảo", @"arrow.counterclockwise", kBgCard, kTintRed, 14, UIEdgeInsetsMake(12, 14, 12, 14));
-                resetBtn.layer.cornerRadius = 13;
-                [resetBtn addTarget:self action:@selector(resetUiConfig) forControlEvents:UIControlEventTouchUpInside];
-                [_pane addArrangedSubview:resetBtn];
-            }
         }
     } else if (_ctrlSectionTab == 1) {
         // ==================== TAB 1: GIAO DIỆN & MENU ====================
@@ -1543,12 +1472,7 @@ static NSString *sdvProbeLocalNetwork(void) {
     } else if (_ctrlSectionTab == 2) {
         // ==================== TAB 2: PHÍM PC TÙY CHỌN (56 PHÍM) ====================
         [_pane addArrangedSubview:mkSectionTitle(@"Nút phím máy tính tùy chọn (PC Keys)")];
-        if (_mobileCfg.mode == 0) {
-            UIStackView *note = mkHStack(10);
-            [note addArrangedSubview:mkSettingsIconBadge(@"info.circle.fill", kTintBlue, 28)];
-            [note addArrangedSubview:mkLabel(@"Bạn đang chọn chế độ Tay cầm ảo gốc. Hãy chuyển sang Vô hình / 2 Nút / Chạm đi / Kết hợp ở mục Điều khiển để dùng nút phím PC Pixel.", 12.5, UIFontWeightRegular, kInkSecondary)];
-            [_pane addArrangedSubview:mkGroupedCard(note, UIEdgeInsetsMake(12, 14, 12, 14))];
-        } else {
+        {
             NSMutableArray<UIView *> *ckRows = [NSMutableArray array];
             UIStackView *addRow = mkHStack(10);
             [addRow addArrangedSubview:mkSettingsIconBadge(@"keyboard.fill", kTintPurple, 28)];
@@ -1972,7 +1896,7 @@ static NSString *sdvProbeLocalNetwork(void) {
 -(void)mobileModeChanged:(UISegmentedControl *)seg {
     if (!_mobileCfg) _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
     NSInteger idx = seg.selectedSegmentIndex;
-    _mobileCfg.mode = (idx == 4) ? 0 : (idx + 1);
+    _mobileCfg.mode = MAX(1, MIN(4, idx + 1));
     [_mobileCfg saveToDocuments:_root.path];
     [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
     [self renderAll:NO];
@@ -2246,7 +2170,7 @@ static NSString *sdvProbeLocalNetwork(void) {
 }
 
 // ============================================================
-// TAB 4: HƯỚNG DẪN SỬ DỤNG (CẬP NHẬT v7.10)
+// TAB 4: HƯỚNG DẪN SỬ DỤNG (CẬP NHẬT v1.0.1)
 // ============================================================
 -(UIView *)mkGuideStep:(NSString *)num title:(NSString *)title body:(NSString *)body color:(UIColor *)col {
     UIStackView *row = mkHStack(11);
@@ -2292,7 +2216,7 @@ static NSString *sdvProbeLocalNetwork(void) {
     UIStackView *topRow = mkHStack(10);
     [topRow addArrangedSubview:mkSettingsIconBadge(@"book.fill", kTintOrange, 34)];
     UIStackView *topTxt = mkVStack(1);
-    [topTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"%@ v7.10 — Hướng dẫn toàn diện", appNm], 15.5, UIFontWeightSemibold, kInkPrimary)];
+    [topTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"%@ v1.0.1 — Hướng dẫn toàn diện", appNm], 15.5, UIFontWeightSemibold, kInkPrimary)];
     [topTxt addArrangedSubview:mkLabel(@"Đồ họa Native · SMAPI 4.5.2 · Mobile Controls · Shader GLSL ES (iOS 14–27+)", 12, UIFontWeightRegular, kInkSecondary)];
     SDVAppleButton *jumpBtn = mkIOSButton(@"Xem Credit", @"heart.fill", [kTintPink colorWithAlphaComponent:0.13], kTintPink, 12.5, UIEdgeInsetsMake(7, 11, 7, 11));
     [jumpBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
@@ -2300,6 +2224,19 @@ static NSString *sdvProbeLocalNetwork(void) {
     [topRow addArrangedSubview:topTxt];
     [topRow addArrangedSubview:jumpBtn];
     [_pane addArrangedSubview:mkGroupedCard(topRow, UIEdgeInsetsMake(12, 14, 12, 14))];
+
+    // Quick Online Bug Report Card (auto-zips sanitized ErrorLogs.zip + sends to Admin Discord via Cloudflare Worker)
+    UIStackView *bugCard = mkHStack(10);
+    [bugCard addArrangedSubview:mkSettingsIconBadge(@"ladybug.fill", kTintRed, 32)];
+    UIStackView *bugTxt = mkVStack(1.5);
+    [bugTxt addArrangedSubview:mkLabel(@"Gặp lỗi game / Mod / Shader?", 14, UIFontWeightSemibold, kInkPrimary)];
+    [bugTxt addArrangedSubview:mkLabel(@"Chọn loại lỗi, mô tả ngắn gọn và gửi trực tiếp cho Admin kèm tệp nén ErrorLogs.zip.", 12, UIFontWeightRegular, kInkSecondary)];
+    SDVAppleButton *bugOpenBtn = mkIOSButton(@"Báo lỗi", @"paperplane.fill", kTintRed, UIColor.whiteColor, 12.5, UIEdgeInsetsMake(8, 12, 8, 12));
+    [bugOpenBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [bugOpenBtn addTarget:self action:@selector(openBugReportModal) forControlEvents:UIControlEventTouchUpInside];
+    [bugCard addArrangedSubview:bugTxt];
+    [bugCard addArrangedSubview:bugOpenBtn];
+    [_pane addArrangedSubview:mkGroupedCard(bugCard, UIEdgeInsetsMake(11, 14, 11, 14))];
 
     [_pane addArrangedSubview:mkSectionTitle(@"1. Thiết lập Game & Cài đặt Mod (5 bước)")];
     [_pane addArrangedSubview:mkGroupedRows(@[
@@ -2312,10 +2249,10 @@ static NSString *sdvProbeLocalNetwork(void) {
 
     [_pane addArrangedSubview:mkSectionTitle(@"2. Điều khiển Mobile, Thanh Item, Phím PC & Quản lý Save")];
     [_pane addArrangedSubview:mkGroupedRows(@[
-        [self mkGuideStep:@"A" title:@"4 Chế độ Mobile & Tiện ích cảm ứng chuyên sâu" body:@"Chuyển trực tiếp giữa Vô hình, 2 Nút, Chạm đi (A* tự qua cửa, giữ trực tiếp trên nước để gồng Cần câu 0ms, giữ trên đất để gồng Cuốc/Bình tưới nâng cấp, kéo lướt thu hoạch), Kết hợp hoặc Tay cầm. Hỗ trợ Thanh Item dọc kiểu Mobile (1–3 cột, 4–12 ô/cột, cạnh Trái/Phải, kéo cỡ trong Edit Layout), kéo mồi/phao thả lên cần câu, tự hiện nút ROT/SPEC, ngắm Súng cao su, lia camera ở Robin & Bảo tàng và máy thùng Prairie King / Junimo Kart / Crane Game." color:kTintBlue],
+        [self mkGuideStep:@"A" title:@"4 Chế độ Mobile & Tiện ích cảm ứng chuyên sâu" body:@"Chuyển trực tiếp giữa Vô hình, 2 Nút, Chạm đi (A* tự qua cửa, giữ trực tiếp trên nước để gồng Cần câu 0ms, giữ trên đất để gồng Cuốc/Bình tưới nâng cấp, kéo lướt thu hoạch) và Kết hợp. Hỗ trợ Thanh Item dọc kiểu Mobile (1–3 cột, 4–12 ô/cột, cạnh Trái/Phải, kéo cỡ trong Edit Layout), kéo mồi/phao thả lên cần câu, tự hiện nút ROT/SPEC, ngắm Súng cao su, lia camera ở Robin & Bảo tàng và máy thùng Prairie King / Junimo Kart / Crane Game." color:kTintBlue],
         [self mkGuideStep:@"B" title:@"Thanh tiện ích (BAG · MAP · QST · SAVE · KEY · HIDE · EDIT)" body:@"Mở nhanh Túi đồ (BAG), Bản đồ (MAP), Nhiệm vụ (QST), Bàn phím ảo iOS (KEY), ẩn toàn bộ nút (HIDE — chạm đúp để hiện lại) và chế độ chỉnh vị trí nút (EDIT). Bấm dấu < để thu gọn thanh khi cần màn hình thoáng." color:kTintGreen],
         [self mkGuideStep:@"C" title:@"Save Menu 20 mốc & Nhập / Xuất File Save đa nền tảng" body:@"Bấm nút SAVE trong game để tạo tới 20 mốc thời gian bất kỳ lúc nào. Vào tab File Save ở thanh bên để Nhập Save từ PC (Windows/Mac/Linux), Android, iOS (tự chuẩn hóa hoa-thường, tạo SaveGameInfo, sao lưu bản cũ) hoặc Xuất .ZIP đa nền tảng (kèm QuickSave)." color:kTintOrange],
-        [self mkGuideStep:@"D" title:@"Thêm nút phím PC tùy chọn (PC Keys / +PHIM)" body:@"Thêm tối đa 16 phím máy tính (P, I, F1–F12, ESC, TAB, SHIFT, CTRL, ALT, A–Z, 0–9…) từ bảng 56 phím trong tab Hiệu năng & Nút hoặc bấm +PHIM trong Edit Layout. Kéo di chuyển & kéo góc dưới phải để chỉnh kích thước từng phím." color:kTintPurple]
+        [self mkGuideStep:@"D" title:@"Thêm nút phím PC tùy chọn & Hỗ trợ Tay cầm / Phím / Chuột ngoài" body:@"Thêm tối đa 16 phím máy tính (P, I, F1–F12, ESC, TAB, SHIFT, CTRL, ALT…) trong tab Hiệu năng & Nút hoặc +PHIM. Ngoài ra hỗ trợ trực tiếp Tay cầm Bluetooth/USB-C (đủ 2 cần analog, L3/R3 & điều khiển trong Menu), Bàn phím rời (WASD, Esc, phím tắt mod, gõ chat/đặt tên) và Chuột rời (di trỏ chuột, chuột trái/phải, cuộn con lăn)." color:kTintPurple]
     ], 48)];
 
     [_pane addArrangedSubview:mkSectionTitle(@"3. Tối ưu RAM, Cảnh báo Lưu Game 85% / 90% & Lưu ý iOS 14–27+")];
@@ -2332,7 +2269,7 @@ static NSString *sdvProbeLocalNetwork(void) {
     UIStackView *topRow = mkHStack(10);
     [topRow addArrangedSubview:mkSettingsIconBadge(@"heart.fill", kTintPink, 34)];
     UIStackView *topTxt = mkVStack(1);
-    [topTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"%@ v7.10 — Credit & Cộng đồng", appNm], 15.5, UIFontWeightSemibold, kInkPrimary)];
+    [topTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"%@ v1.0.1 — Credit & Cộng đồng", appNm], 15.5, UIFontWeightSemibold, kInkPrimary)];
     [topTxt addArrangedSubview:mkLabel(@"Tri ân nhà phát triển game gốc, cộng đồng mã nguồn mở & Stardew Valley Việt Nam", 12, UIFontWeightRegular, kInkSecondary)];
     [topRow addArrangedSubview:topTxt];
     [_pane addArrangedSubview:mkGroupedCard(topRow, UIEdgeInsetsMake(12, 14, 12, 14))];
@@ -2350,7 +2287,7 @@ static NSString *sdvProbeLocalNetwork(void) {
         [self mkCreditRow:@"GAME GỐC — NHÀ PHÁT TRIỂN" name:@"ConcernedApe (Eric Barone)" detail:@"Tác giả toàn bộ trò chơi Stardew Valley. Mọi bản quyền thuộc về ConcernedApe LLC." url:@"https://www.stardewvalley.net" urlLabel:@"Web"],
         [self mkCreditRow:@"NỀN TẢNG iOS PORT (MIT)" name:@"DeadAKJ — SDViosport" detail:@"Mã nguồn host .NET 8 iOS, MonoGame, tích hợp SMAPI và tay cầm cảm ứng SDViOSTouchControls." url:@"https://github.com/DeadAKJ/SDViosport" urlLabel:@"GitHub"],
         [self mkCreditRow:@"NỀN TẢNG MODDING" name:@"SMAPI — Pathoschild & Cộng đồng" detail:@"Stardew Modding API cùng các tác giả mod trên NexusMods và nhóm Việt hóa cộng đồng." url:@"https://smapi.io" urlLabel:@"smapi.io"],
-        [self mkCreditRow:@"TRÌNH QUẢN LÝ & LAUNCHER iOS" name:@"Garden Launcher iOS (v7.10 Native Edition)" detail:@"Giao diện iOS chuẩn Apple, giải nén mọi định dạng (.ZIP/.RAR/.7Z/.TAR.GZ), âm thanh OpenAL chuẩn iOS, điều khiển Mobile (Edit Layout + PC Keys + Save Menu 20 mốc), tương thích Shader MGFX v9/v10 GLSL ES, cảnh báo RAM 85%/90% và hỗ trợ iOS 14–27+." url:@"https://github.com/hanprm9-dot/Garden-Launcher-iOS" urlLabel:@"GitHub"]
+        [self mkCreditRow:@"TRÌNH QUẢN LÝ & LAUNCHER iOS" name:@"Garden Launcher iOS (v1.0.1 Native Edition)" detail:@"Giao diện iOS chuẩn Apple, giải nén mọi định dạng (.ZIP/.RAR/.7Z/.TAR.GZ), âm thanh OpenAL chuẩn iOS, điều khiển Mobile (Edit Layout + PC Keys + Save Menu 20 mốc), tương thích Shader MGFX v9/v10 GLSL ES, cảnh báo RAM 85%/90% và hỗ trợ iOS 14–27+." url:@"https://github.com/hanprm9-dot/Garden-Launcher-iOS" urlLabel:@"GitHub"]
     ], 14);
     [_pane addArrangedSubview:_creditCard];
 
@@ -2377,10 +2314,17 @@ static NSString *sdvProbeLocalNetwork(void) {
 }
 
 -(void)switchToCreditTab {
-    _tab = 6;
+    _tab = 7;
     [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
     [self renderAll:YES];
     [_scroll setContentOffset:CGPointZero animated:NO];
+}
+
+-(void)openBugReportModal {
+    if (_veil) return;
+    _tab = 6;
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+    [self renderAll:YES];
 }
 
 -(void)openExternalLink:(UIButton *)btn {
@@ -2507,7 +2451,7 @@ static NSString *sdvProbeLocalNetwork(void) {
 -(void)access:(BOOL)write block:(void(^)(NSURL *))fn {
 #ifdef GARDEN_IN_GAME
     NSURL *local = [fm() URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
-    if (!dir(join(local.path, @"Content")) || !dir(join(local.path, @"Mods"))) {
+    if (![gameDataStatus(local.path)[@"hasContent"] boolValue] || !dir(join(local.path, @"Mods"))) {
         fail(@"Game đang giải nén dữ liệu. Đợi đến màn hình chính rồi thử lại.");
     }
     fn(local);
@@ -2522,7 +2466,8 @@ static NSString *sdvProbeLocalNetwork(void) {
         __block NSException *problem = nil;
         void (^accessor)(NSURL *) = ^(NSURL *r) {
             @try {
-                if (!childScope(r.path) && (!dir(inside(r.path, @"Content")) || !dir(inside(r.path, @"Mods")) || ![fm() fileExistsAtPath:inside(r.path, @"Stardew Valley.dll")])) {
+                NSDictionary *gst = gameDataStatus(r.path);
+                if (!childScope(r.path) && (![gst[@"hasContent"] boolValue] || !dir(inside(r.path, @"Mods")) || ![gst[@"hasSdvDll"] boolValue])) {
                     fail(@"Hãy chọn thư mục chứa Mods, Content và Stardew Valley.dll.");
                 }
                 NSError *readError = nil;
@@ -2600,6 +2545,7 @@ static NSArray<UTType *> *sdvAllArchivePickerTypes(void) {
 -(void)importGameDataTapped { _choosingFolder = NO; _importingGameData = YES; _importingSave = NO; _appendPick = NO; [self picker:sdvAllArchivePickerTypes() copy:YES multi:NO]; }
 
 -(void)recheckGameData {
+    sdvMigrateDocumentsToHiddenLayout(_root.path);
     syncBundledLidgren(_root.path);
     syncBundledSmapi(_root.path);
     syncBundledMobileControls(_root.path);

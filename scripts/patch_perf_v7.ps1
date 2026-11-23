@@ -163,7 +163,7 @@ $lCallFc    = $il.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, "ManualModGarden")
 
 $il.Append($lTryStart)
 $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Call, $mGetFolderPath))
-$il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, "sdv_gc_now.flag"))
+$il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, ".garden/sdv_gc_now.flag"))
 $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Call, $mPathCombine))
 $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Stloc, $vPath))
 $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vPath))
@@ -657,6 +657,139 @@ $pmIl.Append($pmIl.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0))
 $pmIl.Append($pmIl.Create([Mono.Cecil.Cil.OpCodes]::Ret))
 Write-Host "  Gated PrefixPropagateMap on DeferredMapLoader.IsBulkLoading!"
 
+# 1.8 Fix SDViOSTouchControls.ModEntry.PrefixSetWindowSize:
+# Allow Game1.SetWindowSize to recreate Game1.screen whenever Game1.screen dimensions don't match
+# Ceiling(_staticNativeWidth / zoomLevel) x Ceiling(_staticNativeHeight / zoomLevel) (within 4px).
+# Previously it skipped SetWindowSize unconditionally once Game1.screen != null, leaving Game1.screen stuck
+# at 1.0x native pixels (e.g. 2436x1125) when Zoom=1.25 (viewport 1949x900), misaligning DynamicShader TiltShift
+# blur bands & WaterReflection screen buffers!
+$mPrefSws = $tTouchModEntry.Methods | Where-Object { $_.Name -eq "PrefixSetWindowSize" }
+$mGame1GetScreen = Find-Ref $tMod "Microsoft.Xna.Framework.Graphics.RenderTarget2D StardewValley.Game1::get_screen()"
+$mGame1GetOpts   = Find-Ref $tMod "StardewValley.Options StardewValley.Game1::get_options()"
+if ($mPrefSws -and $mGame1GetScreen -and $mGame1GetOpts) {
+    $tOptsRef = $mGame1GetOpts.ReturnType
+    $mGetZoom = New-Object Mono.Cecil.MethodReference("get_zoomLevel", $tMod.TypeSystem.Single, $tOptsRef)
+    $mGetZoom.HasThis = $true
+    $tTex2DRef = New-Object Mono.Cecil.TypeReference("Microsoft.Xna.Framework.Graphics", "Texture2D", $tMod, $mGame1GetScreen.ReturnType.Scope, $false)
+    $mTexGetW = New-Object Mono.Cecil.MethodReference("get_Width", $tMod.TypeSystem.Int32, $tTex2DRef)
+    $mTexGetW.HasThis = $true
+    $mTexGetH = New-Object Mono.Cecil.MethodReference("get_Height", $tMod.TypeSystem.Int32, $tTex2DRef)
+    $mTexGetH.HasThis = $true
+    $tMathRef = New-Object Mono.Cecil.TypeReference("System", "Math", $tMod, $tMod.TypeSystem.Object.Scope, $false)
+    $mMathCeil = New-Object Mono.Cecil.MethodReference("Ceiling", $tMod.TypeSystem.Double, $tMathRef)
+    $mMathCeil.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition($tMod.TypeSystem.Double)))
+    $mMathAbs = New-Object Mono.Cecil.MethodReference("Abs", $tMod.TypeSystem.Int32, $tMathRef)
+    $mMathAbs.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition($tMod.TypeSystem.Int32)))
+    $fGame1Inst = $null
+    foreach ($ins in $mPrefSws.Body.Instructions) {
+        if ($ins.OpCode.Name -eq "ldsfld" -and "$($ins.Operand)" -like "*Game1::game1*") { $fGame1Inst = $ins.Operand; break }
+    }
+    Expand-ShortBranches $mPrefSws
+    # Find the `ldc.i4.0; ret` (return false = skip SetWindowSize) site
+    $swsIns = $mPrefSws.Body.Instructions
+    $skipFalseAnchor = $null
+    for ($i = 0; $i -lt ($swsIns.Count - 1); $i++) {
+        if ($swsIns[$i].OpCode.Name -eq "ldc.i4.0" -and $swsIns[$i+1].OpCode.Name -eq "ret") {
+            $skipFalseAnchor = $swsIns[$i]
+            break
+        }
+    }
+    if ($skipFalseAnchor -and $fGame1Inst) {
+        $vScr  = New-Object Mono.Cecil.Cil.VariableDefinition($mGame1GetScreen.ReturnType)
+        $vOpt  = New-Object Mono.Cecil.Cil.VariableDefinition($tOptsRef)
+        $vZoom = New-Object Mono.Cecil.Cil.VariableDefinition($tMod.TypeSystem.Single)
+        $vExpW = New-Object Mono.Cecil.Cil.VariableDefinition($tMod.TypeSystem.Int32)
+        $vExpH = New-Object Mono.Cecil.Cil.VariableDefinition($tMod.TypeSystem.Int32)
+        foreach ($v in @($vScr, $vOpt, $vZoom, $vExpW, $vExpH)) { $mPrefSws.Body.Variables.Add($v) }
+        $mPrefSws.Body.InitLocals = $true
+        $swsIL = $mPrefSws.Body.GetILProcessor()
+        $lRunOrig = $swsIns[$swsIns.Count - 2] # ldc.i4.1; ret
+        $lZoomOk  = $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fSNatW)
+        $lCheckScr = $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fGame1Inst)
+        # Insert right before skipFalseAnchor:
+        # screen = Game1.game1.screen; z = Game1.options?.zoomLevel ?? 1f; if (z <= 0.05f) z = 1f;
+        # expW = (int)Math.Ceiling(_staticNativeWidth / (double)z); expH = (int)Math.Ceiling(_staticNativeHeight / (double)z);
+        # if (Math.Abs(screen.Width - expW) > 4 || Math.Abs(screen.Height - expH) > 4) return true;
+        $seq = @(
+            $lCheckScr,
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mGame1GetScreen),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Stloc, $vScr),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_R4, [float]1.0),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Stloc, $vZoom),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Call, $mGame1GetOpts),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Stloc, $vOpt),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vOpt),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $lZoomOk),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vOpt),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mGetZoom),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Stloc, $vZoom),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vZoom),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_R4, [float]0.05),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Bgt, $lZoomOk),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_R4, [float]1.0),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Stloc, $vZoom),
+            # expW = (int)Math.Ceiling(_staticNativeWidth / (double)z)
+            $lZoomOk,
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Conv_R8),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vZoom),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Conv_R8),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Div),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Call, $mMathCeil),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Conv_I4),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Stloc, $vExpW),
+            # expH = (int)Math.Ceiling(_staticNativeHeight / (double)z)
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fSNatH),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Conv_R8),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vZoom),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Conv_R8),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Div),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Call, $mMathCeil),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Conv_I4),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Stloc, $vExpH),
+            # if (Math.Abs(screen.Width - expW) > 4) goto lRunOrig
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vScr),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mTexGetW),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vExpW),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Sub),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Call, $mMathAbs),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_4),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Bgt, $lRunOrig),
+            # if (Math.Abs(screen.Height - expH) > 4) goto lRunOrig
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vScr),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mTexGetH),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vExpH),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Sub),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Call, $mMathAbs),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_4),
+            $swsIL.Create([Mono.Cecil.Cil.OpCodes]::Bgt, $lRunOrig)
+        )
+        foreach ($ins in $seq) { $swsIL.InsertBefore($skipFalseAnchor, $ins) }
+        Retarget-Branches $mPrefSws $skipFalseAnchor $lCheckScr
+        Write-Host "  DynamicShader Screen Sync Fix (TouchControls): PrefixSetWindowSize now allows Game1.screen resize on Zoom change!"
+    }
+}
+
+# 1.9 Hidden .garden/ config paths in SDViOSTouchControls (keeps iOS Files app Documents/ clean!)
+$touchHidden = 0
+foreach ($tt in $tMod.Types) {
+    foreach ($tm in $tt.Methods) {
+        if (-not $tm.HasBody) { continue }
+        foreach ($ins in $tm.Body.Instructions) {
+            if ($ins.OpCode.Name -eq "ldstr") {
+                if ($tm.Name -eq "GetConfigPath" -and $ins.Operand -eq "touch_overlay_config.json") {
+                    $ins.Operand = ".garden/touch_overlay_config.json"; $touchHidden++
+                } elseif ($tm.Name -eq "SyncMenuBarConfig" -and $ins.Operand -eq "sdv_menubar.cfg") {
+                    $ins.Operand = ".garden/sdv_menubar.cfg"; $touchHidden++
+                } elseif ($tm.Name -eq "RelocateDisabledModsOnBoot" -and $ins.Operand -eq "DisabledMods") {
+                    $ins.Operand = ".garden/DisabledMods"; $touchHidden++
+                }
+            }
+        }
+    }
+}
+if ($touchHidden -lt 3) { throw "Expected >=3 hidden .garden path patches in TouchControls, got $touchHidden!" }
+Write-Host "  Hidden Documents Layout (TouchControls): redirected $touchHidden config/relocate paths into Documents/.garden/!"
+
 Write-Host "  v7 TouchControls: Native 3x/2x + Direct MobileHooks + PrefixClientBounds + MenuLag(stackSkip, GC 140MB x$gmLowered) + Poll 45f + Watchdog $bumped"
 $tAsm.Write($outTouch)
 $tAsm.Dispose()
@@ -739,7 +872,7 @@ $lTryStart = $il.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_5)
 
 $il.Append($lTryStart)
 $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Call, $hGetFolder))
-$il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, "sdv_perf.cfg"))
+$il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, ".garden/sdv_perf.cfg"))
 $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Call, $hPathCombine))
 $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Stloc, $vCfgP))
 $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vCfgP))
@@ -940,11 +1073,101 @@ $ep.InsertBefore($logFirst, $g0); $ep.InsertBefore($logFirst, $g1); $ep.InsertBe
 Retarget-Branches $logM $logFirst $g0
 $g3.Operand = $logFirst
 
+# 2.4b Real-Time Native Boot Progress Bridge in EngineLogger.Log (runs BEFORE ShouldDropTrace so ALL
+#      EngineLogger + [SMAPI] INFO & TRACE lines pump the native pixel loading UI smoothly on Thread 0!)
+$modGardenRef = New-Object Mono.Cecil.ModuleReference("@rpath/SDVModGarden.framework/SDVModGarden")
+$hMod.ModuleReferences.Add($modGardenRef)
+$mNativeBootLog = New-Object Mono.Cecil.MethodDefinition(
+    "sdv_boot_on_log",
+    [Mono.Cecil.MethodAttributes]"Private, Static, HideBySig, PInvokeImpl",
+    $hMod.TypeSystem.Void
+)
+$mNativeBootLog.ImplAttributes = [Mono.Cecil.MethodImplAttributes]"IL, PreserveSig"
+$mNativeBootLog.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition("line", [Mono.Cecil.ParameterAttributes]::None, $hMod.TypeSystem.String)))
+$mNativeBootLog.PInvokeInfo = New-Object Mono.Cecil.PInvokeInfo([Mono.Cecil.PInvokeAttributes]"CallConvWinapi, CharSetAnsi", "sdv_boot_on_log", $modGardenRef)
+$elType.Methods.Add($mNativeBootLog)
+
+$fBootNotifyFailed = New-Object Mono.Cecil.FieldDefinition("_bootNotifyFailed", [Mono.Cecil.FieldAttributes]"Private, Static", $hMod.TypeSystem.Boolean)
+$elType.Fields.Add($fBootNotifyFailed)
+
+$mNotifyBoot = New-Object Mono.Cecil.MethodDefinition("NotifyBootLine", [Mono.Cecil.MethodAttributes]"Private, Static", $hMod.TypeSystem.Void)
+$mNotifyBoot.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition("msg", [Mono.Cecil.ParameterAttributes]::None, $hMod.TypeSystem.String)))
+$nbIL = $mNotifyBoot.Body.GetILProcessor()
+$nbRet = $nbIL.Create([Mono.Cecil.Cil.OpCodes]::Ret)
+$nbTry = $nbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0)
+$nbLeave = $nbIL.Create([Mono.Cecil.Cil.OpCodes]::Leave, $nbRet)
+$nbCatch = $nbIL.Create([Mono.Cecil.Cil.OpCodes]::Pop)
+$nbIL.Append($nbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fBootNotifyFailed))
+$nbIL.Append($nbIL.Create([Mono.Cecil.Cil.OpCodes]::Brtrue, $nbRet))
+$nbIL.Append($nbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+$nbIL.Append($nbIL.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $nbRet))
+$nbIL.Append($nbTry)
+$nbIL.Append($nbIL.Create([Mono.Cecil.Cil.OpCodes]::Call, $mNativeBootLog))
+$nbIL.Append($nbLeave)
+$nbIL.Append($nbCatch)
+$nbIL.Append($nbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_1))
+$nbIL.Append($nbIL.Create([Mono.Cecil.Cil.OpCodes]::Stsfld, $fBootNotifyFailed))
+$nbIL.Append($nbIL.Create([Mono.Cecil.Cil.OpCodes]::Leave, $nbRet))
+$nbIL.Append($nbRet)
+$ehNb = New-Object Mono.Cecil.Cil.ExceptionHandler([Mono.Cecil.Cil.ExceptionHandlerType]::Catch)
+$ehNb.CatchType = $hMod.TypeSystem.Object
+$ehNb.TryStart = $nbTry
+$ehNb.TryEnd = $nbCatch
+$ehNb.HandlerStart = $nbCatch
+$ehNb.HandlerEnd = $nbRet
+$mNotifyBoot.Body.ExceptionHandlers.Add($ehNb)
+$elType.Methods.Add($mNotifyBoot)
+
+$b0 = $ep.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0)
+$b1 = $ep.Create([Mono.Cecil.Cil.OpCodes]::Call, $mNotifyBoot)
+$ep.InsertBefore($g0, $b0)
+$ep.InsertBefore($g0, $b1)
+Retarget-Branches $logM $g0 $b0
+Write-Host "  Real-Time Boot Progress Hook (Host): EngineLogger.Log -> sdv_boot_on_log (pumps pixel UI live on Thread 0)!"
+
 foreach ($ins in $logM.Body.Instructions) {
     if ($ins.OpCode.Name -eq "ldc.i4" -and [int]$ins.Operand -eq 1500) {
         $ins.Operand = [int]10000
     }
 }
+
+# 2.5 Hidden .game/ & .garden/ Layout in SDViOS.dll (keeps iOS Files app clean with only Mods, Saves, ErrorLogs!)
+$tGameHostType = $hMod.GetType("SDViOS.Loader.GameHost")
+$mGetGameRoot = $tGameHostType.Methods | Where-Object { $_.Name -eq "get_GameRootDir" } | Select-Object -First 1
+if (-not $mGetGameRoot) { throw "Missing GameHost.get_GameRootDir!" }
+$hostHiddenGame = 0
+$hostHiddenGarden = 0
+$hostSmapiInternalSwap = 0
+foreach ($ht in $hMod.Types) {
+    foreach ($hm in $ht.Methods) {
+        if (-not $hm.HasBody) { continue }
+        $insList = $hm.Body.Instructions
+        for ($i = 0; $i -lt $insList.Count; $i++) {
+            $ins = $insList[$i]
+            if ($ins.OpCode.Name -eq "ldstr") {
+                if (($hm.Name -eq "InitializeFileSystem" -or $hm.Name -eq "TryFindGameBinary") -and $ins.Operand -eq "StardewValley") {
+                    $ins.Operand = ".game"; $hostHiddenGame++
+                } elseif ($hm.Name -eq "RelocateDisabledMods" -and $ins.Operand -eq "DisabledMods") {
+                    $ins.Operand = ".garden/DisabledMods"; $hostHiddenGarden++
+                } elseif ($hm.Name -eq "GetConfigPath" -and $ins.Operand -eq "touch_overlay_config.json") {
+                    $ins.Operand = ".garden/touch_overlay_config.json"; $hostHiddenGarden++
+                } elseif ($hm.Name -eq "SyncMenuBarConfig" -and $ins.Operand -eq "sdv_menubar.cfg") {
+                    $ins.Operand = ".garden/sdv_menubar.cfg"; $hostHiddenGarden++
+                } elseif ($ins.Operand -eq "smapi-internal" -and $i -gt 0) {
+                    $prev = $insList[$i - 1]
+                    if ($prev.OpCode.Name -eq "call" -and $prev.Operand -and $prev.Operand.ToString() -match "GameHost::get_DocumentsDir") {
+                        $prev.Operand = $mGetGameRoot
+                        $hostSmapiInternalSwap++
+                    }
+                }
+            }
+        }
+    }
+}
+if ($hostHiddenGame -ne 3 -or $hostHiddenGarden -lt 3 -or $hostSmapiInternalSwap -ne 4) {
+    throw "Unexpected hidden layout patch counts in SDViOS.dll: game=$hostHiddenGame (want 3), garden=$hostHiddenGarden (want >=3), smapiInternal=$hostSmapiInternalSwap (want 4)!"
+}
+Write-Host "  Hidden Documents Layout (Host): .game x$hostHiddenGame, .garden x$hostHiddenGarden, smapi-internal->GameRootDir x$hostSmapiInternalSwap!"
 
 $hAsm.Write($outHost)
 $hAsm.Dispose()
@@ -1206,10 +1429,38 @@ if ($tShader -and $mStrReplace -and $mStrContains -and $mStrConcat2) {
     $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mStrReplace))
     $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Starg, $mPatchGlsl.Parameters[0]))
     $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, "precision mediump int;"))
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, "precision highp int;"))
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mStrReplace))
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Starg, $mPatchGlsl.Parameters[0]))
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
     $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, "precision "))
     $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mStrContains))
+    $lCheckDeriv = $ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0)
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Brtrue, $lCheckDeriv))
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, "#ifdef GL_ES`nprecision highp float;`nprecision highp int;`n#endif`n"))
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Call, $mStrConcat2))
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Starg, $mPatchGlsl.Parameters[0]))
+    # Auto-prepend `#extension GL_OES_standard_derivatives : enable` at line 1 if dFdx/dFdy/fwidth used without it
+    $ilG.Append($lCheckDeriv)
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, "GL_OES_standard_derivatives"))
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mStrContains))
     $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Brtrue, $lRetG))
-    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, "#ifdef GL_ES`nprecision highp float;`nprecision mediump int;`n#endif`n"))
+    $lAddDeriv = $ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, "#extension GL_OES_standard_derivatives : enable`n")
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, "dFdx("))
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mStrContains))
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Brtrue, $lAddDeriv))
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, "dFdy("))
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mStrContains))
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Brtrue, $lAddDeriv))
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, "fwidth("))
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mStrContains))
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $lRetG))
+    $ilG.Append($lAddDeriv)
     $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
     $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Call, $mStrConcat2))
     $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Starg, $mPatchGlsl.Parameters[0]))
@@ -1227,17 +1478,80 @@ if ($tShader -and $mStrReplace -and $mStrContains -and $mStrConcat2) {
         }
     }
 
+    # Build Shader.LogGlslDiag(string msg) -> Console.WriteLine + persistent Documents/ErrorLogs/shader-diag.log
+    $mLogTarget = $mConWrite
+    $mGetFolderPath = Find-Ref $mgMod "System.String System.Environment::GetFolderPath(System.Environment/SpecialFolder)"
+    $mPathComb3     = Find-Ref $mgMod "System.String System.IO.Path::Combine(System.String,System.String,System.String)"
+    $tSysFileRef    = $mgMod.GetTypeReferences() | Where-Object { $_.FullName -eq "System.IO.File" -and $_.Scope.Name -eq "System.Private.CoreLib" } | Select-Object -First 1
+    $tSysExcRef     = $mgMod.GetTypeReferences() | Where-Object { $_.FullName -eq "System.Exception" } | Select-Object -First 1
+    if ($mConWrite -and $mGetFolderPath -and $mPathComb3 -and $tSysFileRef -and $tSysExcRef) {
+        $mAppendAllText = New-Object Mono.Cecil.MethodReference("AppendAllText", $mgMod.TypeSystem.Void, $tSysFileRef)
+        $mAppendAllText.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition("path", [Mono.Cecil.ParameterAttributes]::None, $mgMod.TypeSystem.String)))
+        $mAppendAllText.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition("contents", [Mono.Cecil.ParameterAttributes]::None, $mgMod.TypeSystem.String)))
+
+        $mLogGlsl = New-Object Mono.Cecil.MethodDefinition("LogGlslDiag", [Mono.Cecil.MethodAttributes]"Public, Static", $mgMod.TypeSystem.Void)
+        $mLogGlsl.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition("msg", [Mono.Cecil.ParameterAttributes]::None, $mgMod.TypeSystem.String)))
+        $mLogGlsl.Body.MaxStackSize = 8
+        $ilLD = $mLogGlsl.Body.GetILProcessor()
+
+        $lTryLD   = $ilLD.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0)
+        $lRetLD   = $ilLD.Create([Mono.Cecil.Cil.OpCodes]::Ret)
+        $lLeaveLD = $ilLD.Create([Mono.Cecil.Cil.OpCodes]::Leave, $lRetLD)
+        $lCatchLD = $ilLD.Create([Mono.Cecil.Cil.OpCodes]::Pop)
+
+        $ilLD.Append($ilLD.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+        $ilLD.Append($ilLD.Create([Mono.Cecil.Cil.OpCodes]::Call, $mConWrite))
+        $ilLD.Append($lTryLD)
+        $ilLD.Append($ilLD.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $lLeaveLD))
+        $ilLD.Append($ilLD.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_5)) # Environment.SpecialFolder.Personal
+        $ilLD.Append($ilLD.Create([Mono.Cecil.Cil.OpCodes]::Call, $mGetFolderPath))
+        $ilLD.Append($ilLD.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, "ErrorLogs"))
+        $ilLD.Append($ilLD.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, "shader-diag.log"))
+        $ilLD.Append($ilLD.Create([Mono.Cecil.Cil.OpCodes]::Call, $mPathComb3))
+        $ilLD.Append($ilLD.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, "[GLSL-ERR] "))
+        $ilLD.Append($ilLD.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+        $ilLD.Append($ilLD.Create([Mono.Cecil.Cil.OpCodes]::Call, $mStrConcat2))
+        $ilLD.Append($ilLD.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, "`n"))
+        $ilLD.Append($ilLD.Create([Mono.Cecil.Cil.OpCodes]::Call, $mStrConcat2))
+        $ilLD.Append($ilLD.Create([Mono.Cecil.Cil.OpCodes]::Call, $mAppendAllText))
+        $ilLD.Append($lLeaveLD)
+        $ilLD.Append($lCatchLD)
+        $ilLD.Append($ilLD.Create([Mono.Cecil.Cil.OpCodes]::Leave, $lRetLD))
+        $ilLD.Append($lRetLD)
+
+        $ehLD = New-Object Mono.Cecil.Cil.ExceptionHandler([Mono.Cecil.Cil.ExceptionHandlerType]::Catch)
+        $ehLD.CatchType    = $tSysExcRef
+        $ehLD.TryStart     = $lTryLD
+        $ehLD.TryEnd       = $lCatchLD
+        $ehLD.HandlerStart = $lCatchLD
+        $ehLD.HandlerEnd   = $lRetLD
+        $mLogGlsl.Body.ExceptionHandlers.Add($ehLD)
+        $tShader.Methods.Add($mLogGlsl)
+        $mLogTarget = $mLogGlsl
+    }
+
     $mGetSH = $tShader.Methods | Where-Object { $_.Name -eq "GetShaderHandle" }
-    if ($mGetSH -and $mConWrite) {
+    if ($mGetSH -and $mLogTarget) {
         for ($i = 1; $i -lt $mGetSH.Body.Instructions.Count; $i++) {
             if ($mGetSH.Body.Instructions[$i].OpCode.Name -eq "pop" -and "$($mGetSH.Body.Instructions[$i-1].Operand)" -like "*GetShaderInfoLog*") {
                 $mGetSH.Body.Instructions[$i].OpCode = [Mono.Cecil.Cil.OpCodes]::Call
-                $mGetSH.Body.Instructions[$i].Operand = $mConWrite
+                $mGetSH.Body.Instructions[$i].Operand = $mLogTarget
                 break
             }
         }
     }
-    Write-Host "  iOS Shader Fix (MonoGame): MGFX v8..10 enabled + Auto Desktop GLSL -> GLSL ES precision header + ShaderInfoLog output!"
+
+    $tProgCache = $mgMod.Types | Where-Object { $_.Name -eq "ShaderProgramCache" }
+    $mProgLink  = if ($tProgCache) { $tProgCache.Methods | Where-Object { $_.Name -eq "Link" } | Select-Object -First 1 } else { $null }
+    if ($mProgLink -and $mLogTarget) {
+        for ($i = 1; $i -lt $mProgLink.Body.Instructions.Count; $i++) {
+            if ($mProgLink.Body.Instructions[$i].OpCode.Name -eq "call" -and "$($mProgLink.Body.Instructions[$i-1].Operand)" -like "*GetProgramInfoLog*") {
+                $mProgLink.Body.Instructions[$i].Operand = $mLogTarget
+                break
+            }
+        }
+    }
+    Write-Host "  iOS Shader Fix (MonoGame): MGFX v8..10 + highp float/int GLSL ES upgrade + persistent shader-diag.log on compile/link errors!"
 }
 
 # 3.6 Implement Texture2D.CopyFromTexture(Texture2D src) in MonoGame.Framework.dll!
@@ -1455,6 +1769,104 @@ $eh.HandlerStart = $lCatchStart
 $eh.HandlerEnd   = $lRet
 $mCopyFrom.Body.ExceptionHandlers.Add($eh)
 Write-Host "  iOS Content Patcher Texture Propagation Fix (MonoGame): Implemented real Texture2D.CopyFromTexture(Texture2D) with dynamic resize + GL cache invalidation!"
+
+# 3.7 CRITICAL iOS Shader Mod Fix (DynamicShader ShadowAlphaBoundsCache + WaterTileArtMaskCache):
+# Texture2D.PlatformGetData creates & deletes a temporary FBO without restoring GL_FRAMEBUFFER_BINDING!
+# On iOS (CAEAGLLayer), deleting the bound FBO silently switches OpenGL to FBO 0 (INVALID on iOS), discarding
+# all subsequent draws in the active frame until the next SetRenderTarget change!
+$mPlatGetData = $tTex2D.Methods | Where-Object { $_.Name -eq "PlatformGetData" } | Select-Object -First 1
+$tGL = $mgMod.GetType("MonoGame.OpenGL.GL")
+$mGlGetInt = if ($tGL) { $tGL.Methods | Where-Object { $_.Name -eq "GetInteger" -and $_.Parameters.Count -eq 2 -and $_.Parameters[0].ParameterType.FullName -eq "System.Int32" } | Select-Object -First 1 } else { $null }
+if (-not $mPlatGetData -or -not $mGlGetInt) { throw "Missing Texture2D.PlatformGetData or GL.GetInteger(int, out int)!" }
+$fBindFb = $null; $mBindFbInv = $null
+foreach ($ins in $mPlatGetData.Body.Instructions) {
+    if ($ins.OpCode.Name -eq "ldsfld" -and "$($ins.Operand)" -like "*GL::BindFramebuffer*") { $fBindFb = $ins.Operand }
+    elseif ($ins.OpCode.Name -eq "callvirt" -and "$($ins.Operand)" -like "*BindFramebufferDelegate::Invoke*") { $mBindFbInv = $ins.Operand }
+}
+if (-not $fBindFb -or -not $mBindFbInv) { throw "Missing GL.BindFramebuffer delegate refs in PlatformGetData!" }
+Expand-ShortBranches $mPlatGetData
+$vPrevFbo = New-Object Mono.Cecil.Cil.VariableDefinition($mgMod.TypeSystem.Int32)
+$mPlatGetData.Body.Variables.Add($vPrevFbo)
+$mPlatGetData.Body.InitLocals = $true
+$gdIL = $mPlatGetData.Body.GetILProcessor()
+$afterEnsureUi = $mPlatGetData.Body.Instructions[1] # right after Threading.EnsureUIThread()
+$gdIL.InsertBefore($afterEnsureUi, $gdIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0))
+$gdIL.InsertBefore($afterEnsureUi, $gdIL.Create([Mono.Cecil.Cil.OpCodes]::Stloc, $vPrevFbo))
+$gdIL.InsertBefore($afterEnsureUi, $gdIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4, [int]36006)) # GL_FRAMEBUFFER_BINDING
+$gdIL.InsertBefore($afterEnsureUi, $gdIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloca, $vPrevFbo))
+$gdIL.InsertBefore($afterEnsureUi, $gdIL.Create([Mono.Cecil.Cil.OpCodes]::Call, $mGlGetInt))
+$lastRet = $mPlatGetData.Body.Instructions[$mPlatGetData.Body.Instructions.Count - 1]
+if ($lastRet.OpCode.Name -ne "ret") { throw "Expected ret at end of Texture2D.PlatformGetData!" }
+$gdIL.InsertBefore($lastRet, $gdIL.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fBindFb))
+$gdIL.InsertBefore($lastRet, $gdIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4, [int]36160)) # FramebufferTarget.Framebuffer
+$gdIL.InsertBefore($lastRet, $gdIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vPrevFbo))
+$gdIL.InsertBefore($lastRet, $gdIL.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mBindFbInv))
+Write-Host "  iOS DynamicShader Fix #1 (MonoGame): Texture2D.PlatformGetData now saves & restores GL_FRAMEBUFFER_BINDING!"
+
+# 3.8 CRITICAL iOS Multi-Pass Shader Fix (posFixup Y-flip & half-pixel offset):
+# GraphicsDevice only uploads `posFixup` inside ActivateShaderProgram(), which only runs when
+# _vertexShaderDirty || _pixelShaderDirty! Switching between offscreen RenderTarget2D <-> BackBuffer
+# (or changing Viewport) while reusing the same vertex shader left posFixup.y inverted (-1 vs +1)!
+$fVsDirty = $tGfxDev.Fields | Where-Object { $_.Name -eq "_vertexShaderDirty" }
+$fRastDirty = $tGfxDev.Fields | Where-Object { $_.Name -eq "_rasterizerStateDirty" }
+if (-not $fVsDirty -or -not $fRastDirty) { throw "Missing _vertexShaderDirty or _rasterizerStateDirty in GraphicsDevice!" }
+$posFixPatched = 0
+foreach ($mName in @("PlatformApplyDefaultRenderTarget", "PlatformApplyRenderTargets")) {
+    $rm = $tGfxDev.Methods | Where-Object { $_.Name -eq $mName } | Select-Object -First 1
+    if (-not $rm) { throw "Missing GraphicsDevice.$mName!" }
+    Expand-ShortBranches $rm
+    $ril = $rm.Body.GetILProcessor()
+    for ($i = 0; $i -lt $rm.Body.Instructions.Count; $i++) {
+        if ($rm.Body.Instructions[$i].OpCode.Name -eq "stfld" -and $rm.Body.Instructions[$i].Operand -eq $fRastDirty) {
+            $nextIns = $rm.Body.Instructions[$i + 1]
+            $ril.InsertBefore($nextIns, $ril.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+            $ril.InsertBefore($nextIns, $ril.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_1))
+            $ril.InsertBefore($nextIns, $ril.Create([Mono.Cecil.Cil.OpCodes]::Stfld, $fVsDirty))
+            $posFixPatched++
+            break
+        }
+    }
+}
+$mSetVp = $tGfxDev.Methods | Where-Object { $_.Name -eq "set_Viewport" } | Select-Object -First 1
+if ($mSetVp) {
+    $vpil = $mSetVp.Body.GetILProcessor()
+    $vpRet = $mSetVp.Body.Instructions[$mSetVp.Body.Instructions.Count - 1]
+    $vpil.InsertBefore($vpRet, $vpil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+    $vpil.InsertBefore($vpRet, $vpil.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_1))
+    $vpil.InsertBefore($vpRet, $vpil.Create([Mono.Cecil.Cil.OpCodes]::Stfld, $fVsDirty))
+    $posFixPatched++
+}
+if ($posFixPatched -ne 3) { throw "Expected 3 posFixup invalidation sites, got $posFixPatched!" }
+Write-Host "  iOS DynamicShader Fix #2 (MonoGame): Invalidated _vertexShaderDirty on RT/Viewport switches ($posFixPatched sites) so posFixup never goes stale!"
+
+# 3.9 OpenGL ES 3.0 Core NPOT Capability Fix:
+# GraphicsCapabilities.PlatformInitialize only checked GL_OES_texture_npot extension string,
+# missing core OpenGL ES 3.0 NPOT support (device.glMajorVersion >= 3)!
+$tGfxCap = $mgMod.GetType("Microsoft.Xna.Framework.Graphics.GraphicsCapabilities")
+$mCapInit = if ($tGfxCap) { $tGfxCap.Methods | Where-Object { $_.Name -eq "PlatformInitialize" } | Select-Object -First 1 } else { $null }
+$fGlMaj = $tGfxDev.Fields | Where-Object { $_.Name -eq "glMajorVersion" }
+$mSetNpot = if ($tGfxCap) { $tGfxCap.Methods | Where-Object { $_.Name -eq "set_SupportsNonPowerOfTwo" } | Select-Object -First 1 } else { $null }
+if ($mCapInit -and $fGlMaj -and $mSetNpot) {
+    Expand-ShortBranches $mCapInit
+    $cil2 = $mCapInit.Body.GetILProcessor()
+    $npotPatched = $false
+    for ($i = 0; $i -lt $mCapInit.Body.Instructions.Count; $i++) {
+        if ($mCapInit.Body.Instructions[$i].OpCode.Name -eq "call" -and $mCapInit.Body.Instructions[$i].Operand -eq $mSetNpot) {
+            $afterNpot = $mCapInit.Body.Instructions[$i + 1]
+            $cil2.InsertBefore($afterNpot, $cil2.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
+            $cil2.InsertBefore($afterNpot, $cil2.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fGlMaj))
+            $cil2.InsertBefore($afterNpot, $cil2.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_3))
+            $cil2.InsertBefore($afterNpot, $cil2.Create([Mono.Cecil.Cil.OpCodes]::Blt, $afterNpot))
+            $cil2.InsertBefore($afterNpot, $cil2.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+            $cil2.InsertBefore($afterNpot, $cil2.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_1))
+            $cil2.InsertBefore($afterNpot, $cil2.Create([Mono.Cecil.Cil.OpCodes]::Call, $mSetNpot))
+            $npotPatched = $true
+            break
+        }
+    }
+    if (-not $npotPatched) { throw "Failed to patch SupportsNonPowerOfTwo in GraphicsCapabilities.PlatformInitialize!" }
+    Write-Host "  iOS DynamicShader Fix #3 (MonoGame): Enabled SupportsNonPowerOfTwo for OpenGL ES 3.0+!"
+}
 
 $mgAsm.Write($outMG)
 $mgAsm.Dispose()

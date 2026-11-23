@@ -71,7 +71,9 @@ namespace SDVMobileControls
             _helper = helper;
             _monitor = monitor;
             string docs = Environment.GetFolderPath(Environment.SpecialFolder.Personal);
-            _pruneFlagPath = Path.Combine(docs, "sdv_prune_now.flag");
+            string gardenDir = Path.Combine(docs, ".garden");
+            try { Directory.CreateDirectory(gardenDir); } catch { }
+            _pruneFlagPath = Path.Combine(gardenDir, "sdv_prune_now.flag");
         }
 
         public void OnGameLaunched()

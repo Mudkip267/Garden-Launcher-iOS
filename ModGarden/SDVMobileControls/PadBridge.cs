@@ -427,6 +427,21 @@ namespace SDVMobileControls
             ApplyInputWithMouse(pad, stick, btnX, btnA, btnMenu, null, false);
         }
 
+        public void ResetVirtualPad(object pad)
+        {
+            if (pad == null) return;
+            _arg1[0] = Vector2.Zero;
+            _setLeftStick?.Invoke(pad, _arg1);
+            _setButtonX?.Invoke(pad, _argBoolFalse);
+            _setButtonA?.Invoke(pad, _argBoolFalse);
+            _setButtonB?.Invoke(pad, _argBoolFalse);
+            _setButtonY?.Invoke(pad, _argBoolFalse);
+            _setButtonLT?.Invoke(pad, _argBoolFalse);
+            _setButtonRT?.Invoke(pad, _argBoolFalse);
+            _setButtonMenu?.Invoke(pad, _argBoolFalse);
+            _resetSimulatedMouse?.Invoke(pad, null);
+        }
+
         public void ApplyPhysicalGamePad(object pad, Vector2 stick, bool btnX, bool btnA, bool btnB, bool btnY, bool btnLT, bool btnRT, bool btnMenu)
         {
             if (pad == null) return;

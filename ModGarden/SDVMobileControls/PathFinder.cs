@@ -8,7 +8,7 @@ namespace SDVMobileControls
 {
     internal static class PathFinder
     {
-        private const int MaxExploredNodes = 480;
+        private const int MaxExploredNodes = 760;
         private static readonly int[] Dx = { 0, 1, 0, -1, 1, 1, -1, -1 };
         private static readonly int[] Dy = { -1, 0, 1, 0, -1, 1, 1, -1 };
         private static readonly float[] StepCost = { 1.0f, 1.0f, 1.0f, 1.0f, 1.414f, 1.414f, 1.414f, 1.414f };

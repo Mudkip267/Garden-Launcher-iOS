@@ -2,14 +2,18 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Audio;
 using Microsoft.Xna.Framework.Graphics;
 using Microsoft.Xna.Framework.Input;
+using Microsoft.Xna.Framework.Input.Touch;
 using StardewModdingAPI;
 using StardewModdingAPI.Events;
 using StardewValley;
+using StardewValley.Extensions;
+using StardewValley.Menus;
 using StardewValley.Tools;
 
 namespace SDVMobileControls
@@ -18,34 +22,108 @@ namespace SDVMobileControls
     {
         internal static MobileControlsEngine Engine;
         internal static MapRamOptimizer RamOptimizer;
+        internal static ExternalInputBridge ExternalInput;
         private static IMonitor _monitor;
         private static readonly HashSet<Type> BoundPadTypes = new HashSet<Type>();
+        private static readonly HashSet<Type> PatchedTouchHookTypes = new HashSet<Type>();
+        private static PropertyInfo _delegatingParentProp;
+        private static MethodInfo _modHooksUpdateControlInput;
         private static int _errCount;
         private static int _retryTicks;
         private static int _audioDiagTicks;
         private static bool _audioDiagRanLaunch;
         private static bool _audioDiagRanWorld;
         private static bool _audioDiagWroteThisSession;
-        private static bool _fishingGuardInstalled;
+        private static bool _harmonyPatchesInstalled;
+        private static bool _extHarmonyPatchesInstalled;
         private static long _fishingHoldStartMs;
         private static FishingRod _fishingHoldRod;
+        private static int _fishingTraceCount;
+        private static int _shaderDiagSaveTicks;
+        private static bool _shaderDiagWaitingSave;
+        private static bool _shaderDiagRanOutdoor;
         private static string _bootDocsDir;
         private static bool _bootGameLaunched;
         private static bool _bootReadySignaled;
         private static int _bootRenderedFrames;
+        private static int _bootAssetLoadedCount;
+        private static long _bootLastAssetReportMs;
+        private static bool _bootNativeResolved;
+        private static BootReportDelegate _bootNativeReport;
+        internal static bool SynthesizingTapAction;
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate void BootReportDelegate(
+            int pct,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string stage,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string detail,
+            int stepIdx);
+
+        [DllImport("/usr/lib/libSystem.dylib", EntryPoint = "dlsym")]
+        private static extern IntPtr BootDarwinDlsym(IntPtr handle, [MarshalAs(UnmanagedType.LPStr)] string symbol);
+
+        private static void ReportNativeBoot(int pct, string stage, string detail, int stepIdx)
+        {
+            if (_bootReadySignaled)
+                return;
+            try
+            {
+                if (!_bootNativeResolved)
+                {
+                    _bootNativeResolved = true;
+                    IntPtr fn = BootDarwinDlsym(new IntPtr(-2), "sdv_boot_report");
+                    if (fn != IntPtr.Zero)
+                        _bootNativeReport = Marshal.GetDelegateForFunctionPointer<BootReportDelegate>(fn);
+                }
+                _bootNativeReport?.Invoke(pct, stage ?? "", detail ?? "", stepIdx);
+            }
+            catch { }
+        }
+
+        private static string ClassifyBootAssetStage(string assetName)
+        {
+            if (string.IsNullOrEmpty(assetName))
+                return "Đang nạp tài nguyên game…";
+            if (assetName.StartsWith("Fonts/", StringComparison.OrdinalIgnoreCase))
+                return "Đang nạp phông chữ & bảng mã…";
+            if (assetName.StartsWith("LooseSprites/", StringComparison.OrdinalIgnoreCase))
+                return "Đang nạp giao diện & biểu tượng…";
+            if (assetName.StartsWith("TileSheets/", StringComparison.OrdinalIgnoreCase))
+                return "Đang nạp TileSheets & vật phẩm…";
+            if (assetName.StartsWith("Maps/", StringComparison.OrdinalIgnoreCase) ||
+                assetName.StartsWith("Buildings/", StringComparison.OrdinalIgnoreCase) ||
+                assetName.StartsWith("TerrainFeatures/", StringComparison.OrdinalIgnoreCase))
+                return "Đang nạp bản đồ & công trình…";
+            if (assetName.StartsWith("Characters/", StringComparison.OrdinalIgnoreCase) ||
+                assetName.StartsWith("Portraits/", StringComparison.OrdinalIgnoreCase) ||
+                assetName.StartsWith("Animals/", StringComparison.OrdinalIgnoreCase))
+                return "Đang nạp nhân vật, chân dung & vật nuôi…";
+            if (assetName.StartsWith("Data/", StringComparison.OrdinalIgnoreCase))
+                return "Đang nạp dữ liệu nông trại & vật phẩm…";
+            if (assetName.StartsWith("Strings/", StringComparison.OrdinalIgnoreCase))
+                return "Đang nạp ngôn ngữ & hội thoại…";
+            return "Đang nạp tài nguyên Stardew Valley…";
+        }
 
         public override void Entry(IModHelper helper)
         {
             _monitor = Monitor;
             _bootDocsDir = ResolveBootDocsDir(helper.DirectoryPath);
-            WriteBootStage("SMAPI đã nạp Mod — đang tải Stardew Valley…");
+            WriteBootStage("58|Đang khởi chạy SDV Mobile Controls…");
+            ReportNativeBoot(58, "Đang khởi chạy SDV Mobile Controls…", "Khởi chạy Mod: SDV Mobile Controls · Cảm ứng & Thiết bị rời", 2);
 
             var cfg = new MobileConfig();
+            ExternalInput = new ExternalInputBridge(Monitor);
             Engine = new MobileControlsEngine(cfg, Monitor, helper.DirectoryPath);
             RamOptimizer = new MapRamOptimizer(helper, Monitor);
+            ExternalInput.ModeChanged += mode =>
+            {
+                try { Engine?.OnExternalInputModeChanged(mode); } catch { }
+            };
 
             BindAllLoadedTouchVirtualPads("Entry");
-            InstallFishingCastGuard("Entry");
+            InstallMobileHarmonyPatches("Entry");
+            InstallExternalInputHarmonyPatches("Entry");
 
             helper.Events.GameLoop.GameLaunched += OnGameLaunched;
             helper.Events.GameLoop.UpdateTicked += OnUpdateTicked;
@@ -58,6 +136,7 @@ namespace SDVMobileControls
 
         private static string ResolveBootDocsDir(string modDir)
         {
+            string docsRoot = null;
             try
             {
                 if (!string.IsNullOrEmpty(modDir))
@@ -65,18 +144,25 @@ namespace SDVMobileControls
                     var modsDir = Directory.GetParent(modDir);
                     var docsDir = modsDir?.Parent?.FullName;
                     if (!string.IsNullOrEmpty(docsDir) && Directory.Exists(docsDir))
-                        return docsDir;
+                        docsRoot = docsDir;
                 }
             }
             catch { }
-            try
+            if (string.IsNullOrEmpty(docsRoot))
             {
-                string docs = Environment.GetFolderPath(Environment.SpecialFolder.Personal);
-                if (!string.IsNullOrEmpty(docs) && Directory.Exists(docs))
-                    return docs;
+                try
+                {
+                    string docs = Environment.GetFolderPath(Environment.SpecialFolder.Personal);
+                    if (!string.IsNullOrEmpty(docs) && Directory.Exists(docs))
+                        docsRoot = docs;
+                }
+                catch { }
             }
-            catch { }
-            return null;
+            if (string.IsNullOrEmpty(docsRoot))
+                return null;
+            string gardenDir = Path.Combine(docsRoot, ".garden");
+            try { Directory.CreateDirectory(gardenDir); } catch { }
+            return gardenDir;
         }
 
         private static void WriteBootStage(string stage)
@@ -112,7 +198,12 @@ namespace SDVMobileControls
             }
             if (!_bootGameLaunched || Game1.ticks < 2)
                 return;
-            if (++_bootRenderedFrames >= 2)
+            int f = ++_bootRenderedFrames;
+            if (f == 1)
+            {
+                ReportNativeBoot(96, "Đang dựng khung hình đầu tiên…", "Hoàn tất kết xuất màn hình tiêu đề", 4);
+            }
+            else if (f >= 2)
             {
                 SignalBootReady();
                 try { Helper.Events.Display.Rendered -= OnRenderedBootCheck; } catch { }
@@ -122,9 +213,11 @@ namespace SDVMobileControls
         private void OnGameLaunched(object sender, GameLaunchedEventArgs e)
         {
             _bootGameLaunched = true;
-            WriteBootStage("Đang đồng bộ Content Patcher & Giao diện…");
+            WriteBootStage("90|Kích hoạt GameLaunched — chuẩn bị vào game…");
+            ReportNativeBoot(90, "Kích hoạt GameLaunched — chuẩn bị vào game…", "Hoàn tất đồng bộ Content Patcher & cảm ứng", 4);
             BindAllLoadedTouchVirtualPads("GameLaunched");
-            InstallFishingCastGuard("GameLaunched");
+            InstallMobileHarmonyPatches("GameLaunched");
+            InstallExternalInputHarmonyPatches("GameLaunched");
             try { RamOptimizer?.OnGameLaunched(); } catch { }
         }
 
@@ -141,6 +234,9 @@ namespace SDVMobileControls
                 _audioDiagRanWorld = true;
                 RunAudioDiagnosticAndRepair("SaveLoaded");
             }
+            _shaderDiagWaitingSave = true;
+            _shaderDiagSaveTicks = 0;
+            _shaderDiagRanOutdoor = false;
         }
 
         private void OnDayStarted(object sender, DayStartedEventArgs e)
@@ -153,11 +249,17 @@ namespace SDVMobileControls
             if (e != null && e.IsLocalPlayer)
             {
                 try { RamOptimizer?.OnWarped(e.NewLocation); } catch { }
+                if (!_shaderDiagRanOutdoor && e.NewLocation != null && e.NewLocation.IsOutdoors)
+                {
+                    _shaderDiagRanOutdoor = true;
+                    RunShaderDiagnostic("FirstOutdoorWarp:" + e.NewLocation.Name);
+                }
             }
         }
 
         private void OnUpdateTicked(object sender, UpdateTickedEventArgs e)
         {
+            try { ExternalInput?.PollFrame(); } catch { }
             try { Engine?.OnUpdateTickedGlobal(); } catch { }
             try { RamOptimizer?.PollManualPruneFlag(); } catch { }
             if (!_audioDiagRanLaunch && ++_audioDiagTicks >= 120)
@@ -165,10 +267,20 @@ namespace SDVMobileControls
                 _audioDiagRanLaunch = true;
                 RunAudioDiagnosticAndRepair("GameLaunched+2s");
             }
-            if (BoundPadTypes.Count >= 2 || (BoundPadTypes.Count > 0 && _retryTicks > 300))
+            if (_shaderDiagWaitingSave && Context.IsWorldReady && ++_shaderDiagSaveTicks >= 180)
+            {
+                _shaderDiagWaitingSave = false;
+                RunShaderDiagnostic("SaveLoaded+3s");
+            }
+            if (BoundPadTypes.Count >= 2 && _extHarmonyPatchesInstalled && PatchedTouchHookTypes.Count >= 1)
+                return;
+            if (BoundPadTypes.Count > 0 && _retryTicks > 300)
                 return;
             if (++_retryTicks % 30 == 0)
+            {
                 BindAllLoadedTouchVirtualPads("UpdateTicked");
+                InstallExternalInputHarmonyPatches("UpdateTicked");
+            }
         }
 
         private void RunAudioDiagnosticAndRepair(string phase)
@@ -360,6 +472,7 @@ namespace SDVMobileControls
             try
             {
                 Engine?.PopulateExtraKeys(keySet);
+                ExternalInput?.PopulateExtraKeys(keySet);
             }
             catch { }
         }
@@ -369,13 +482,14 @@ namespace SDVMobileControls
             try
             {
                 Engine?.PopulateExtraKeysList(keyList);
+                ExternalInput?.PopulateExtraKeysList(keyList);
             }
             catch { }
         }
 
-        private static void InstallFishingCastGuard(string phase)
+        private static void InstallMobileHarmonyPatches(string phase)
         {
-            if (_fishingGuardInstalled)
+            if (_harmonyPatchesInstalled)
                 return;
 
             try
@@ -399,20 +513,15 @@ namespace SDVMobileControls
                 if (harmonyType == null || harmonyMethodType == null)
                     return;
 
-                MethodInfo orig = typeof(FishingRod).GetMethod("startCasting", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                MethodInfo pref = typeof(ModEntry).GetMethod(nameof(PrefixFishingRodStartCasting), BindingFlags.Static | BindingFlags.NonPublic);
-                if (orig == null || pref == null)
-                    return;
-
-                object harmony = Activator.CreateInstance(harmonyType, new object[] { "GardenLauncher.MobileControls.FishingGuard" });
-                object hmPref = Activator.CreateInstance(harmonyMethodType, new object[] { pref });
-
                 MethodInfo patchMethod = null;
                 foreach (MethodInfo mi in harmonyType.GetMethods(BindingFlags.Instance | BindingFlags.Public))
                 {
                     if (mi.Name != "Patch") continue;
                     var ps = mi.GetParameters();
-                    if (ps.Length >= 2 && ps[0].ParameterType == typeof(MethodBase) && ps[1].ParameterType == harmonyMethodType)
+                    if (ps.Length >= 3 &&
+                        ps[0].ParameterType == typeof(MethodBase) &&
+                        ps[1].ParameterType == harmonyMethodType &&
+                        ps[2].ParameterType == harmonyMethodType)
                     {
                         patchMethod = mi;
                         break;
@@ -421,44 +530,391 @@ namespace SDVMobileControls
                 if (patchMethod == null)
                     return;
 
-                var parms = patchMethod.GetParameters();
-                object[] invokeArgs = new object[parms.Length];
-                invokeArgs[0] = orig;
-                invokeArgs[1] = hmPref;
-                patchMethod.Invoke(harmony, invokeArgs);
+                object harmony = Activator.CreateInstance(harmonyType, new object[] { "GardenLauncher.MobileControls.Patches" });
+                int paramCount = patchMethod.GetParameters().Length;
+                const BindingFlags instAny = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                const BindingFlags statNonPub = BindingFlags.Static | BindingFlags.NonPublic;
 
-                _fishingGuardInstalled = true;
-                _monitor?.Log($"[{phase}] Installed FishingRod.startCasting charge-hold guard (works in ALL control modes).", LogLevel.Info);
+                void ApplyPatch(MethodBase original, string prefixName, string postfixName)
+                {
+                    if (original == null)
+                        return;
+                    object hmPref = null;
+                    object hmPost = null;
+                    if (prefixName != null)
+                    {
+                        MethodInfo pm = typeof(ModEntry).GetMethod(prefixName, statNonPub);
+                        if (pm != null) hmPref = Activator.CreateInstance(harmonyMethodType, new object[] { pm });
+                    }
+                    if (postfixName != null)
+                    {
+                        MethodInfo pm = typeof(ModEntry).GetMethod(postfixName, statNonPub);
+                        if (pm != null) hmPost = Activator.CreateInstance(harmonyMethodType, new object[] { pm });
+                    }
+                    if (hmPref == null && hmPost == null)
+                        return;
+                    object[] invokeArgs = new object[paramCount];
+                    invokeArgs[0] = original;
+                    invokeArgs[1] = hmPref;
+                    invokeArgs[2] = hmPost;
+                    patchMethod.Invoke(harmony, invokeArgs);
+                }
+
+                int applied = 0;
+
+                // 1-3. FishingRod cast-charge guards (startCasting + non-inlineable NetEvent doStartCasting + DoFunction re-entry guard)
+                MethodInfo mStartCast = typeof(FishingRod).GetMethod("startCasting", instAny);
+                if (mStartCast != null) { ApplyPatch(mStartCast, nameof(PrefixFishingRodStartCasting), null); applied++; }
+
+                MethodInfo mDoStartCast = typeof(FishingRod).GetMethod("doStartCasting", instAny);
+                if (mDoStartCast != null) { ApplyPatch(mDoStartCast, nameof(PrefixFishingRodDoStartCasting), null); applied++; }
+
+                MethodInfo mDoFunc = typeof(FishingRod).GetMethod(
+                    "DoFunction",
+                    instAny,
+                    null,
+                    new[] { typeof(GameLocation), typeof(int), typeof(int), typeof(int), typeof(Farmer) },
+                    null);
+                if (mDoFunc != null) { ApplyPatch(mDoFunc, nameof(PrefixFishingRodDoFunction), null); applied++; }
+
+                // 4. BobberBar Mobile-feel physics (damping + crisp reversal braking + gentle edge bounce)
+                MethodInfo mBobberUpd = typeof(BobberBar).GetMethod("update", instAny, null, new[] { typeof(GameTime) }, null);
+                if (mBobberUpd != null) { ApplyPatch(mBobberUpd, null, nameof(PostfixBobberBarUpdate)); applied++; }
+
+                // 5. HUDMessage relocation when Vertical Toolbar is enabled (keeps item pickups clear of vertical bar & joystick)
+                MethodInfo mHudDraw = typeof(HUDMessage).GetMethod(
+                    "draw",
+                    instAny,
+                    null,
+                    new[] { typeof(SpriteBatch), typeof(int), typeof(int).MakeByRefType() },
+                    null);
+                if (mHudDraw != null) { ApplyPatch(mHudDraw, nameof(PrefixHudMessageDraw), nameof(PostfixHudMessageDraw)); applied++; }
+
+                // 6. Tap-to-Move right-click synthesis for ShippingBin.doAction, FishPond.doAction, Furniture & modded buildings
+                MethodInfo mRightClick = typeof(Game1).GetMethod(
+                    "didPlayerJustRightClick",
+                    BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic,
+                    null,
+                    new[] { typeof(bool) },
+                    null);
+                if (mRightClick != null) { ApplyPatch(mRightClick, null, nameof(PostfixDidPlayerJustRightClick)); applied++; }
+
+                // 7. Live boot asset-loading progress telemetry (zero runtime cost after boot finishes!)
+                try
+                {
+                    Type sCoreType = typeof(Mod).Assembly.GetType("StardewModdingAPI.Framework.SCore", throwOnError: false);
+                    MethodInfo mOnAsset = sCoreType?.GetMethod("OnAssetLoaded", instAny);
+                    if (mOnAsset != null) { ApplyPatch(mOnAsset, null, nameof(PostfixSmapiAssetLoaded)); applied++; }
+                }
+                catch { }
+
+                _harmonyPatchesInstalled = true;
+                _monitor?.Log($"[{phase}] Installed {applied}/7 Mobile Harmony patches (FishingRod + BobberBar + HUDMessage + TapAction RightClick + BootAssetProgress).", LogLevel.Info);
             }
             catch (Exception ex)
             {
-                _monitor?.Log($"[{phase}] FishingRod guard skipped: {ex.Message}", LogLevel.Trace);
+                _monitor?.Log($"[{phase}] Mobile Harmony patches skipped: {ex.Message}", LogLevel.Warn);
             }
         }
 
-        private static bool PrefixFishingRodStartCasting(FishingRod __instance)
+        private static void InstallExternalInputHarmonyPatches(string phase)
         {
-            if (__instance == null || !__instance.isTimingCast)
+            try
+            {
+                Type harmonyType = null;
+                Type harmonyMethodType = null;
+                foreach (Assembly asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    try
+                    {
+                        if (harmonyType == null)
+                            harmonyType = asm.GetType("HarmonyLib.Harmony", throwOnError: false);
+                        if (harmonyMethodType == null)
+                            harmonyMethodType = asm.GetType("HarmonyLib.HarmonyMethod", throwOnError: false);
+                        if (harmonyType != null && harmonyMethodType != null)
+                            break;
+                    }
+                    catch { }
+                }
+                if (harmonyType == null || harmonyMethodType == null)
+                    return;
+
+                MethodInfo patchMethod = null;
+                foreach (MethodInfo mi in harmonyType.GetMethods(BindingFlags.Instance | BindingFlags.Public))
+                {
+                    if (mi.Name != "Patch") continue;
+                    var ps = mi.GetParameters();
+                    if (ps.Length >= 3 &&
+                        ps[0].ParameterType == typeof(MethodBase) &&
+                        ps[1].ParameterType == harmonyMethodType &&
+                        ps[2].ParameterType == harmonyMethodType)
+                    {
+                        patchMethod = mi;
+                        break;
+                    }
+                }
+                if (patchMethod == null)
+                    return;
+
+                object harmony = Activator.CreateInstance(harmonyType, new object[] { "GardenLauncher.ExternalInput.Patches" });
+                int paramCount = patchMethod.GetParameters().Length;
+                FieldInfo fPrio = harmonyMethodType.GetField("priority", BindingFlags.Instance | BindingFlags.Public);
+                const BindingFlags any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+                const BindingFlags statNonPub = BindingFlags.Static | BindingFlags.NonPublic;
+
+                int ApplyExtPatch(MethodBase original, string prefixName, int prefixPrio, string postfixName, int postfixPrio)
+                {
+                    if (original == null) return 0;
+                    try
+                    {
+                        object hmPref = null;
+                        object hmPost = null;
+                        if (prefixName != null)
+                        {
+                            MethodInfo pm = typeof(ModEntry).GetMethod(prefixName, statNonPub);
+                            if (pm != null)
+                            {
+                                hmPref = Activator.CreateInstance(harmonyMethodType, new object[] { pm });
+                                fPrio?.SetValue(hmPref, prefixPrio);
+                            }
+                        }
+                        if (postfixName != null)
+                        {
+                            MethodInfo pm = typeof(ModEntry).GetMethod(postfixName, statNonPub);
+                            if (pm != null)
+                            {
+                                hmPost = Activator.CreateInstance(harmonyMethodType, new object[] { pm });
+                                fPrio?.SetValue(hmPost, postfixPrio);
+                            }
+                        }
+                        if (hmPref == null && hmPost == null) return 0;
+                        object[] invokeArgs = new object[paramCount];
+                        invokeArgs[0] = original;
+                        invokeArgs[1] = hmPref;
+                        invokeArgs[2] = hmPost;
+                        patchMethod.Invoke(harmony, invokeArgs);
+                        return 1;
+                    }
+                    catch
+                    {
+                        return 0;
+                    }
+                }
+
+                int patchedNow = 0;
+
+                if (!_extHarmonyPatchesInstalled)
+                {
+                    // 1. GamePad (Priority.High = 600 -> preempts SDViOSTouchControls when physical gamepad is active!)
+                    patchedNow += ApplyExtPatch(typeof(GamePad).GetMethod("GetState", any, null, new[] { typeof(PlayerIndex) }, null), nameof(PrefixExtGamePadState), 600, null, 400);
+                    patchedNow += ApplyExtPatch(typeof(InputState).GetMethod("GetGamePadState", any, null, Type.EmptyTypes, null), nameof(PrefixExtGamePadState), 600, null, 400);
+
+                    // 2. Mouse (Priority.High = 600 -> full external mouse/hover/right-click/scroll + gamepad snapped cursor!)
+                    patchedNow += ApplyExtPatch(typeof(Mouse).GetMethod("GetState", any, null, Type.EmptyTypes, null), nameof(PrefixExtMouseState), 600, null, 400);
+                    patchedNow += ApplyExtPatch(typeof(Mouse).GetMethod("GetState", any, null, new[] { typeof(GameWindow) }, null), nameof(PrefixExtMouseState), 600, null, 400);
+                    patchedNow += ApplyExtPatch(typeof(Mouse).GetMethod("PlatformGetState", any, null, new[] { typeof(GameWindow) }, null), nameof(PrefixExtMouseState), 600, null, 400);
+                    patchedNow += ApplyExtPatch(typeof(InputState).GetMethod("GetMouseState", any, null, Type.EmptyTypes, null), nameof(PrefixExtMouseState), 600, null, 400);
+                    patchedNow += ApplyExtPatch(typeof(Game1).GetMethod("setMousePositionRaw", any, null, new[] { typeof(int), typeof(int) }, null), nameof(PrefixExtSetMousePositionRaw), 600, null, 400);
+
+                    // 3. Keyboard (Priority.Low = 200 Postfix -> merges physical hardware keys into ANY returned KeyboardState!)
+                    patchedNow += ApplyExtPatch(typeof(Keyboard).GetMethod("GetState", any, null, Type.EmptyTypes, null), null, 400, nameof(PostfixExtKeyboardState), 200);
+                    patchedNow += ApplyExtPatch(typeof(Game1).GetMethod("GetKeyboardState", any, null, Type.EmptyTypes, null), null, 400, nameof(PostfixExtKeyboardState), 200);
+                    patchedNow += ApplyExtPatch(typeof(InputState).GetMethod("GetKeyboardState", any, null, Type.EmptyTypes, null), null, 400, nameof(PostfixExtKeyboardState), 200);
+
+                    // 4. SMAPI SInputState (so ALL SMAPI mods & Events.Input.ButtonPressed receive real external Gamepad/Keyboard/Mouse!)
+                    Type sInputType = null;
+                    foreach (Assembly asm in AppDomain.CurrentDomain.GetAssemblies())
+                    {
+                        try
+                        {
+                            sInputType = asm.GetType("StardewModdingAPI.Framework.Input.SInputState", throwOnError: false);
+                            if (sInputType != null) break;
+                        }
+                        catch { }
+                    }
+                    if (sInputType != null)
+                    {
+                        patchedNow += ApplyExtPatch(sInputType.GetMethod("GetGamePadState", any, null, Type.EmptyTypes, null), nameof(PrefixExtGamePadState), 600, null, 400);
+                        patchedNow += ApplyExtPatch(sInputType.GetProperty("GamePadState", any)?.GetGetMethod(true), nameof(PrefixExtGamePadState), 600, null, 400);
+                        patchedNow += ApplyExtPatch(sInputType.GetMethod("GetMouseState", any, null, Type.EmptyTypes, null), nameof(PrefixExtMouseState), 600, null, 400);
+                        patchedNow += ApplyExtPatch(sInputType.GetProperty("MouseState", any)?.GetGetMethod(true), nameof(PrefixExtMouseState), 600, null, 400);
+                        patchedNow += ApplyExtPatch(sInputType.GetMethod("GetKeyboardState", any, null, Type.EmptyTypes, null), null, 400, nameof(PostfixExtKeyboardState), 200);
+                        patchedNow += ApplyExtPatch(sInputType.GetProperty("KeyboardState", any)?.GetGetMethod(true), null, 400, nameof(PostfixExtKeyboardState), 200);
+                    }
+
+                    _extHarmonyPatchesInstalled = true;
+                }
+
+                // 5. Patch SDViOSTouchControls.TouchDelegatingModHooks.OnGame1_UpdateControlInput so it yields cleanly to real external devices!
+                foreach (Assembly asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    Type thType = null;
+                    try { thType = asm.GetType("SDViOSTouchControls.TouchDelegatingModHooks", throwOnError: false); }
+                    catch { continue; }
+                    if (thType == null || PatchedTouchHookTypes.Contains(thType)) continue;
+
+                    MethodInfo mUpdCtrl = thType.GetMethod("OnGame1_UpdateControlInput", any);
+                    if (mUpdCtrl != null)
+                    {
+                        if (_delegatingParentProp == null && thType.BaseType != null)
+                        {
+                            _delegatingParentProp = thType.BaseType.GetProperty("Parent", any);
+                            _modHooksUpdateControlInput = _delegatingParentProp?.PropertyType.GetMethod("OnGame1_UpdateControlInput", any);
+                        }
+                        if (ApplyExtPatch(mUpdCtrl, nameof(PrefixExtUpdateControlInput), 600, null, 400) > 0)
+                        {
+                            PatchedTouchHookTypes.Add(thType);
+                            patchedNow++;
+                        }
+                    }
+                }
+
+                if (patchedNow > 0)
+                {
+                    _monitor?.Log($"[{phase}] Installed {patchedNow} External Peripheral Harmony patches (Full Gamepad + GCKeyboard + GCMouse, TouchHooks={PatchedTouchHookTypes.Count}).", LogLevel.Info);
+                }
+            }
+            catch (Exception ex)
+            {
+                _monitor?.Log($"[{phase}] External Peripheral Harmony patches error: {ex.Message}", LogLevel.Warn);
+            }
+        }
+
+        private static bool PrefixExtGamePadState(ref GamePadState __result)
+        {
+            var ext = ExternalInput;
+            if (ext != null && ext.IsPhysicalGamepadActive)
+            {
+                __result = ext.CurrentGamePadState;
+                return false;
+            }
+            return true;
+        }
+
+        private static bool PrefixExtMouseState(ref MouseState __result)
+        {
+            var ext = ExternalInput;
+            if (ext != null && ext.ShouldOverrideMouse)
+            {
+                __result = ext.CurrentMouseState;
+                return false;
+            }
+            return true;
+        }
+
+        private static bool PrefixExtSetMousePositionRaw(int x, int y)
+        {
+            var ext = ExternalInput;
+            if (ext != null && ext.ShouldOverrideMouse)
+            {
+                ext.OnGameSetMousePositionRaw(x, y);
+                try
+                {
+                    Game1.input?.SetMousePosition(x, y);
+                    Game1.InvalidateOldMouseMovement();
+                    if (ext.IsPhysicalGamepadActive)
+                        Game1.lastCursorMotionWasMouse = false;
+                }
+                catch { }
+                return false;
+            }
+            return true;
+        }
+
+        private static void PostfixExtKeyboardState(ref KeyboardState __result)
+        {
+            var ext = ExternalInput;
+            if (ext != null && ext.HasPhysicalKeysPressed)
+            {
+                __result = ext.MergeKeyboardState(__result);
+            }
+        }
+
+        private static bool PrefixExtUpdateControlInput(object __instance, ref KeyboardState keyboardState, ref MouseState mouseState, ref GamePadState gamePadState, Action action)
+        {
+            var ext = ExternalInput;
+            if (ext == null || !ext.IsExternalDeviceActive)
+                return true;
+
+            ext.ApplyStardewGamepadMode();
+
+            if (ext.HasPhysicalKeysPressed)
+                keyboardState = ext.MergeKeyboardState(keyboardState);
+
+            if (ext.ShouldOverrideMouse)
+                mouseState = ext.CurrentMouseState;
+
+            if (ext.IsPhysicalGamepadActive)
+            {
+                gamePadState = ext.CurrentGamePadState;
+                Game1.lastCursorMotionWasMouse = false;
+                // Show cursor in menus/title when gamepad snaps cursor, or during gameplay when right stick steers cursor
+                if (Game1.activeClickableMenu != null || gamePadState.ThumbSticks.Right.LengthSquared() > 0.04f)
+                    Game1.wasMouseVisibleThisFrame = true;
+                else
+                    Game1.wasMouseVisibleThisFrame = false;
+            }
+            else if (ext.IsExternalMouseActive)
+            {
+                gamePadState = default;
+                Game1.lastCursorMotionWasMouse = true;
+                Game1.wasMouseVisibleThisFrame = true;
+            }
+            else
+            {
+                gamePadState = default;
+            }
+
+            try
+            {
+                object parent = (_delegatingParentProp != null && __instance != null) ? _delegatingParentProp.GetValue(__instance) : null;
+                if (parent != null && _modHooksUpdateControlInput != null)
+                {
+                    object[] args = new object[] { keyboardState, mouseState, gamePadState, action };
+                    _modHooksUpdateControlInput.Invoke(parent, args);
+                    keyboardState = (KeyboardState)args[0];
+                    mouseState = (MouseState)args[1];
+                    gamePadState = (GamePadState)args[2];
+                    return false;
+                }
+            }
+            catch { }
+
+            action?.Invoke();
+            return false;
+        }
+
+        private static bool ShouldBlockPrematureFishingRelease(FishingRod rod, bool logRelease)
+        {
+            if (rod == null || !rod.isTimingCast)
             {
                 _fishingHoldRod = null;
                 _fishingHoldStartMs = 0;
-                return true;
+                return false;
             }
 
-            if (__instance.lastUser == null || !__instance.lastUser.IsLocalPlayer || Engine == null)
-                return true;
+            if (rod.lastUser == null || !rod.lastUser.IsLocalPlayer || Engine == null)
+                return false;
 
             if (!Engine.IsFishingCastButtonHeld())
             {
+                if (logRelease && _fishingTraceCount < 10)
+                {
+                    _fishingTraceCount++;
+                    long heldMs = (_fishingHoldStartMs > 0 && ReferenceEquals(_fishingHoldRod, rod))
+                        ? (Environment.TickCount64 - _fishingHoldStartMs)
+                        : 0;
+                    _monitor?.Log($"[FishingTrace] Cast released: power={rod.castingPower:F2}, heldMs={heldMs}", LogLevel.Info);
+                }
                 _fishingHoldRod = null;
                 _fishingHoldStartMs = 0;
-                return true;
+                return false;
             }
 
             long nowMs = Environment.TickCount64;
-            if (!ReferenceEquals(_fishingHoldRod, __instance) || _fishingHoldStartMs <= 0)
+            if (!ReferenceEquals(_fishingHoldRod, rod) || _fishingHoldStartMs <= 0)
             {
-                _fishingHoldRod = __instance;
+                _fishingHoldRod = rod;
                 _fishingHoldStartMs = nowMs;
             }
             else if (nowMs - _fishingHoldStartMs > 15000)
@@ -466,10 +922,263 @@ namespace SDVMobileControls
                 // Safety failsafe if touch state was somehow lost for >15 seconds
                 _fishingHoldRod = null;
                 _fishingHoldStartMs = 0;
-                return true;
+                return false;
             }
 
-            return false;
+            return true;
+        }
+
+        private static bool PrefixFishingRodStartCasting(FishingRod __instance)
+        {
+            return !ShouldBlockPrematureFishingRelease(__instance, logRelease: false);
+        }
+
+        private static bool PrefixFishingRodDoStartCasting(FishingRod __instance)
+        {
+            return !ShouldBlockPrematureFishingRelease(__instance, logRelease: true);
+        }
+
+        private static bool PrefixFishingRodDoFunction(FishingRod __instance, Farmer who)
+        {
+            if (__instance != null && __instance.isTimingCast && who != null && who.IsLocalPlayer)
+                return false;
+            return true;
+        }
+
+        private static void PostfixBobberBarUpdate(BobberBar __instance)
+        {
+            if (__instance == null || Engine == null || !Engine.IsMobileModeForBobberPhysics)
+                return;
+            if (__instance.fadeIn || __instance.fadeOut)
+                return;
+
+            // Mobile-feel bobber bar control: eliminate PC's icy inertia & overly bouncy edges
+            float spd = __instance.bobberBarSpeed;
+            bool reversing = (__instance.buttonPressed && spd > 0.35f) || (!__instance.buttonPressed && spd < -0.35f);
+            spd *= reversing ? 0.84f : 0.94f;
+
+            // Soften bottom & top edge rebound (preserve Lead Bobber "(O)692" near-zero bounce)
+            bool hasLeadBobber = __instance.bobbers != null && __instance.bobbers.Contains("(O)692");
+            float maxPos = 568f - __instance.bobberBarHeight;
+            if (!hasLeadBobber && __instance.bobberBarPos >= maxPos - 0.5f && spd < -0.4f)
+            {
+                spd *= 0.50f;
+            }
+            else if (__instance.bobberBarPos <= 0.5f && spd > 0.4f)
+            {
+                spd *= 0.55f;
+            }
+
+            __instance.bobberBarSpeed = Math.Clamp(spd, -5.8f, 5.8f);
+        }
+
+        private static void PrefixHudMessageDraw(HUDMessage __instance, SpriteBatch b, ref int heightUsed, out bool __state)
+        {
+            __state = false;
+            if (__instance == null || b == null || Engine == null)
+                return;
+            if (!Engine.TryGetHudMessageRelocation(out float targetX, out float topStartY))
+                return;
+
+            try
+            {
+                Rectangle tsarea = Game1.graphics.GraphicsDevice.Viewport.GetTitleSafeArea();
+                float origX;
+                float origY;
+                if (__instance.noIcon)
+                {
+                    int h = (int)Game1.dialogueFont.MeasureString(__instance.message ?? string.Empty).Y + 64;
+                    origX = tsarea.Left + 16;
+                    origY = tsarea.Bottom - h - heightUsed - 64 + (Game1.uiViewport.Width < 1400 ? -64 : 0);
+                }
+                else
+                {
+                    origX = tsarea.Left + 16;
+                    if (Game1.isOutdoorMapSmallerThanViewport())
+                        origX = Math.Max(tsarea.Left + 16, -Game1.uiViewport.X + 16);
+                    origY = tsarea.Bottom - 112 - heightUsed - 64 - (Game1.uiViewport.Width < 1400 ? 48 : 0);
+                }
+
+                float dx = targetX - origX;
+                float dy = (topStartY + heightUsed) - origY;
+
+                b.End();
+                b.Begin(
+                    SpriteSortMode.Deferred,
+                    BlendState.AlphaBlend,
+                    SamplerState.PointClamp,
+                    null,
+                    null,
+                    null,
+                    Matrix.CreateTranslation(dx, dy, 0f));
+                __state = true;
+            }
+            catch
+            {
+                __state = false;
+            }
+        }
+
+        private static void PostfixHudMessageDraw(SpriteBatch b, bool __state)
+        {
+            if (!__state || b == null)
+                return;
+
+            try
+            {
+                b.End();
+                b.Begin(SpriteSortMode.Deferred, BlendState.AlphaBlend, SamplerState.PointClamp);
+            }
+            catch { }
+        }
+
+        private void RunShaderDiagnostic(string phase)
+        {
+            const BindingFlags any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+            var sb = new StringBuilder();
+            sb.Append($"[ShaderDiag:{phase}] ");
+            try
+            {
+                GraphicsDevice gd = Game1.graphics?.GraphicsDevice;
+                if (gd != null)
+                {
+                    int glMaj = (int)(typeof(GraphicsDevice).GetField("glMajorVersion", any)?.GetValue(gd) ?? -1);
+                    int glMin = (int)(typeof(GraphicsDevice).GetField("glMinorVersion", any)?.GetValue(gd) ?? -1);
+                    int maxTexSlots = (int)(typeof(GraphicsDevice).GetField("MaxTextureSlots", any)?.GetValue(gd) ?? -1);
+                    int maxTexSz = (int)(typeof(GraphicsDevice).GetField("_maxTextureSize", any)?.GetValue(gd) ?? -1);
+                    object gdCaps = typeof(GraphicsDevice).GetProperty("GraphicsCapabilities", any)?.GetValue(gd);
+                    bool npot = gdCaps != null && (bool)(gdCaps.GetType().GetProperty("SupportsNonPowerOfTwo", any)?.GetValue(gdCaps) ?? false);
+
+                    string glVer = "?";
+                    string glRen = "?";
+                    try
+                    {
+                        Type glType = typeof(GraphicsDevice).Assembly.GetType("MonoGame.OpenGL.GL");
+                        MethodInfo mGetStr = glType?.GetMethod("GetString", any);
+                        if (mGetStr != null)
+                        {
+                            Type strNameEnum = mGetStr.GetParameters()[0].ParameterType;
+                            glVer = (mGetStr.Invoke(null, new[] { Enum.ToObject(strNameEnum, 0x1F02) }) as string) ?? "?";
+                            glRen = (mGetStr.Invoke(null, new[] { Enum.ToObject(strNameEnum, 0x1F01) }) as string) ?? "?";
+                        }
+                    }
+                    catch { }
+
+                    var pp = gd.PresentationParameters;
+                    var scr = Game1.game1?.screen;
+                    bool shouldBuf = false;
+                    try { shouldBuf = Game1.game1 != null && Game1.game1.ShouldDrawOnBuffer(); } catch { }
+                    sb.Append($"GL='{glVer}' Ren='{glRen}' Ver={glMaj}.{glMin} Slots={maxTexSlots} MaxTex={maxTexSz} NPOT={npot} Prof={gd.GraphicsProfile} ");
+                    sb.Append($"BB={pp?.BackBufferWidth ?? -1}x{pp?.BackBufferHeight ?? -1} VP={gd.Viewport.Width}x{gd.Viewport.Height} ");
+                    sb.Append($"Screen={(scr != null ? $"{scr.Width}x{scr.Height}" : "null")} Zoom={Game1.options?.zoomLevel ?? -1f:F2} DrawBuf={shouldBuf} ");
+                    sb.Append($"Loc={Game1.currentLocation?.Name ?? "null"}(Out={Game1.currentLocation?.IsOutdoors}) Time={Game1.timeOfDay} ");
+                }
+
+                // Reflect DynamicShader runtime state if installed
+                Assembly dsAsm = null;
+                foreach (Assembly asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    if (string.Equals(asm.GetName().Name, "DynamicShader", StringComparison.OrdinalIgnoreCase))
+                    {
+                        dsAsm = asm;
+                        break;
+                    }
+                }
+
+                if (dsAsm == null)
+                {
+                    sb.Append("DS=NotLoaded");
+                }
+                else
+                {
+                    Type tRt = dsAsm.GetType("DynamicShader.Core.Rendering.RenderRuntime");
+                    object rt = tRt?.GetProperty("Active", any)?.GetValue(null);
+                    if (rt == null)
+                    {
+                        sb.Append("DS.Active=null");
+                    }
+                    else
+                    {
+                        object state = tRt.GetProperty("State", any)?.GetValue(rt);
+                        sb.Append($"DS(State={state}");
+
+                        object sm = tRt.GetProperty("ShaderManager", any)?.GetValue(rt);
+                        if (sm != null)
+                        {
+                            Type tSm = sm.GetType();
+                            bool hasEff = tSm.GetField("_shadowEffect", any)?.GetValue(sm) != null;
+                            bool shRdy = (bool)(tSm.GetProperty("IsShadowReady", any)?.GetValue(sm) ?? false);
+                            bool grRdy = (bool)(tSm.GetProperty("IsGodRayReady", any)?.GetValue(sm) ?? false);
+                            bool clRdy = (bool)(tSm.GetProperty("IsCanopyLightReady", any)?.GetValue(sm) ?? false);
+                            bool tsRdy = (bool)(tSm.GetProperty("IsTiltShiftReady", any)?.GetValue(sm) ?? false);
+                            object caps = tSm.GetProperty("Capabilities", any)?.GetValue(sm);
+                            sb.Append($" Eff={hasEff} Rdy(Sh={shRdy},GR={grRdy},CL={clRdy},TS={tsRdy}) Caps={caps}");
+                        }
+
+                        object wr = tRt.GetProperty("WaterReflectionRenderer", any)?.GetValue(rt);
+                        if (wr != null)
+                        {
+                            Type tWr = wr.GetType();
+                            bool wEff = tWr.GetField("_effect", any)?.GetValue(wr) != null;
+                            bool wFault = (bool)(tWr.GetField("_effectLoadFaulted", any)?.GetValue(wr) ?? false);
+                            object surf = tWr.GetField("_surfaceRenderer", any)?.GetValue(wr);
+                            bool sLoadF = surf != null && (bool)(surf.GetType().GetField("_loadFaulted", any)?.GetValue(surf) ?? false);
+                            bool sEffF = surf != null && (bool)(surf.GetType().GetField("_effectLoadFaulted", any)?.GetValue(surf) ?? false);
+                            bool sDrawF = surf != null && (bool)(surf.GetType().GetField("_drawFaulted", any)?.GetValue(surf) ?? false);
+                            object perScr = tWr.GetField("_screenStates", any)?.GetValue(wr);
+                            object scrSt = perScr?.GetType().GetProperty("Value", any)?.GetValue(perScr);
+                            bool wrStFault = scrSt != null && (bool)(scrSt.GetType().GetProperty("IsFaulted", any)?.GetValue(scrSt) ?? false);
+                            bool wrHasOut = scrSt != null && (bool)(scrSt.GetType().GetProperty("HasPreparedOutput", any)?.GetValue(scrSt) ?? false);
+                            sb.Append($" Water(Eff={wEff},EffFault={wFault},StFault={wrStFault},HasOut={wrHasOut},SurfFault={sLoadF}/{sEffF}/{sDrawF})");
+                        }
+
+                        Type tSs = dsAsm.GetType("DynamicShader.Core.Data.ShadowState");
+                        object ssInst = tSs?.GetProperty("Instance", any)?.GetValue(null);
+                        bool isShTime = ssInst != null && (bool)(tSs.GetProperty("IsShadowRenderingTime", any)?.GetValue(ssInst) ?? false);
+                        object sr = tRt.GetProperty("ShadowRenderer", any)?.GetValue(rt);
+                        bool shRend = sr != null && (bool)(sr.GetType().GetProperty("ShadowsRenderedThisFrame", any)?.GetValue(sr) ?? false);
+                        sb.Append($" ShTime={isShTime} ShRend={shRend})");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                sb.Append($"DiagErr={ex.GetType().Name}:{ex.Message}");
+            }
+
+            string line = sb.ToString();
+            _monitor?.Log(line, LogLevel.Info);
+            try
+            {
+                string docs = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+                string errDir = Path.Combine(docs, "ErrorLogs");
+                Directory.CreateDirectory(errDir);
+                string diagPath = Path.Combine(errDir, "shader-diag.log");
+                File.AppendAllText(diagPath, $"[{DateTime.Now:HH:mm:ss}] {line}\n");
+            }
+            catch { }
+        }
+
+        private static void PostfixDidPlayerJustRightClick(ref bool __result)
+        {
+            if (SynthesizingTapAction)
+                __result = true;
+        }
+
+        private static void PostfixSmapiAssetLoaded(IAssetName assetName)
+        {
+            if (_bootReadySignaled || assetName == null)
+                return;
+            int cnt = ++_bootAssetLoadedCount;
+            long nowMs = Environment.TickCount64;
+            if (nowMs - _bootLastAssetReportMs < 75 && cnt > 1)
+                return;
+            _bootLastAssetReportMs = nowMs;
+            string name = assetName.Name ?? "";
+            string stage = ClassifyBootAssetStage(name);
+            int pct = Math.Min(87, 63 + (int)(Math.Min(1.0, cnt / 260.0) * 24.0));
+            string shortName = name.Length > 34 ? name.Substring(name.Length - 34) : name;
+            ReportNativeBoot(pct, stage, $"Tài nguyên #{cnt}: {shortName}", 3);
         }
 
         private static bool OnMobileUpdate(object pad, GameTime gameTime)
@@ -479,6 +1188,7 @@ namespace SDVMobileControls
 
             try
             {
+                ExternalInput?.PollFrame();
                 Engine.TrackPadReference(pad);
                 if (Engine.ShouldInterceptGameplay(pad))
                 {

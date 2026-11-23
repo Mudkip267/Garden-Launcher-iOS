@@ -823,12 +823,12 @@ namespace SDVMobileControls
 
                 if (chestInv != null)
                 {
-                    int s = FindSlotAt(chestInv, uiPt);
+                    int s = FindSlotAt(chestInv, uiPt, allowStrandedOccupied: true);
                     if (s >= 0) { hitInv = chestInv; hitSlot = s; }
                 }
                 if (hitInv == null && playerInv != null)
                 {
-                    int s = FindSlotAt(playerInv, uiPt);
+                    int s = FindSlotAt(playerInv, uiPt, allowStrandedOccupied: true);
                     if (s >= 0) { hitInv = playerInv; hitSlot = s; }
                 }
 
@@ -836,9 +836,16 @@ namespace SDVMobileControls
                 {
                     Item it = GetItemAt(hitInv, hitSlot);
 
-                    // If tapping an EMPTY slot while another Backpack slot is selected -> instant move!
+                    // If tapping an EMPTY slot while another Backpack slot is selected -> instant move (ONLY into unlocked slots!)
                     if (it == null && !isChestMenu && _selectedBagSlot >= 0 && _selectedBagInv != null)
                     {
+                        if (!IsSlotUnlocked(hitInv, hitSlot))
+                        {
+                            try { Game1.playSound("cancel"); } catch { }
+                            ClearSelection();
+                            _popConsumeTouchId = tl.Id;
+                            return true;
+                        }
                         MoveOrSwapSlots(null, _selectedBagInv, _selectedBagSlot, hitInv, hitSlot);
                         ClearSelection();
                         _popConsumeTouchId = tl.Id;
@@ -858,6 +865,15 @@ namespace SDVMobileControls
                         _isDragging = false;
                         return true;
                     }
+                }
+
+                // If player tapped a LOCKED backpack row while holding a selection -> play cancel & clear selection!
+                if (!isChestMenu && _selectedBagSlot >= 0 && playerInv != null && IsPointInLockedBackpackSlot(playerInv, uiPt))
+                {
+                    try { Game1.playSound("cancel"); } catch { }
+                    ClearSelection();
+                    _popConsumeTouchId = tl.Id;
+                    return true;
                 }
 
                 // Tapped outside slots (e.g. tab bar, organize, close X) -> clear highlight & let native UI click work
@@ -965,12 +981,23 @@ namespace SDVMobileControls
                     {
                         if (dstInv == srcInv && dstSlot == srcSlot)
                             return true;
+                        if (!IsSlotUnlocked(dstInv, dstSlot))
+                        {
+                            try { Game1.playSound("cancel"); } catch { }
+                            return true;
+                        }
                         if (ownerMenu is ItemGrabMenu grabDrop && srcInv == playerInv && dstInv == chestInv && !grabDrop.reverseGrab && !grabDrop.shippingBin)
                         {
                             try { Game1.playSound("cancel"); } catch { }
                             return true;
                         }
                         MoveOrSwapSlots(ownerMenu as ItemGrabMenu, srcInv, srcSlot, dstInv, dstSlot);
+                        return true;
+                    }
+
+                    if (playerInv != null && IsPointInLockedBackpackSlot(playerInv, uiPt))
+                    {
+                        try { Game1.playSound("cancel"); } catch { }
                         return true;
                     }
 
@@ -1135,6 +1162,17 @@ namespace SDVMobileControls
 
         private void MoveOrSwapSlots(ItemGrabMenu grab, InventoryMenu srcInv, int srcSlot, InventoryMenu dstInv, int dstSlot)
         {
+            if (srcInv == null || dstInv == null || srcSlot < 0 || dstSlot < 0)
+                return;
+
+            // Strictly block placing ANY item into locked backpack rows (before buying Large/Deluxe Pack from Pierre!)
+            if (!IsSlotUnlocked(dstInv, dstSlot))
+            {
+                try { Game1.playSound("cancel"); } catch { }
+                return;
+            }
+
+            bool srcLockedStranded = !IsSlotUnlocked(srcInv, srcSlot);
             Item srcItem = GetItemAt(srcInv, srcSlot);
             if (srcItem == null) return;
 
@@ -1161,11 +1199,26 @@ namespace SDVMobileControls
             {
                 // Direct Mobile Attach: drag/tap Bait or Tackle onto FishingRod, or Ammo onto Slingshot!
                 StardewValley.Object swapped = dstTool.attach(srcObj);
-                SetItemAt(srcInv, srcSlot, swapped);
+                if (srcLockedStranded && swapped != null)
+                {
+                    Item rem = Game1.player?.addItemToInventory(swapped);
+                    SetItemAt(srcInv, srcSlot, null);
+                    if (rem != null && Game1.player != null)
+                        try { Game1.createItemDebris(rem, Game1.player.getStandingPosition(), Game1.player.FacingDirection); } catch { }
+                }
+                else
+                {
+                    SetItemAt(srcInv, srcSlot, swapped);
+                }
                 try { Game1.playSound("button1"); } catch { }
             }
             else if (srcItem is Tool srcTool && srcTool.AttachmentSlotsCount > 0 && dstItem is StardewValley.Object dstObj && srcTool.canThisBeAttached(dstObj))
             {
+                if (srcLockedStranded)
+                {
+                    try { Game1.playSound("cancel"); } catch { }
+                    return;
+                }
                 // Reverse direction (drag/tap Rod onto Bait or Slingshot onto Ammo) also attaches cleanly!
                 StardewValley.Object swapped = srcTool.attach(dstObj);
                 SetItemAt(dstInv, dstSlot, swapped);
@@ -1180,7 +1233,8 @@ namespace SDVMobileControls
             }
             else
             {
-                if (srcInv.highlightMethod != null && !srcInv.highlightMethod(dstItem))
+                // Never swap another item BACK into a locked backpack slot!
+                if (srcLockedStranded || (srcInv.highlightMethod != null && !srcInv.highlightMethod(dstItem)))
                 {
                     try { Game1.playSound("cancel"); } catch { }
                     return;
@@ -1247,7 +1301,7 @@ namespace SDVMobileControls
         {
             if (inv == null || item == null) return item?.Stack ?? 0;
 
-            if (inv.playerInventory)
+            if (IsPlayerBackpack(inv))
             {
                 Item rem = Game1.player.addItemToInventory(item);
                 return rem != null ? rem.Stack : 0;
@@ -1279,14 +1333,60 @@ namespace SDVMobileControls
             return item.Stack;
         }
 
-        private static int FindSlotAt(InventoryMenu inv, Point uiPt)
+        private static bool IsPlayerBackpack(InventoryMenu inv)
+        {
+            if (inv == null) return false;
+            if (inv.playerInventory) return true;
+            return Game1.player != null && ReferenceEquals(inv.actualInventory, Game1.player.Items);
+        }
+
+        private static int GetUnlockedCapacity(InventoryMenu inv)
+        {
+            if (inv == null) return 0;
+            int cap = inv.capacity;
+            if (inv.inventory != null)
+                cap = Math.Min(cap, inv.inventory.Count);
+            if (IsPlayerBackpack(inv) && Game1.player != null)
+                cap = Math.Min(cap, Math.Max(12, Game1.player.MaxItems));
+            return Math.Max(0, cap);
+        }
+
+        private static bool IsSlotUnlocked(InventoryMenu inv, int slot)
+        {
+            return inv != null && slot >= 0 && slot < GetUnlockedCapacity(inv);
+        }
+
+        private static bool IsPointInLockedBackpackSlot(InventoryMenu inv, Point uiPt)
+        {
+            if (inv?.inventory == null || !IsPlayerBackpack(inv)) return false;
+            int unlocked = GetUnlockedCapacity(inv);
+            int total = Math.Min(inv.capacity, inv.inventory.Count);
+            for (int i = unlocked; i < total; i++)
+            {
+                if (inv.inventory[i] != null && inv.inventory[i].containsPoint(uiPt.X, uiPt.Y))
+                    return true;
+            }
+            return false;
+        }
+
+        private static int FindSlotAt(InventoryMenu inv, Point uiPt, bool allowStrandedOccupied = false)
         {
             if (inv?.inventory == null) return -1;
-            int limit = Math.Min(inv.capacity, inv.inventory.Count);
-            for (int i = 0; i < limit; i++)
+            int unlocked = GetUnlockedCapacity(inv);
+            for (int i = 0; i < unlocked; i++)
             {
                 if (inv.inventory[i] != null && inv.inventory[i].containsPoint(uiPt.X, uiPt.Y))
                     return i;
+            }
+            // If an item was previously placed in a locked row before this fix, allow lifting it OUT (never placing IN!)
+            if (allowStrandedOccupied && inv.actualInventory != null)
+            {
+                int total = Math.Min(inv.capacity, Math.Min(inv.inventory.Count, inv.actualInventory.Count));
+                for (int i = unlocked; i < total; i++)
+                {
+                    if (inv.actualInventory[i] != null && inv.inventory[i] != null && inv.inventory[i].containsPoint(uiPt.X, uiPt.Y))
+                        return i;
+                }
             }
             return -1;
         }
@@ -1294,7 +1394,7 @@ namespace SDVMobileControls
         private static int FindFirstEmptySlot(InventoryMenu inv)
         {
             if (inv?.actualInventory == null) return -1;
-            int cap = Math.Min(inv.capacity, inv.inventory != null ? inv.inventory.Count : inv.capacity);
+            int cap = GetUnlockedCapacity(inv);
             EnsureInventoryListSize(inv, cap);
             for (int i = 0; i < cap; i++)
             {
@@ -1313,13 +1413,22 @@ namespace SDVMobileControls
         private static void SetItemAt(InventoryMenu inv, int slot, Item item)
         {
             if (inv?.actualInventory == null || slot < 0) return;
-            EnsureInventoryListSize(inv, slot + 1);
+            if (item != null && !IsSlotUnlocked(inv, slot))
+                return;
+            if (slot >= inv.actualInventory.Count)
+            {
+                if (item == null) return;
+                EnsureInventoryListSize(inv, Math.Min(slot + 1, GetUnlockedCapacity(inv)));
+                if (slot >= inv.actualInventory.Count) return;
+            }
             inv.actualInventory[slot] = item;
         }
 
         private static void EnsureInventoryListSize(InventoryMenu inv, int needed)
         {
-            while (inv.actualInventory.Count < needed)
+            int maxAllowed = IsPlayerBackpack(inv) ? GetUnlockedCapacity(inv) : needed;
+            int target = Math.Min(needed, maxAllowed);
+            while (inv.actualInventory.Count < target)
                 inv.actualInventory.Add(null);
         }
 

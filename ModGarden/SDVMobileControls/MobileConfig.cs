@@ -39,7 +39,7 @@ namespace SDVMobileControls
         public bool AutoKeyboard { get; set; } = true;      // Auto-open iOS keyboard when tapping any TextBox
         public bool SafeCrafting { get; set; } = true;      // Hover-first 2-tap safe crafting/cooking/bundles
         public int AutoSaveMinutes { get; set; } = 0;       // 0 = OFF (default, zero stutter), 3 / 5 / 10 minutes periodic AutoSave slot
-        public bool ReduceWeather { get; set; } = true;     // Cap excessive rain/wind debris particles for smoother FPS
+        public bool ReduceWeather { get; set; } = false;    // Default OFF; optional cap on excessive rain/wind debris particles for smoother FPS
         public float UiScaleOverride { get; set; } = 0.0f;  // 0 = game default, or 0.75..1.50 live UI scale for PC mod menus
         public float ButtonScale { get; set; } = 1.0f;
 
@@ -123,12 +123,14 @@ namespace SDVMobileControls
         public MobileConfig()
         {
             string docs = Environment.GetFolderPath(Environment.SpecialFolder.Personal);
-            _path = Path.Combine(docs, "sdv_mobile_ctrl.cfg");
-            _editFlagPath = Path.Combine(docs, "sdv_mobile_edit.flag");
-            _ramAlertPath = Path.Combine(docs, "sdv_ram_alert.txt");
-            _pauseFlagPath = Path.Combine(docs, "sdv_pause_now.flag");
-            _hapticBiteFlagPath = Path.Combine(docs, "sdv_haptic_bite.flag");
-            _safeAreaPath = Path.Combine(docs, "sdv_safe_area.cfg");
+            string gardenDir = Path.Combine(docs, ".garden");
+            try { Directory.CreateDirectory(gardenDir); } catch { }
+            _path = Path.Combine(gardenDir, "sdv_mobile_ctrl.cfg");
+            _editFlagPath = Path.Combine(gardenDir, "sdv_mobile_edit.flag");
+            _ramAlertPath = Path.Combine(gardenDir, "sdv_ram_alert.txt");
+            _pauseFlagPath = Path.Combine(gardenDir, "sdv_pause_now.flag");
+            _hapticBiteFlagPath = Path.Combine(gardenDir, "sdv_haptic_bite.flag");
+            _safeAreaPath = Path.Combine(gardenDir, "sdv_safe_area.cfg");
             ResetLayoutDefaults();
             Reload(force: true);
             PollNativeSafeArea(force: true);
@@ -348,8 +350,8 @@ namespace SDVMobileControls
                     switch (k)
                     {
                         case "mode":
-                            if (int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out int m) && m >= 0 && m <= 4)
-                                Mode = (MobileControlMode)m;
+                            if (int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out int m))
+                                Mode = (m >= 1 && m <= 4) ? (MobileControlMode)m : MobileControlMode.InvisibleJoystick2Btn;
                             break;
                         case "autotool": AutoTool = ParseBool(v, true); break;
                         case "autoattack": AutoAttack = ParseBool(v, false); break;
@@ -367,7 +369,7 @@ namespace SDVMobileControls
                             if (int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out int am) && (am == 0 || am == 3 || am == 5 || am == 10))
                                 AutoSaveMinutes = am;
                             break;
-                        case "reduceweather": ReduceWeather = ParseBool(v, true); break;
+                        case "reduceweather": ReduceWeather = ParseBool(v, false); break;
                         case "uiscale":
                             float us = ParseFloat(v, 0.0f, 0.0f, 1.50f);
                             UiScaleOverride = (us >= 0.70f) ? Math.Clamp(us, 0.75f, 1.50f) : 0.0f;

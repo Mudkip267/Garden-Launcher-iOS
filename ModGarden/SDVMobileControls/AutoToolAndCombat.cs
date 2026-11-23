@@ -1,7 +1,10 @@
 using System;
 using Microsoft.Xna.Framework;
 using StardewValley;
+using StardewValley.Buildings;
+using StardewValley.GameData.Buildings;
 using StardewValley.GameData.Crops;
+using StardewValley.Locations;
 using StardewValley.Monsters;
 using StardewValley.Objects;
 using StardewValley.TerrainFeatures;
@@ -14,7 +17,7 @@ namespace SDVMobileControls
     {
         None = 0,
         UseTool = 1,   // ButtonX (Pickaxe, Axe, Hoe, WateringCan, Scythe, Weapon)
-        Interact = 2   // ButtonA (NPC, Chest, Door, Harvest, Forage, Machine, Plant)
+        Interact = 2   // ButtonA (NPC, Chest, Door, Harvest, Forage, Machine, Plant, ShippingBin, Furniture, MineLadder)
     }
 
     internal struct TileIntent
@@ -24,7 +27,8 @@ namespace SDVMobileControls
         public bool StopAdjacent;
         public bool Repeatable;       // Auto-repeat 1-tap chop/mine/fight until broken or defeated
         public bool PreferCardinal;   // Walk squarely onto a cardinal tile (N/S/E/W) for Mailboxes, Doors, Buildings
-        public bool HasResolvedTile;  // True when tapping a tall sprite above its base tile (e.g. floating Mailbox letter!)
+        public bool AllowSameTile;    // Allow triggering when standing directly on target tile (cheb == 0: crops, monsters, ladders, beds)
+        public bool HasResolvedTile;  // True when tapping a tall sprite or multi-tile building -> resolves to nearest actionable base tile
         public Point ResolvedTile;
     }
 
@@ -46,6 +50,7 @@ namespace SDVMobileControls
                 intent.Kind = TileActionKind.UseTool;
                 intent.StopAdjacent = true;
                 intent.Repeatable = true;
+                intent.AllowSameTile = true;
                 if (autoTool)
                     intent.PreferredToolSlot = FindBestWeaponSlot(who);
                 return intent;
@@ -62,6 +67,7 @@ namespace SDVMobileControls
                     {
                         intent.Kind = TileActionKind.Interact;
                         intent.StopAdjacent = true;
+                        intent.AllowSameTile = true;
                         return intent;
                     }
                 }
@@ -90,6 +96,7 @@ namespace SDVMobileControls
                     if (hitAnimal != null)
                     {
                         intent.StopAdjacent = true;
+                        intent.AllowSameTile = true;
                         if (!hitAnimal.wasPet.Value)
                         {
                             intent.Kind = TileActionKind.Interact;
@@ -126,59 +133,91 @@ namespace SDVMobileControls
                 {
                     if (rc != null && rc.occupiesTile(tile.X, tile.Y))
                     {
+                        int idx = rc.parentSheetIndex.Value;
+                        bool isWood = idx == ResourceClump.stumpIndex ||
+                                      idx == ResourceClump.hollowLogIndex ||
+                                      idx == ResourceClump.greenRainBush1Index ||
+                                      idx == ResourceClump.greenRainBush2Index;
+                        int toolSlot = autoTool
+                            ? (isWood ? FindToolSlot<Axe>(who) : FindToolSlot<Pickaxe>(who))
+                            : ((isWood ? (who.CurrentTool is Axe) : (who.CurrentTool is Pickaxe)) ? who.CurrentToolIndex : -1);
+                        if (toolSlot < 0)
+                            return intent;
+
+                        int reqUpgrade = 0;
+                        if (idx == ResourceClump.stumpIndex) reqUpgrade = 1;       // Copper Axe
+                        else if (idx == ResourceClump.hollowLogIndex) reqUpgrade = 2; // Steel Axe
+                        else if (idx == ResourceClump.boulderIndex) reqUpgrade = 2;   // Steel Pickaxe
+                        else if (idx == ResourceClump.meteoriteIndex) reqUpgrade = 3; // Gold Pickaxe
+
+                        Tool chosen = (toolSlot >= 0 && toolSlot < who.Items.Count) ? who.Items[toolSlot] as Tool : null;
+                        bool strongEnough = chosen != null && chosen.UpgradeLevel >= reqUpgrade;
+
                         intent.Kind = TileActionKind.UseTool;
                         intent.StopAdjacent = true;
-                        intent.Repeatable = true;
-                        if (autoTool)
-                        {
-                            int idx = rc.parentSheetIndex.Value;
-                            bool isWood = idx == ResourceClump.stumpIndex ||
-                                          idx == ResourceClump.hollowLogIndex ||
-                                          idx == ResourceClump.greenRainBush1Index ||
-                                          idx == ResourceClump.greenRainBush2Index;
-                            intent.PreferredToolSlot = isWood ? FindToolSlot<Axe>(who) : FindToolSlot<Pickaxe>(who);
-                        }
+                        intent.PreferCardinal = true;
+                        intent.Repeatable = strongEnough; // 1 feedback swing only if tool tier is too low!
+                        intent.PreferredToolSlot = autoTool ? toolSlot : -1;
                         return intent;
                     }
                 }
             }
 
-            // 4. Objects on tile (chests, machines, stones, twigs, weeds, forageables, artifact spots)
+            // 4. Objects on tile (chests, machines, breakable mine barrels, stones, twigs, weeds, forageables, artifact spots)
             if (loc.objects != null && loc.objects.TryGetValue(tv, out SObject obj) && obj != null)
             {
+                if (obj is BreakableContainer)
+                {
+                    int slot = autoTool ? FindScytheOrWeaponSlot(who) : -1;
+                    if (autoTool && slot < 0) slot = FindToolSlot<Pickaxe>(who);
+                    if (autoTool && slot < 0) slot = FindToolSlot<Axe>(who);
+                    intent.Kind = TileActionKind.UseTool;
+                    intent.StopAdjacent = true;
+                    intent.Repeatable = false;
+                    intent.PreferredToolSlot = autoTool ? slot : -1;
+                    return intent;
+                }
+
                 if (obj is Chest || obj is Furniture || obj.readyForHarvest.Value || obj.IsSpawnedObject)
                 {
                     intent.Kind = TileActionKind.Interact;
                     intent.StopAdjacent = true;
+                    intent.AllowSameTile = obj.IsSpawnedObject;
                     return intent;
                 }
 
                 if (obj.QualifiedItemId == "(O)590" || obj.QualifiedItemId == "(O)SeedSpot")
                 {
+                    int hoeSlot = autoTool ? FindToolSlot<Hoe>(who) : (who.CurrentTool is Hoe ? who.CurrentToolIndex : -1);
+                    if (hoeSlot < 0) return intent;
                     intent.Kind = TileActionKind.UseTool;
                     intent.StopAdjacent = true;
-                    if (autoTool)
-                        intent.PreferredToolSlot = FindToolSlot<Hoe>(who);
+                    intent.PreferCardinal = true;
+                    intent.PreferredToolSlot = autoTool ? hoeSlot : -1;
                     return intent;
                 }
 
-                if (obj.IsBreakableStone() || obj.Name == "Stone")
+                if (obj.IsBreakableStone() || obj.Name == "Stone" || obj.QualifiedItemId == "(O)25")
                 {
+                    int pickSlot = autoTool ? FindToolSlot<Pickaxe>(who) : (who.CurrentTool is Pickaxe ? who.CurrentToolIndex : -1);
+                    if (pickSlot < 0) return intent;
                     intent.Kind = TileActionKind.UseTool;
                     intent.StopAdjacent = true;
+                    intent.PreferCardinal = true;
                     intent.Repeatable = true;
-                    if (autoTool)
-                        intent.PreferredToolSlot = FindToolSlot<Pickaxe>(who);
+                    intent.PreferredToolSlot = autoTool ? pickSlot : -1;
                     return intent;
                 }
 
                 if (obj.IsTwig() || obj.Name == "Twig")
                 {
+                    int axeSlot = autoTool ? FindToolSlot<Axe>(who) : (who.CurrentTool is Axe ? who.CurrentToolIndex : -1);
+                    if (axeSlot < 0) return intent;
                     intent.Kind = TileActionKind.UseTool;
                     intent.StopAdjacent = true;
-                    intent.Repeatable = true;
-                    if (autoTool)
-                        intent.PreferredToolSlot = FindToolSlot<Axe>(who);
+                    intent.PreferCardinal = true;
+                    intent.Repeatable = false; // Twigs break in 1 hit — no wasted follow-up swing!
+                    intent.PreferredToolSlot = autoTool ? axeSlot : -1;
                     return intent;
                 }
 
@@ -186,6 +225,7 @@ namespace SDVMobileControls
                 {
                     intent.Kind = TileActionKind.UseTool;
                     intent.StopAdjacent = true;
+                    intent.AllowSameTile = true;
                     if (autoTool)
                         intent.PreferredToolSlot = FindScytheOrWeaponSlot(who);
                     return intent;
@@ -200,16 +240,116 @@ namespace SDVMobileControls
                 }
             }
 
+            // 4b. Placed Interior / Exterior Furniture (TV, Bed, Dresser, FishTank, Catalogue, Lamp, Fireplace, Chair, Table)
+            // Stardew stores placed furniture in loc.furniture (NOT loc.objects!). Skip rugs so walking across rugs works normally!
+            try
+            {
+                if (loc.furniture != null && loc.furniture.Count > 0)
+                {
+                    Furniture hitFurn = null;
+                    for (int fi = 0; fi < loc.furniture.Count; fi++)
+                    {
+                        Furniture f = loc.furniture[fi];
+                        if (f == null || f.furniture_type.Value == Furniture.rug)
+                            continue;
+                        Rectangle fbb = f.boundingBox.Value;
+                        bool directHit = fbb.Contains((int)tileCenter.X, (int)tileCenter.Y);
+                        bool tallHit = !directHit &&
+                            (f is TV || f is StorageFurniture || f is FishTankFurniture || f is BedFurniture ||
+                             f.furniture_type.Value == Furniture.lamp || f.furniture_type.Value == Furniture.fireplace ||
+                             f.furniture_type.Value == Furniture.bookcase) &&
+                            fbb.Contains((int)tileCenter.X, (int)(tileCenter.Y + 64f));
+                        if (!directHit && !tallHit)
+                            continue;
+
+                        bool interactive =
+                            (f is TV) ||
+                            (f is BedFurniture) ||
+                            (f is StorageFurniture) ||
+                            (f is FishTankFurniture) ||
+                            f.furniture_type.Value == Furniture.lamp ||
+                            f.furniture_type.Value == Furniture.fireplace ||
+                            f.furniture_type.Value == Furniture.chair ||
+                            f.furniture_type.Value == Furniture.bench ||
+                            f.furniture_type.Value == Furniture.couch ||
+                            f.furniture_type.Value == Furniture.armchair ||
+                            f.furniture_type.Value == Furniture.table ||
+                            f.furniture_type.Value == Furniture.longTable ||
+                            f.furniture_type.Value == Furniture.other ||
+                            (f.Name != null && (
+                                f.Name.IndexOf("Catalog", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                f.Name.IndexOf("Phone", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                f.Name.IndexOf("Calendar", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                f.Name.IndexOf("Jukebox", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                f.Name.IndexOf("Coffee", StringComparison.OrdinalIgnoreCase) >= 0));
+                        if (interactive)
+                        {
+                            hitFurn = f;
+                            break;
+                        }
+                    }
+
+                    if (hitFurn != null)
+                    {
+                        Point bestTile = FindClosestRectTile(hitFurn.boundingBox.Value, who.TilePoint);
+                        intent.Kind = TileActionKind.Interact;
+                        intent.StopAdjacent = true;
+                        intent.PreferCardinal = false;
+                        intent.AllowSameTile = (hitFurn is BedFurniture || hitFurn.furniture_type.Value == Furniture.chair ||
+                                                hitFurn.furniture_type.Value == Furniture.bench || hitFurn.furniture_type.Value == Furniture.couch ||
+                                                hitFurn.furniture_type.Value == Furniture.armchair);
+                        intent.HasResolvedTile = true;
+                        intent.ResolvedTile = bestTile;
+                        return intent;
+                    }
+                }
+            }
+            catch { }
+
             // 5. TerrainFeatures (Trees, FruitTrees, HoeDirt crops, Grass)
             if (loc.terrainFeatures != null && loc.terrainFeatures.TryGetValue(tv, out TerrainFeature tf) && tf != null)
             {
-                if (tf is Tree)
+                if (tf is Tree tree)
                 {
-                    intent.Kind = TileActionKind.UseTool;
-                    intent.StopAdjacent = true;
-                    intent.Repeatable = true;
-                    if (autoTool)
-                        intent.PreferredToolSlot = FindToolSlot<Axe>(who);
+                    // Stop immediately while the tree is already falling (prevents 2-3 wasted air swings!)
+                    if (tree.falling.Value)
+                        return intent;
+
+                    // Protect tapped trees from accidental Tap-to-Move chopping!
+                    if (tree.tapped.Value)
+                        return intent;
+
+                    // Newly planted tree seed (stage 0): only dig up if player is already holding Axe/Pickaxe/Hoe (1 swing, no auto-repeat)
+                    if (tree.growthStage.Value == 0)
+                    {
+                        if (who.CurrentTool is Axe || who.CurrentTool is Pickaxe || who.CurrentTool is Hoe)
+                        {
+                            intent.Kind = TileActionKind.UseTool;
+                            intent.StopAdjacent = true;
+                            intent.PreferCardinal = true;
+                            intent.Repeatable = false;
+                        }
+                        return intent;
+                    }
+
+                    int axeSlot = autoTool ? FindToolSlot<Axe>(who) : (who.CurrentTool is Axe ? who.CurrentToolIndex : -1);
+                    if (axeSlot >= 0)
+                    {
+                        intent.Kind = TileActionKind.UseTool;
+                        intent.StopAdjacent = true;
+                        intent.PreferCardinal = true;
+                        intent.Repeatable = true;
+                        intent.PreferredToolSlot = autoTool ? axeSlot : -1;
+                        return intent;
+                    }
+
+                    // No Axe available: shake mature tree if it has a seed/item instead of whiffing wrong tools
+                    if (!tree.stump.Value && tree.growthStage.Value >= 5)
+                    {
+                        intent.Kind = TileActionKind.Interact;
+                        intent.StopAdjacent = true;
+                        intent.PreferCardinal = true;
+                    }
                     return intent;
                 }
 
@@ -219,12 +359,17 @@ namespace SDVMobileControls
                     {
                         intent.Kind = TileActionKind.Interact;
                         intent.StopAdjacent = true;
+                        intent.PreferCardinal = true;
                         return intent;
                     }
-                    intent.Kind = TileActionKind.UseTool;
-                    intent.StopAdjacent = true;
-                    if (autoTool)
-                        intent.PreferredToolSlot = FindToolSlot<Axe>(who);
+                    // Protect prized Fruit Trees from accidental chopping: only swing 1x if player explicitly holds an Axe
+                    if (who.CurrentTool is Axe)
+                    {
+                        intent.Kind = TileActionKind.UseTool;
+                        intent.StopAdjacent = true;
+                        intent.PreferCardinal = true;
+                        intent.Repeatable = false;
+                    }
                     return intent;
                 }
 
@@ -239,6 +384,7 @@ namespace SDVMobileControls
                             {
                                 intent.Kind = TileActionKind.UseTool;
                                 intent.StopAdjacent = true;
+                                intent.AllowSameTile = true;
                                 if (autoTool)
                                     intent.PreferredToolSlot = FindScytheOrWeaponSlot(who);
                             }
@@ -246,6 +392,7 @@ namespace SDVMobileControls
                             {
                                 intent.Kind = TileActionKind.Interact;
                                 intent.StopAdjacent = true;
+                                intent.AllowSameTile = true;
                             }
                             return intent;
                         }
@@ -258,6 +405,7 @@ namespace SDVMobileControls
                             {
                                 intent.Kind = TileActionKind.UseTool;
                                 intent.StopAdjacent = true;
+                                intent.AllowSameTile = true;
                                 intent.PreferredToolSlot = wc;
                                 return intent;
                             }
@@ -267,6 +415,7 @@ namespace SDVMobileControls
                         {
                             intent.Kind = TileActionKind.UseTool;
                             intent.StopAdjacent = true;
+                            intent.AllowSameTile = true;
                             if (autoTool)
                                 intent.PreferredToolSlot = FindScytheOrWeaponSlot(who);
                             return intent;
@@ -277,6 +426,7 @@ namespace SDVMobileControls
                         // Holding seeds or fertilizer over empty tilled soil -> plant/fertilize
                         intent.Kind = TileActionKind.Interact;
                         intent.StopAdjacent = true;
+                        intent.AllowSameTile = true;
                         return intent;
                     }
                 }
@@ -288,6 +438,7 @@ namespace SDVMobileControls
                     {
                         intent.Kind = TileActionKind.UseTool;
                         intent.StopAdjacent = true;
+                        intent.AllowSameTile = true;
                         return intent;
                     }
                 }
@@ -328,6 +479,13 @@ namespace SDVMobileControls
 
                 if (loc.isWaterTile(tile.X, tile.Y))
                 {
+                    if (who.ActiveObject is CrabPot)
+                    {
+                        intent.Kind = TileActionKind.Interact;
+                        intent.StopAdjacent = true;
+                        intent.PreferCardinal = false;
+                        return intent;
+                    }
                     if (who.CurrentTool is FishingRod)
                     {
                         // Do NOT auto-fire a 0%-power stub cast on short tap/arrival!
@@ -410,12 +568,141 @@ namespace SDVMobileControls
                             }
                         }
 
+                        // ShippingBin overrides doAction() WITHOUT overriding isActionableTile()!
+                        // Match both base tiles (tileX..tileX+tilesWide-1, tileY..tileY+tilesHigh-1) AND lid row (tileY - 1),
+                        // resolving to the closest base tile to the farmer so 1 tap opens the Shipping Bin cleanly from any angle!
+                        if (b is ShippingBin sb && sb.daysOfConstructionLeft.Value <= 0)
+                        {
+                            int sx = sb.tileX.Value;
+                            int sy = sb.tileY.Value;
+                            int sw = Math.Max(1, sb.tilesWide.Value);
+                            int sh = Math.Max(1, sb.tilesHigh.Value);
+                            bool hitBase = tile.X >= sx && tile.X < sx + sw && tile.Y >= sy && tile.Y < sy + sh;
+                            bool hitLid  = tile.X >= sx && tile.X < sx + sw && tile.Y == sy - 1;
+                            if (hitBase || hitLid)
+                            {
+                                intent.Kind = TileActionKind.Interact;
+                                intent.StopAdjacent = true;
+                                intent.PreferCardinal = false;
+                                intent.HasResolvedTile = true;
+                                intent.ResolvedTile = FindClosestBuildingTile(sb, who.TilePoint);
+                                return intent;
+                            }
+                        }
+
+                        // FishPond overrides doAction() without overriding isActionableTile()!
+                        if (b is FishPond fp && fp.daysOfConstructionLeft.Value <= 0)
+                        {
+                            bool hitPond = fp.occupiesTile(tv) ||
+                                (!PathFinder.IsTileWalkable(loc, tile.X, tile.Y, who) && fp.occupiesTile(new Vector2(tile.X, tile.Y + 1)));
+                            if (hitPond)
+                            {
+                                intent.Kind = TileActionKind.Interact;
+                                intent.StopAdjacent = true;
+                                intent.PreferCardinal = false;
+                                intent.HasResolvedTile = true;
+                                intent.ResolvedTile = FindClosestBuildingTile(fp, who.TilePoint);
+                                return intent;
+                            }
+                        }
+
+                        // JunimoHut overrides doAction() without overriding isActionableTile()!
+                        if (b is JunimoHut jh && jh.daysOfConstructionLeft.Value <= 0 && jh.occupiesTile(tv))
+                        {
+                            intent.Kind = TileActionKind.Interact;
+                            intent.StopAdjacent = true;
+                            intent.PreferCardinal = false;
+                            intent.HasResolvedTile = true;
+                            intent.ResolvedTile = FindClosestBuildingTile(jh, who.TilePoint);
+                            return intent;
+                        }
+
+                        // PetBowl: auto-fill with WateringCan if dry, otherwise show pet name via doAction!
+                        if (b is PetBowl pb && pb.daysOfConstructionLeft.Value <= 0 && pb.occupiesTile(tv))
+                        {
+                            Point pbTile = FindClosestBuildingTile(pb, who.TilePoint);
+                            if (!pb.watered.Value)
+                            {
+                                int wcSlot = autoTool ? FindToolSlot<WateringCan>(who) : (who.CurrentTool is WateringCan ? who.CurrentToolIndex : -1);
+                                if (wcSlot >= 0 && who.Items[wcSlot] is WateringCan wc && wc.WaterLeft > 0)
+                                {
+                                    intent.Kind = TileActionKind.UseTool;
+                                    intent.StopAdjacent = true;
+                                    intent.PreferCardinal = true;
+                                    intent.PreferredToolSlot = autoTool ? wcSlot : -1;
+                                    intent.HasResolvedTile = true;
+                                    intent.ResolvedTile = pbTile;
+                                    return intent;
+                                }
+                            }
+                            intent.Kind = TileActionKind.Interact;
+                            intent.StopAdjacent = true;
+                            intent.PreferCardinal = false;
+                            intent.HasResolvedTile = true;
+                            intent.ResolvedTile = pbTile;
+                            return intent;
+                        }
+
+                        // Well / WaterSource building -> auto-refill WateringCan when not full!
+                        if (b.daysOfConstructionLeft.Value <= 0 && b.occupiesTile(tv))
+                        {
+                            string waterSrc = null;
+                            if (b.doesTileHaveProperty(tile.X, tile.Y, "WaterSource", "Buildings", ref waterSrc))
+                            {
+                                int wcSlot = autoTool ? FindToolSlot<WateringCan>(who) : (who.CurrentTool is WateringCan ? who.CurrentToolIndex : -1);
+                                if (wcSlot >= 0 && who.Items[wcSlot] is WateringCan wc && wc.WaterLeft < wc.waterCanMax)
+                                {
+                                    intent.Kind = TileActionKind.UseTool;
+                                    intent.StopAdjacent = true;
+                                    intent.PreferCardinal = true;
+                                    intent.PreferredToolSlot = autoTool ? wcSlot : -1;
+                                    return intent;
+                                }
+                            }
+                        }
+
                         if (b.isActionableTile(tile.X, tile.Y, who))
                         {
                             intent.Kind = TileActionKind.Interact;
                             intent.StopAdjacent = true;
                             intent.PreferCardinal = true;
                             return intent;
+                        }
+
+                        // Tapping any tile of a non-indoors actionable building (Silo, Mill, Obelisk, Gold Clock, etc.):
+                        // resolve neatly to its closest defined ActionTile so players don't have to pixel-hunt 1 tile!
+                        if (b.daysOfConstructionLeft.Value <= 0 && !b.HasIndoors() && b.occupiesTile(tv))
+                        {
+                            BuildingData bData = b.GetData();
+                            if (bData?.ActionTiles != null && bData.ActionTiles.Count > 0)
+                            {
+                                Point bestAct = Point.Zero;
+                                int bestDist = int.MaxValue;
+                                bool foundAct = false;
+                                for (int ai = 0; ai < bData.ActionTiles.Count; ai++)
+                                {
+                                    var at = bData.ActionTiles[ai];
+                                    if (at == null || string.IsNullOrEmpty(at.Action)) continue;
+                                    int ax = b.tileX.Value + at.Tile.X;
+                                    int ay = b.tileY.Value + at.Tile.Y;
+                                    int d = Math.Abs(ax - who.TilePoint.X) + Math.Abs(ay - who.TilePoint.Y);
+                                    if (d < bestDist)
+                                    {
+                                        bestDist = d;
+                                        bestAct = new Point(ax, ay);
+                                        foundAct = true;
+                                    }
+                                }
+                                if (foundAct)
+                                {
+                                    intent.Kind = TileActionKind.Interact;
+                                    intent.StopAdjacent = true;
+                                    intent.PreferCardinal = false;
+                                    intent.HasResolvedTile = true;
+                                    intent.ResolvedTile = bestAct;
+                                    return intent;
+                                }
+                            }
                         }
                     }
                 }
@@ -453,16 +740,80 @@ namespace SDVMobileControls
             }
             catch { }
 
-            // 9. Diggable empty tile ONLY if player is actively holding a Hoe
+            // 8c. Tapping the vertical trunk 1 tile ABOVE a mature standing tree's base (tile.X, tile.Y + 1):
+            // resolve cleanly to the tree base so players can tap the trunk directly without walking behind the tree!
+            try
+            {
+                Vector2 belowTv = new Vector2(tile.X, tile.Y + 1);
+                if (loc.terrainFeatures != null &&
+                    loc.terrainFeatures.TryGetValue(belowTv, out TerrainFeature belowTf) &&
+                    belowTf is Tree tallTree &&
+                    tallTree.growthStage.Value >= 5 &&
+                    !tallTree.stump.Value &&
+                    !tallTree.falling.Value &&
+                    !tallTree.tapped.Value)
+                {
+                    int axeSlot = autoTool ? FindToolSlot<Axe>(who) : (who.CurrentTool is Axe ? who.CurrentToolIndex : -1);
+                    if (axeSlot >= 0)
+                    {
+                        intent.Kind = TileActionKind.UseTool;
+                        intent.StopAdjacent = true;
+                        intent.PreferCardinal = true;
+                        intent.Repeatable = true;
+                        intent.PreferredToolSlot = autoTool ? axeSlot : -1;
+                        intent.HasResolvedTile = true;
+                        intent.ResolvedTile = new Point(tile.X, tile.Y + 1);
+                        return intent;
+                    }
+                }
+            }
+            catch { }
+
+            // 8d. MineShaft / Skull Cavern Ladders (173), Shafts/Holes (174), Exit Ladder (115), Elevator (112), Coal Carts (194), Shrine (284)
+            // MineShaft.checkAction reads Buildings layer tile indices directly (NOT map "Action" properties!).
+            if (loc is MineShaft)
+            {
+                try
+                {
+                    int mIdx = loc.getTileIndexAt(tile.X, tile.Y, "Buildings", "mine");
+                    if (mIdx == 173 || mIdx == 174 || mIdx == 112 || mIdx == 115 || mIdx == 194 || mIdx == 284)
+                    {
+                        intent.Kind = TileActionKind.Interact;
+                        intent.StopAdjacent = true;
+                        intent.PreferCardinal = (mIdx == 112 || mIdx == 115);
+                        intent.AllowSameTile = (mIdx == 173 || mIdx == 174);
+                        return intent;
+                    }
+                    // Upper half of tall exit ladder (115) or elevator (112)
+                    int belowIdx = loc.getTileIndexAt(tile.X, tile.Y + 1, "Buildings", "mine");
+                    if (belowIdx == 112 || belowIdx == 115)
+                    {
+                        intent.Kind = TileActionKind.Interact;
+                        intent.StopAdjacent = true;
+                        intent.PreferCardinal = true;
+                        intent.HasResolvedTile = true;
+                        intent.ResolvedTile = new Point(tile.X, tile.Y + 1);
+                        return intent;
+                    }
+                }
+                catch { }
+            }
+
+            // 9. Diggable empty tile when player is actively holding a Hoe (works up to 2 tiles away, including diagonals & under feet!)
             if (who.CurrentTool is Hoe)
             {
                 try
                 {
-                    if (loc.doesTileHaveProperty(tile.X, tile.Y, "Diggable", "Back") != null &&
-                        Math.Max(Math.Abs((int)who.Tile.X - tile.X), Math.Abs((int)who.Tile.Y - tile.Y)) <= 1)
+                    bool occupied = (loc.objects != null && loc.objects.ContainsKey(tv)) ||
+                                    (loc.terrainFeatures != null && loc.terrainFeatures.ContainsKey(tv));
+                    if (!occupied &&
+                        loc.doesTileHaveProperty(tile.X, tile.Y, "Diggable", "Back") != null &&
+                        Math.Max(Math.Abs(who.TilePoint.X - tile.X), Math.Abs(who.TilePoint.Y - tile.Y)) <= 2)
                     {
                         intent.Kind = TileActionKind.UseTool;
                         intent.StopAdjacent = true;
+                        intent.PreferCardinal = false;
+                        intent.AllowSameTile = true;
                         return intent;
                     }
                 }
@@ -470,6 +821,120 @@ namespace SDVMobileControls
             }
 
             return intent;
+        }
+
+        private static Point FindClosestBuildingTile(Building b, Point fromTile)
+        {
+            int bx = b.tileX.Value;
+            int by = b.tileY.Value;
+            int bw = Math.Max(1, b.tilesWide.Value);
+            int bh = Math.Max(1, b.tilesHigh.Value);
+            int bestX = Math.Clamp(fromTile.X, bx, bx + bw - 1);
+            int bestY = Math.Clamp(fromTile.Y, by, by + bh - 1);
+            return new Point(bestX, bestY);
+        }
+
+        private static Point FindClosestRectTile(Rectangle worldRect, Point fromTile)
+        {
+            int minX = worldRect.Left / 64;
+            int minY = worldRect.Top / 64;
+            int maxX = Math.Max(minX, (worldRect.Right - 1) / 64);
+            int maxY = Math.Max(minY, (worldRect.Bottom - 1) / 64);
+            return new Point(Math.Clamp(fromTile.X, minX, maxX), Math.Clamp(fromTile.Y, minY, maxY));
+        }
+
+        /// <summary>
+        /// Mobile-style press-and-hold mining / chopping / digging target detector.
+        /// Lets the player hold their finger on any rock, ore node, boulder, stump, tree, twig, weed,
+        /// mine barrel, monster, artifact spot, diggable dirt (with Hoe), or adjacent breakable tile (with Pickaxe/Axe)
+        /// to continuously swing until broken or finger is lifted!
+        /// </summary>
+        public static TileIntent InspectHoldToolTarget(GameLocation loc, Point tile, Farmer who, bool autoTool)
+        {
+            TileIntent intent = InspectTile(loc, tile, who, autoTool);
+            if (intent.Kind == TileActionKind.UseTool)
+                return intent;
+
+            if (loc == null || who == null)
+                return new TileIntent { Kind = TileActionKind.None, PreferredToolSlot = -1 };
+
+            Vector2 tv = new Vector2(tile.X, tile.Y);
+            int cheb = Math.Max(Math.Abs(who.TilePoint.X - tile.X), Math.Abs(who.TilePoint.Y - tile.Y));
+
+            // Holding on ANY diggable empty dirt tile while holding a Hoe -> walk up and dig it!
+            if (who.CurrentTool is Hoe)
+            {
+                try
+                {
+                    bool occupied = (loc.objects != null && loc.objects.ContainsKey(tv)) ||
+                                    (loc.terrainFeatures != null && loc.terrainFeatures.ContainsKey(tv));
+                    if (!occupied && loc.doesTileHaveProperty(tile.X, tile.Y, "Diggable", "Back") != null)
+                    {
+                        return new TileIntent
+                        {
+                            Kind = TileActionKind.UseTool,
+                            PreferredToolSlot = -1,
+                            StopAdjacent = true,
+                            PreferCardinal = false,
+                            Repeatable = false
+                        };
+                    }
+                }
+                catch { }
+            }
+
+            // Holding directly on an adjacent tile (cheb == 1) while holding Pickaxe/Axe ->
+            // lets player un-till HoeDirt or pick up placed paths/fences/sprinklers/chests/machines cleanly!
+            if (cheb == 1 && (who.CurrentTool is Pickaxe || who.CurrentTool is Axe))
+            {
+                bool hasAnything = (loc.objects != null && loc.objects.ContainsKey(tv)) ||
+                                   (loc.terrainFeatures != null && loc.terrainFeatures.ContainsKey(tv));
+                if (hasAnything)
+                {
+                    return new TileIntent
+                    {
+                        Kind = TileActionKind.UseTool,
+                        PreferredToolSlot = -1,
+                        StopAdjacent = true,
+                        PreferCardinal = false,
+                        Repeatable = true
+                    };
+                }
+            }
+
+            return new TileIntent { Kind = TileActionKind.None, PreferredToolSlot = -1 };
+        }
+
+        public static float GetTargetHealth(GameLocation loc, Point tile)
+        {
+            if (loc == null) return -1f;
+            try
+            {
+                Vector2 tv = new Vector2(tile.X, tile.Y);
+                if (loc.terrainFeatures != null && loc.terrainFeatures.TryGetValue(tv, out TerrainFeature tf))
+                {
+                    if (tf is Tree tree)
+                        return tree.falling.Value ? -1f : tree.health.Value;
+                    if (tf is FruitTree ft)
+                        return ft.health.Value;
+                }
+                if (loc.resourceClumps != null)
+                {
+                    for (int i = 0; i < loc.resourceClumps.Count; i++)
+                    {
+                        ResourceClump rc = loc.resourceClumps[i];
+                        if (rc != null && rc.occupiesTile(tile.X, tile.Y))
+                            return rc.health.Value;
+                    }
+                }
+                if (loc.objects != null && loc.objects.TryGetValue(tv, out SObject obj) && obj != null)
+                {
+                    if (obj.IsBreakableStone() || obj.Name == "Stone" || obj.QualifiedItemId == "(O)25")
+                        return obj.MinutesUntilReady > 0 ? (float)obj.MinutesUntilReady : -1f;
+                }
+            }
+            catch { }
+            return -1f;
         }
 
         public static bool TryAutoAttack(GameLocation loc, Farmer who, bool playerActivelyMovingAway, ref int cooldownFrames)

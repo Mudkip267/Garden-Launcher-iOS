@@ -166,7 +166,7 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
 
 -(BOOL)trimLogsEnabledForDocs:(NSString *)docsPath {
     if (!docsPath.length) return YES;
-    NSString *p = [docsPath stringByAppendingPathComponent:@"sdv_perf.cfg"];
+    NSString *p = [sdvHiddenGardenDir(docsPath) stringByAppendingPathComponent:@"sdv_perf.cfg"];
     NSString *raw = [[NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
     if (!raw.length) return YES;
     return ![raw containsString:@",0"];
@@ -175,17 +175,18 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
 -(void)savePerfConfig:(NSInteger)renderMode trimLogs:(BOOL)trimLogs toDocs:(NSString *)docsPath {
     if (!docsPath.length) return;
     (void)renderMode;
-    [NSFileManager.defaultManager createDirectoryAtPath:docsPath withIntermediateDirectories:YES attributes:nil error:nil];
-    NSString *p = [docsPath stringByAppendingPathComponent:@"sdv_perf.cfg"];
+    NSString *gd = sdvHiddenGardenDir(docsPath);
+    NSString *p = [gd stringByAppendingPathComponent:@"sdv_perf.cfg"];
     NSString *s = [NSString stringWithFormat:@"1,%d", trimLogs ? 1 : 0]; // v6 locked 2.0x
     [s writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 
 -(void)triggerManualGCInDocs:(NSString *)docsPath {
     if (!docsPath.length) return;
-    NSString *flag = [docsPath stringByAppendingPathComponent:@"sdv_gc_now.flag"];
+    NSString *gd = sdvHiddenGardenDir(docsPath);
+    NSString *flag = [gd stringByAppendingPathComponent:@"sdv_gc_now.flag"];
     [@"1" writeToFile:flag atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    NSString *pruneFlag = [docsPath stringByAppendingPathComponent:@"sdv_prune_now.flag"];
+    NSString *pruneFlag = [gd stringByAppendingPathComponent:@"sdv_prune_now.flag"];
     [@"1" writeToFile:pruneFlag atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 
@@ -228,7 +229,7 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
         }
         _logPath = cur;
         SDVRamSnapshot s0 = [self sample];
-        [self appendLogLine:[NSString stringWithFormat:@"=== Garden Launcher v7 RAM Monitor Started | Device RAM: %.2f GB | Initial Budget: %@ | Alerts: 85%% Warn / 90%% Critical ===",
+        [self appendLogLine:[NSString stringWithFormat:@"=== Garden Launcher 1.0.1 RAM Monitor Started | Device RAM: %.2f GB | Initial Budget: %@ | Alerts: 85%% Warn / 90%% Critical ===",
             (double)s0.deviceBytes / (1024.0 * 1024.0 * 1024.0), sdvFmtMemMB(s0.budgetBytes)]];
     }
 
@@ -278,7 +279,7 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
                 if (_docsPath.length) {
                     NSString *inGameMsg = [NSString stringWithFormat:@"CRIT|NGUY HIEM RAM %.0f%% (Du %@)! BAM SAVE LUU GAME NGAY LAP TUC!",
                         s.usagePct, sdvFmtMemCompact(s.availBytes)];
-                    NSString *alertFile = [_docsPath stringByAppendingPathComponent:@"sdv_ram_alert.txt"];
+                    NSString *alertFile = [sdvHiddenGardenDir(_docsPath) stringByAppendingPathComponent:@"sdv_ram_alert.txt"];
                     [inGameMsg writeToFile:alertFile atomically:YES encoding:NSUTF8StringEncoding error:nil];
                 }
                 NSString *bannerMsg = [NSString stringWithFormat:@"🚨 CẢNH BÁO MẠNH: RAM ĐẠT %.0f%% (%@ / %@ · Dư %@)\nSẮP TRÀN RAM VĂNG GAME! HÃY BẤM SAVE LƯU GAME NGAY LẬP TỨC!",
@@ -293,7 +294,7 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
                 if (_docsPath.length) {
                     NSString *inGameMsg = [NSString stringWithFormat:@"WARN|CANH BAO RAM CAO %.0f%% (Du %@)! Hay bam SAVE luu game!",
                         s.usagePct, sdvFmtMemCompact(s.availBytes)];
-                    NSString *alertFile = [_docsPath stringByAppendingPathComponent:@"sdv_ram_alert.txt"];
+                    NSString *alertFile = [sdvHiddenGardenDir(_docsPath) stringByAppendingPathComponent:@"sdv_ram_alert.txt"];
                     [inGameMsg writeToFile:alertFile atomically:YES encoding:NSUTF8StringEncoding error:nil];
                 }
                 NSString *bannerMsg = [NSString stringWithFormat:@"⚠️ CẢNH BÁO RAM CAO: %.0f%% (%@ / %@ · Dư %@)\nĐã tự dọn RAM — Hãy bấm SAVE để lưu game tránh văng!",

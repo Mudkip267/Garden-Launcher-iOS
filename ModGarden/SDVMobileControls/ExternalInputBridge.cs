@@ -79,6 +79,16 @@ namespace SDVMobileControls
         private static readonly object[] GamePadPlatformArgs =
             new object[] { 0, GamePadDeadZone.IndependentAxes, GamePadDeadZone.IndependentAxes };
 
+        private static readonly FieldInfo InputCurrentMouseField =
+            typeof(InputState).GetField("_currentMouseState", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        private static readonly FieldInfo InputCurrentGamepadField =
+            typeof(InputState).GetField("_currentGamepadState", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        private static readonly FieldInfo MousePrimaryWindowField =
+            typeof(Mouse).GetField("PrimaryWindow", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+        private static PropertyInfo _windowMouseStateProp;
+        private static FieldInfo _windowMouseStateField;
+        private static bool _windowMouseMemberResolved;
+
         private readonly IMonitor _monitor;
         private readonly IntPtr _snapBuf;
         private PollInputDelegate _nativePoll;
@@ -96,7 +106,9 @@ namespace SDVMobileControls
         private uint _lastMouseSeq;
         private bool _seqInitialized;
 
-        private bool _suppressed;
+        private bool _nativeSuppressed;
+        private bool _managedSuppressed;
+        private bool _wasSuppressed;
         private bool _gpConnected;
         private bool _kbConnected;
         private bool _mouseConnected;
@@ -104,8 +116,13 @@ namespace SDVMobileControls
         private int _scrollWheelValue;
         private int _gamepadCursorX = 640;
         private int _gamepadCursorY = 360;
+        private float _gamepadCursorXf = 640f;
+        private float _gamepadCursorYf = 360f;
         private bool _gamepadCursorInit;
+        private long _lastRightStickStepMs;
+        public bool IsRightStickSteeringGameplayCursor { get; private set; }
 
+        private static readonly List<Keys> EmptyKeysList = new List<Keys>(0);
         private readonly List<Keys> _physicalKeys = new List<Keys>(32);
         private readonly HashSet<Keys> _prevSpecialKeys = new HashSet<Keys>();
         private readonly HashSet<Keys> _currSpecialKeys = new HashSet<Keys>();
@@ -115,15 +132,15 @@ namespace SDVMobileControls
         public ExternalInputMode ActiveMode { get; private set; } = ExternalInputMode.Touch;
         public GamePadState CurrentGamePadState { get; private set; }
         public MouseState CurrentMouseState { get; private set; }
-        public bool IsSuppressed => _suppressed;
+        public bool IsSuppressed => _nativeSuppressed || _managedSuppressed;
         public bool IsGamepadConnected => _gpConnected;
         public bool IsKeyboardConnected => _kbConnected;
         public bool IsMouseConnected => _mouseConnected;
-        public bool IsPhysicalGamepadActive => ActiveMode == ExternalInputMode.Gamepad && _gpConnected && !_suppressed;
-        public bool IsExternalMouseActive => ActiveMode == ExternalInputMode.KeyboardMouse && _mouseConnected && _mouseEverUsed && !_suppressed;
-        public bool IsExternalDeviceActive => ActiveMode != ExternalInputMode.Touch && !_suppressed;
+        public bool IsPhysicalGamepadActive => ActiveMode == ExternalInputMode.Gamepad && _gpConnected && !IsSuppressed;
+        public bool IsExternalMouseActive => ActiveMode == ExternalInputMode.KeyboardMouse && _mouseConnected && _mouseEverUsed && !IsSuppressed;
+        public bool IsExternalDeviceActive => ActiveMode != ExternalInputMode.Touch && !IsSuppressed;
         public bool ShouldOverrideMouse => IsExternalMouseActive || IsPhysicalGamepadActive;
-        public bool HasPhysicalKeysPressed => !_suppressed && _physicalKeys.Count > 0;
+        public bool HasPhysicalKeysPressed => !IsSuppressed && _physicalKeys.Count > 0;
         public IReadOnlyList<Keys> PhysicalKeys => _physicalKeys;
 
         public event Action<ExternalInputMode> ModeChanged;
@@ -226,8 +243,77 @@ namespace SDVMobileControls
             catch { }
         }
 
+        public void SetManagedSuppressed(bool suppressed)
+        {
+            if (_managedSuppressed == suppressed) return;
+            bool prev = IsSuppressed;
+            _managedSuppressed = suppressed;
+            bool cur = IsSuppressed;
+            _wasSuppressed = cur;
+            if (cur != prev)
+                OnSuppressionTransition(prev, cur);
+        }
+
+        private void OnSuppressionTransition(bool wasSuppressed, bool nowSuppressed)
+        {
+            CurrentGamePadState = default;
+            _physicalKeys.Clear();
+            _prevSpecialKeys.Clear();
+            SyncMonoGameKeyboardKeys(forceClear: true);
+
+            if (!nowSuppressed)
+            {
+                // Re-baseline native activity sequences so opening/closing Mod Garden or Edit Layout
+                // never fires a stale edge on frame 1 after resume.
+                _seqInitialized = false;
+            }
+
+            ApplyStardewGamepadMode();
+            FlushFarmerMovementAndState(restoreAutoRun: !nowSuppressed);
+        }
+
+        /// <summary>
+        /// Safely halts lingering Farmer movement/directions, clears stale Game1.oldPadState,
+        /// and optionally resyncs Farmer.running with Game1.options.autoRun so mode/UI transitions
+        /// never leave the farmer stuck running in place, sliding, or locked into walk animation.
+        /// </summary>
+        public void FlushFarmerMovementAndState(bool restoreAutoRun = true)
+        {
+            try { Game1.oldPadState = default; } catch { }
+            try
+            {
+                Farmer who = Game1.player;
+                if (who != null && !Game1.eventUp && who.controller == null &&
+                    !who.UsingTool && !who.isEating && !who.IsSitting())
+                {
+                    if (who.movementDirections != null && who.movementDirections.Count > 0)
+                        who.movementDirections.Clear();
+                    who.Halt();
+                    if (restoreAutoRun && Game1.options != null &&
+                        !who.canOnlyWalk && !who.bathingClothes.Value &&
+                        who.stamina > 0f && !who.isRidingHorse())
+                    {
+                        bool wantRun = Game1.options.autoRun;
+                        if (who.running != wantRun)
+                            who.setRunning(wantRun, force: false);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public KeyboardState BuildPhysicalKeyboardState()
+        {
+            if (!HasPhysicalKeysPressed)
+                return default;
+            return new KeyboardState(_physicalKeys.ToArray());
+        }
+
         public void NotifyDirectTouch(int directTouchCount)
         {
+            // Ignore touches while suppressed (Mod Garden / Edit Layout / Save Menu) so dragging UI
+            // never flips ActiveMode back and forth behind the overlay.
+            if (IsSuppressed) return;
             if (directTouchCount > 0 && ActiveMode != ExternalInputMode.Touch)
             {
                 SetActiveMode(ExternalInputMode.Touch);
@@ -237,17 +323,63 @@ namespace SDVMobileControls
         private void SetActiveMode(ExternalInputMode next)
         {
             if (ActiveMode == next) return;
+            ExternalInputMode prev = ActiveMode;
             ActiveMode = next;
 
-            if (next == ExternalInputMode.Gamepad && !_gamepadCursorInit)
+            if (next == ExternalInputMode.Gamepad)
             {
                 GetBackBufferSize(out int bw, out int bh);
-                _gamepadCursorX = bw / 2;
-                _gamepadCursorY = bh / 2;
-                _gamepadCursorInit = true;
+                EnsureValidLocalMultiplayerWindow(bw, bh);
+                if (!_gamepadCursorInit || (_gamepadCursorX == 0 && _gamepadCursorY == 0))
+                {
+                    _gamepadCursorX = bw / 2;
+                    _gamepadCursorY = bh / 2;
+                    _gamepadCursorXf = _gamepadCursorX;
+                    _gamepadCursorYf = _gamepadCursorY;
+                    _gamepadCursorInit = true;
+                }
+            }
+            if (next != ExternalInputMode.Gamepad)
+            {
+                IsRightStickSteeringGameplayCursor = false;
+                _lastRightStickStepMs = 0;
+            }
+
+            // Clear any stale touch-simulated WASD keys when switching into or out of Gamepad mode
+            if (next == ExternalInputMode.Gamepad || prev == ExternalInputMode.Gamepad)
+            {
+                if (_physicalKeys.Count == 0)
+                    SyncMonoGameKeyboardKeys(forceClear: true);
             }
 
             ApplyStardewGamepadMode();
+
+            // Leaving Gamepad flips Game1.options.gamepadControls -> false, which causes Stardew
+            // to skip its gamepad stick-release block. Flush movement cleanly so Farmer never
+            // stays stuck with orphaned movementDirections / running-in-place animation!
+            if (prev == ExternalInputMode.Gamepad)
+            {
+                FlushFarmerMovementAndState(restoreAutoRun: true);
+            }
+            else if (next == ExternalInputMode.Gamepad)
+            {
+                try { Game1.oldPadState = default; } catch { }
+                try
+                {
+                    Farmer who = Game1.player;
+                    if (who != null && Game1.options != null && !Game1.eventUp &&
+                        who.controller == null && !who.UsingTool && !who.isEating &&
+                        !who.IsSitting() && !who.canOnlyWalk && !who.bathingClothes.Value &&
+                        who.stamina > 0f && !who.isRidingHorse())
+                    {
+                        bool wantRun = Game1.options.autoRun;
+                        if (who.running != wantRun)
+                            who.setRunning(wantRun, force: false);
+                    }
+                }
+                catch { }
+            }
+
             try { ModeChanged?.Invoke(next); } catch { }
         }
 
@@ -274,6 +406,107 @@ namespace SDVMobileControls
             catch { }
         }
 
+        public void EnsureValidLocalMultiplayerWindow()
+        {
+            GetBackBufferSize(out int bw, out int bh);
+            EnsureValidLocalMultiplayerWindow(bw, bh);
+        }
+
+        private static void EnsureValidLocalMultiplayerWindow(int bw, int bh)
+        {
+            try
+            {
+                var g = Game1.game1;
+                if (g != null && bw > 100 && bh > 100 &&
+                    (g.localMultiplayerWindow.Width <= 100 || g.localMultiplayerWindow.Height <= 100))
+                {
+                    g.localMultiplayerWindow = new Rectangle(0, 0, bw, bh);
+                }
+            }
+            catch { }
+        }
+
+        public static GamePadState StripRightStick(GamePadState gs)
+        {
+            return new GamePadState(
+                new GamePadThumbSticks(gs.ThumbSticks.Left, Vector2.Zero),
+                gs.Triggers,
+                gs.Buttons,
+                gs.DPad);
+        }
+
+        private void StepGamepadRightStickCursor(float rx, float ry, int bw, int bh)
+        {
+            EnsureValidLocalMultiplayerWindow(bw, bh);
+            if (!_gamepadCursorInit)
+            {
+                _gamepadCursorX = bw / 2;
+                _gamepadCursorY = bh / 2;
+                _gamepadCursorXf = _gamepadCursorX;
+                _gamepadCursorYf = _gamepadCursorY;
+                _gamepadCursorInit = true;
+            }
+
+            // During free gameplay (no modal menu / minigame / emote wheel), drive smooth analog
+            // right-stick cursor movement directly in backbuffer coordinates so players can freely
+            // glide the cursor over UI Info Suite 2 icons and world tiles without pressing anything else.
+            bool canFreeCursor = Game1.activeClickableMenu == null && Game1.currentMinigame == null && Game1.emoteMenu == null;
+            float magSq = rx * rx + ry * ry;
+            if (canFreeCursor && magSq > 0.0001f)
+            {
+                long nowMs = Environment.TickCount64;
+                float dt = (_lastRightStickStepMs > 0) ? (nowMs - _lastRightStickStepMs) / 1000f : (1f / 60f);
+                if (dt > 0.06f) dt = 1f / 60f;
+                dt = Math.Clamp(dt, 0.004f, 0.05f);
+                _lastRightStickStepMs = nowMs;
+
+                // If cursor faded away and somehow sat at (0,0) before user touched it, start smoothly near center
+                if (Game1.timerUntilMouseFade <= 0 && _gamepadCursorX == 0 && _gamepadCursorY == 0)
+                {
+                    _gamepadCursorXf = bw * 0.5f;
+                    _gamepadCursorYf = bh * 0.5f;
+                }
+
+                float mag = MathF.Sqrt(magSq);
+                float clampedMag = Math.Min(1f, mag);
+                float dx = rx / mag;
+                float dy = ry / mag;
+                // Hybrid linear + quadratic response: fine precision for small HUD icons, brisk travel at full tilt
+                float curved = 0.35f * clampedMag + 0.65f * clampedMag * clampedMag;
+                float speedPxPerSec = Math.Max(680f, bh * 1.15f);
+
+                _gamepadCursorXf = Math.Clamp(_gamepadCursorXf + dx * curved * speedPxPerSec * dt, 0f, Math.Max(0, bw - 1));
+                _gamepadCursorYf = Math.Clamp(_gamepadCursorYf - dy * curved * speedPxPerSec * dt, 0f, Math.Max(0, bh - 1));
+                _gamepadCursorX = (int)Math.Round(_gamepadCursorXf);
+                _gamepadCursorY = (int)Math.Round(_gamepadCursorYf);
+                IsRightStickSteeringGameplayCursor = true;
+
+                try
+                {
+                    Game1.timerUntilMouseFade = 4000;
+                    Game1.mouseCursorTransparency = 1f;
+                    Game1.wasMouseVisibleThisFrame = true;
+                    Game1.lastCursorMotionWasMouse = false;
+                    Game1.lastMousePositionBeforeFade = new Point(_gamepadCursorX, _gamepadCursorY);
+                    Game1.input?.SetMousePosition(_gamepadCursorX, _gamepadCursorY);
+                }
+                catch { }
+            }
+            else
+            {
+                IsRightStickSteeringGameplayCursor = false;
+                _lastRightStickStepMs = 0;
+                _gamepadCursorX = Math.Clamp(_gamepadCursorX, 0, Math.Max(0, bw - 1));
+                _gamepadCursorY = Math.Clamp(_gamepadCursorY, 0, Math.Max(0, bh - 1));
+                _gamepadCursorXf = _gamepadCursorX;
+                _gamepadCursorYf = _gamepadCursorY;
+            }
+
+            CurrentMouseState = new MouseState(
+                _gamepadCursorX, _gamepadCursorY, _scrollWheelValue,
+                ButtonState.Released, ButtonState.Released, ButtonState.Released, ButtonState.Released, ButtonState.Released);
+        }
+
         public void OnGameSetMousePositionRaw(int x, int y)
         {
             GetBackBufferSize(out int bw, out int bh);
@@ -281,6 +514,8 @@ namespace SDVMobileControls
             int cy = Math.Clamp(y, 0, Math.Max(0, bh - 1));
             _gamepadCursorX = cx;
             _gamepadCursorY = cy;
+            _gamepadCursorXf = cx;
+            _gamepadCursorYf = cy;
             _gamepadCursorInit = true;
 
             if (IsExternalMouseActive && _nativeSetMouseNorm != null && bw > 1 && bh > 1)
@@ -310,6 +545,9 @@ namespace SDVMobileControls
             if (tick == _lastPollTick && nowMs - _lastPollMs < 6)
             {
                 if (directTouchCount > 0) NotifyDirectTouch(directTouchCount);
+                // Always restore Game1.options.gamepadControls even on fast frames because
+                // SDViOSTouchControls.ModEntry.OnUpdateTicking forces it false every tick!
+                ApplyStardewGamepadMode();
                 return;
             }
             _lastPollTick = tick;
@@ -342,7 +580,15 @@ namespace SDVMobileControls
                 return;
             }
 
-            _suppressed = Marshal.ReadInt32(_snapBuf, OffSuppress) != 0;
+            bool prevSup = _wasSuppressed;
+            _nativeSuppressed = Marshal.ReadInt32(_snapBuf, OffSuppress) != 0;
+            bool curSup = IsSuppressed;
+            _wasSuppressed = curSup;
+            if (curSup != prevSup)
+            {
+                OnSuppressionTransition(prevSup, curSup);
+            }
+
             _gpConnected = Marshal.ReadInt32(_snapBuf, OffGpConnected) != 0;
             _kbConnected = Marshal.ReadInt32(_snapBuf, OffKbConnected) != 0;
             _mouseConnected = Marshal.ReadInt32(_snapBuf, OffMouseConnected) != 0;
@@ -360,7 +606,7 @@ namespace SDVMobileControls
             _seqInitialized = true;
 
             // --- 1. Physical Gamepad State ---
-            if (_gpConnected && !_suppressed)
+            if (_gpConnected && !curSup)
             {
                 uint mask = unchecked((uint)Marshal.ReadInt32(_snapBuf, OffGpButtonsMask));
                 float lx = ApplyAxisDeadzone(ReadFloat(_snapBuf, OffGpLeftX), 0.14f);
@@ -386,7 +632,7 @@ namespace SDVMobileControls
 
             // --- 2. Physical Keyboard State + Native TextBox Input ---
             _physicalKeys.Clear();
-            if (_kbConnected && !_suppressed)
+            if (_kbConnected && !curSup)
             {
                 int kCnt = Math.Clamp(Marshal.ReadInt32(_snapBuf, OffKbKeyCount), 0, 32);
                 for (int i = 0; i < kCnt; i++)
@@ -413,12 +659,12 @@ namespace SDVMobileControls
             // --- 3. Physical Mouse / Trackpad State ---
             GetBackBufferSize(out int bw, out int bh);
             int scrollDelta = Marshal.ReadInt32(_snapBuf, OffMouseScrollDelta);
-            if (!_suppressed && scrollDelta != 0)
+            if (!curSup && scrollDelta != 0)
             {
                 _scrollWheelValue += scrollDelta;
             }
 
-            if (_mouseConnected && !_suppressed)
+            if (_mouseConnected && !curSup)
             {
                 float nx = Math.Clamp(ReadFloat(_snapBuf, OffMouseNormX), 0f, 1f);
                 float ny = Math.Clamp(ReadFloat(_snapBuf, OffMouseNormY), 0f, 1f);
@@ -450,22 +696,72 @@ namespace SDVMobileControls
 
             if (IsPhysicalGamepadActive)
             {
-                if (!_gamepadCursorInit)
-                {
-                    _gamepadCursorX = bw / 2;
-                    _gamepadCursorY = bh / 2;
-                    _gamepadCursorInit = true;
-                }
-                CurrentMouseState = new MouseState(
-                    _gamepadCursorX, _gamepadCursorY, _scrollWheelValue,
-                    ButtonState.Released, ButtonState.Released, ButtonState.Released, ButtonState.Released, ButtonState.Released);
+                Vector2 rStick = CurrentGamePadState.ThumbSticks.Right;
+                StepGamepadRightStickCursor(rStick.X, rStick.Y, bw, bh);
+            }
+            else
+            {
+                IsRightStickSteeringGameplayCursor = false;
+                _lastRightStickStepMs = 0;
             }
 
             ApplyStardewGamepadMode();
+            SyncDirectZeroHarmonyInputStates();
+        }
+
+        /// <summary>
+        /// Zero-Harmony direct state push into Game1.input and MonoGame Mouse.PrimaryWindow so physical
+        /// Xbox/PS/MFi controllers, R-stick cursor, and external mice work 100% even on 0% JIT where
+        /// 0Harmony.dll is a no-op stub.
+        /// </summary>
+        public void SyncDirectZeroHarmonyInputStates()
+        {
+            try
+            {
+                if (ShouldOverrideMouse)
+                {
+                    MouseState ms = CurrentMouseState;
+                    if (Game1.input != null && InputCurrentMouseField != null)
+                        InputCurrentMouseField.SetValue(Game1.input, ms);
+                    if (MousePrimaryWindowField != null)
+                    {
+                        object win = MousePrimaryWindowField.GetValue(null);
+                        if (win != null)
+                        {
+                            if (!_windowMouseMemberResolved)
+                            {
+                                _windowMouseMemberResolved = true;
+                                Type wt = win.GetType();
+                                const BindingFlags any = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+                                _windowMouseStateField = wt.GetField("MouseState", any);
+                                _windowMouseStateProp = wt.GetProperty("MouseState", any);
+                            }
+                            if (_windowMouseStateField != null)
+                                _windowMouseStateField.SetValue(win, ms);
+                            else if (_windowMouseStateProp != null && _windowMouseStateProp.CanWrite)
+                                _windowMouseStateProp.SetValue(win, ms);
+                        }
+                    }
+                }
+                if (IsPhysicalGamepadActive && Game1.input != null && InputCurrentGamepadField != null)
+                {
+                    GamePadState gps = IsRightStickSteeringGameplayCursor
+                        ? StripRightStick(CurrentGamePadState)
+                        : CurrentGamePadState;
+                    InputCurrentGamepadField.SetValue(Game1.input, gps);
+                }
+            }
+            catch { }
         }
 
         private void PollFallbackMonoGameGamepad(int directTouchCount)
         {
+            if (IsSuppressed)
+            {
+                CurrentGamePadState = default;
+                ApplyStardewGamepadMode();
+                return;
+            }
             if (GamePadPlatformGetStateMethod == null) return;
             try
             {
@@ -486,7 +782,15 @@ namespace SDVMobileControls
                         gs.DPad.Left == ButtonState.Pressed || gs.DPad.Right == ButtonState.Pressed;
                     if (directTouchCount == 0 && used)
                         SetActiveMode(ExternalInputMode.Gamepad);
+                    if (IsPhysicalGamepadActive)
+                    {
+                        GetBackBufferSize(out int fbw, out int fbh);
+                        float frx = ApplyAxisDeadzone(gs.ThumbSticks.Right.X, 0.14f);
+                        float fry = ApplyAxisDeadzone(gs.ThumbSticks.Right.Y, 0.14f);
+                        StepGamepadRightStickCursor(frx, fry, fbw, fbh);
+                    }
                     ApplyStardewGamepadMode();
+                    SyncDirectZeroHarmonyInputStates();
                     return;
                 }
             }
@@ -551,19 +855,19 @@ namespace SDVMobileControls
                 new GamePadDPad(dUp, dDown, dLeft, dRight));
         }
 
-        private void SyncMonoGameKeyboardKeys()
+        private void SyncMonoGameKeyboardKeys(bool forceClear = false)
         {
             if (KeyboardSetKeysMethod == null) return;
             try
             {
-                if (_physicalKeys.Count > 0)
+                if (!forceClear && _physicalKeys.Count > 0)
                 {
                     KeyboardSetKeysMethod.Invoke(null, new object[] { _physicalKeys });
                     _syncedEmptyMonoGameKeys = false;
                 }
-                else if (!_syncedEmptyMonoGameKeys)
+                else if (forceClear || !_syncedEmptyMonoGameKeys)
                 {
-                    KeyboardSetKeysMethod.Invoke(null, new object[] { _physicalKeys });
+                    KeyboardSetKeysMethod.Invoke(null, new object[] { EmptyKeysList });
                     _syncedEmptyMonoGameKeys = true;
                 }
             }

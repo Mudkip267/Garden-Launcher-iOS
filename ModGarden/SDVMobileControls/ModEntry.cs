@@ -6,11 +6,13 @@ using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Audio;
+using Microsoft.Xna.Framework.Content;
 using Microsoft.Xna.Framework.Graphics;
 using Microsoft.Xna.Framework.Input;
 using Microsoft.Xna.Framework.Input.Touch;
 using StardewModdingAPI;
 using StardewModdingAPI.Events;
+using StardewModdingAPI.Utilities;
 using StardewValley;
 using StardewValley.Extensions;
 using StardewValley.Menus;
@@ -54,6 +56,15 @@ namespace SDVMobileControls
         internal static bool SynthesizingTapAction;
         private static readonly List<HUDMessage> _stashedHudMessages = new List<HUDMessage>(8);
         private static bool _hudMessagesStashed;
+        private static FieldInfo _soundBankSoundsField;
+        private static FieldInfo _game1HooksField;
+        private static bool _gardenHooksInstalled;
+        private static Dictionary<string, string> _vanillaBaseMailCache;
+        private static bool _vanillaBaseMailLoaded;
+        private static readonly List<string> _lastMailboxSnapshot = new List<string>(8);
+        private static int _lastMailboxDayKey = -1;
+        private static bool _mfmResolved;
+        private static MethodInfo _mfmShowLetterMethod;
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate void BootReportDelegate(
@@ -125,10 +136,13 @@ namespace SDVMobileControls
             };
 
             BindAllLoadedTouchVirtualPads("Entry");
+            EnsureGardenModHooksInstalled("Entry");
             InstallMobileHarmonyPatches("Entry");
             InstallExternalInputHarmonyPatches("Entry");
 
+            helper.Events.Content.AssetRequested += OnAssetRequestedMailGuard;
             helper.Events.GameLoop.GameLaunched += OnGameLaunched;
+            helper.Events.GameLoop.UpdateTicking += OnUpdateTicking;
             helper.Events.GameLoop.UpdateTicked += OnUpdateTicked;
             helper.Events.Display.Rendered += OnRenderedBootCheck;
             helper.Events.Display.RenderingStep += OnRenderingStepHudRelocate;
@@ -221,6 +235,7 @@ namespace SDVMobileControls
             WriteBootStage("90|Kích hoạt GameLaunched — chuẩn bị vào game…");
             ReportNativeBoot(90, "Kích hoạt GameLaunched — chuẩn bị vào game…", "Hoàn tất đồng bộ Content Patcher & cảm ứng", 4);
             BindAllLoadedTouchVirtualPads("GameLaunched");
+            EnsureGardenModHooksInstalled("GameLaunched");
             InstallMobileHarmonyPatches("GameLaunched");
             InstallExternalInputHarmonyPatches("GameLaunched");
             try { RamOptimizer?.OnGameLaunched(); } catch { }
@@ -234,6 +249,15 @@ namespace SDVMobileControls
         private void OnSaveLoaded(object sender, SaveLoadedEventArgs e)
         {
             try { RamOptimizer?.OnSaveLoaded(); } catch { }
+            // Automatically recover any missed Level 5 / Level 10 profession choices (#GL-LTQ82M)
+            try
+            {
+                if (Game1.player != null)
+                    LevelUpMenu.AddMissedProfessionChoices(Game1.player);
+            }
+            catch { }
+            ResetMailboxWatchdogSnapshot();
+            LogMailDiagnostic("SaveLoaded");
             if (!_audioDiagRanWorld)
             {
                 _audioDiagRanWorld = true;
@@ -247,6 +271,144 @@ namespace SDVMobileControls
         private void OnDayStarted(object sender, DayStartedEventArgs e)
         {
             try { RamOptimizer?.OnDayStarted(); } catch { }
+            ResetMailboxWatchdogSnapshot();
+            LogMailDiagnostic("DayStarted");
+        }
+
+        private void LogMailDiagnostic(string phase)
+        {
+            try
+            {
+                int mbCount = Game1.mailbox?.Count ?? -1;
+                int tomCount = Game1.player?.mailForTomorrow?.Count ?? -1;
+                int recCount = Game1.player?.mailReceived?.Count ?? -1;
+                int dictCount = -1;
+                try
+                {
+                    var d = DataLoader.Mail(Game1.content);
+                    dictCount = d?.Count ?? -1;
+                }
+                catch { }
+                string preview = (mbCount > 0 && Game1.mailbox != null) ? string.Join(",", Game1.mailbox) : "none";
+                _monitor?.Log($"[MailDiag:{phase}] {Game1.currentSeason} {Game1.dayOfMonth} Y{Game1.year} | mailbox={mbCount} ({preview}) | tomorrow={tomCount} | received={recCount} | Data/mail={dictCount}", LogLevel.Info);
+            }
+            catch { }
+        }
+
+        private static Dictionary<string, string> GetVanillaBaseMailDictionary()
+        {
+            if (_vanillaBaseMailLoaded)
+                return _vanillaBaseMailCache;
+            _vanillaBaseMailLoaded = true;
+            try
+            {
+                var sp = Game1.content?.ServiceProvider;
+                string root = Game1.content?.RootDirectory;
+                if (sp != null && !string.IsNullOrEmpty(root))
+                {
+                    // Plain MonoGame ContentManager reads unmodified Content/Data/mail.xnb directly from disk,
+                    // bypassing Content Patcher "Action": "Load" replacements from outdated 1.5 translation mods!
+                    using var rawCm = new ContentManager(sp, root);
+                    var rawDict = rawCm.Load<Dictionary<string, string>>("Data\\mail");
+                    if (rawDict != null && rawDict.Count > 0)
+                        _vanillaBaseMailCache = new Dictionary<string, string>(rawDict, StringComparer.OrdinalIgnoreCase);
+                }
+            }
+            catch { }
+            return _vanillaBaseMailCache;
+        }
+
+        private void OnAssetRequestedMailGuard(object sender, AssetRequestedEventArgs e)
+        {
+            if (e == null || !e.NameWithoutLocale.IsEquivalentTo("Data/mail"))
+                return;
+
+            e.Edit(asset =>
+            {
+                try
+                {
+                    var baseMail = GetVanillaBaseMailDictionary();
+                    if (baseMail == null || baseMail.Count == 0)
+                        return;
+                    var dict = asset.AsDictionary<string, string>()?.Data;
+                    if (dict == null)
+                        return;
+
+                    int restored = 0;
+                    foreach (var kv in baseMail)
+                    {
+                        if (string.IsNullOrEmpty(kv.Key) || string.IsNullOrEmpty(kv.Value))
+                            continue;
+                        if (!dict.TryGetValue(kv.Key, out string existing) || string.IsNullOrWhiteSpace(existing))
+                        {
+                            dict[kv.Key] = kv.Value;
+                            restored++;
+                        }
+                    }
+                    if (restored > 0)
+                    {
+                        _monitor?.Log($"[MailGuard] Restored {restored} missing Stardew 1.6 entries into '{e.Name}' (prevents empty/auto-claimed mailbox from legacy 1.5 translation packs).", LogLevel.Info);
+                    }
+                }
+                catch { }
+            }, AssetEditPriority.Late);
+        }
+
+        private static void ResetMailboxWatchdogSnapshot()
+        {
+            try
+            {
+                _lastMailboxSnapshot.Clear();
+                if (Game1.mailbox != null)
+                {
+                    for (int i = 0; i < Game1.mailbox.Count; i++)
+                        _lastMailboxSnapshot.Add(Game1.mailbox[i] ?? string.Empty);
+                }
+                _lastMailboxDayKey = Game1.year * 1000 + (int)Game1.season * 100 + Game1.dayOfMonth;
+            }
+            catch { }
+        }
+
+        private static void PollMailboxWatchdog()
+        {
+            if (!Context.IsWorldReady || Game1.mailbox == null)
+                return;
+            try
+            {
+                int dayKey = Game1.year * 1000 + (int)Game1.season * 100 + Game1.dayOfMonth;
+                if (dayKey != _lastMailboxDayKey)
+                {
+                    ResetMailboxWatchdogSnapshot();
+                    return;
+                }
+
+                int curCount = Game1.mailbox.Count;
+                int prevCount = _lastMailboxSnapshot.Count;
+                if (curCount < prevCount)
+                {
+                    bool openedLetter = Game1.activeClickableMenu is LetterViewerMenu;
+                    if (!openedLetter)
+                    {
+                        for (int i = 0; i < prevCount; i++)
+                        {
+                            string oldId = _lastMailboxSnapshot[i];
+                            if (!string.IsNullOrEmpty(oldId) && !Game1.mailbox.Contains(oldId))
+                            {
+                                bool inReceived = Game1.player?.mailReceived != null && Game1.player.mailReceived.Contains(oldId);
+                                _monitor?.Log($"[MailDiag:Watchdog] Mail '{oldId}' left Game1.mailbox without opening LetterViewerMenu (mailReceived={inReceived}, activeMenu={Game1.activeClickableMenu?.GetType().Name ?? "none"}).", LogLevel.Warn);
+                            }
+                        }
+                    }
+                }
+
+                if (curCount != prevCount)
+                {
+                    _lastMailboxSnapshot.Clear();
+                    for (int i = 0; i < curCount; i++)
+                        _lastMailboxSnapshot.Add(Game1.mailbox[i] ?? string.Empty);
+                }
+            }
+            catch { }
         }
 
         private void OnWarped(object sender, WarpedEventArgs e)
@@ -337,12 +499,36 @@ namespace SDVMobileControls
             catch { }
         }
 
+        private void OnUpdateTicking(object sender, UpdateTickingEventArgs e)
+        {
+            try
+            {
+                if (!_gardenHooksInstalled)
+                    EnsureGardenModHooksInstalled("UpdateTicking");
+                if (ExternalInput != null)
+                {
+                    ExternalInput.SetManagedSuppressed(Engine != null && Engine.IsUiOverlayBlockingExternalInput(null));
+                    ExternalInput.ApplyStardewGamepadMode();
+                }
+            }
+            catch { }
+        }
+
         private void OnUpdateTicked(object sender, UpdateTickedEventArgs e)
         {
             RestoreStashedHudMessagesIfNeeded();
-            try { ExternalInput?.PollFrame(); } catch { }
+            try
+            {
+                if (ExternalInput != null)
+                {
+                    ExternalInput.SetManagedSuppressed(Engine != null && Engine.IsUiOverlayBlockingExternalInput(null));
+                    ExternalInput.PollFrame();
+                }
+            }
+            catch { }
             try { Engine?.OnUpdateTickedGlobal(); } catch { }
             try { RamOptimizer?.PollManualPruneFlag(); } catch { }
+            PollMailboxWatchdog();
             if (!_audioDiagRanLaunch && ++_audioDiagTicks >= 120)
             {
                 _audioDiagRanLaunch = true;
@@ -353,13 +539,14 @@ namespace SDVMobileControls
                 _shaderDiagWaitingSave = false;
                 RunShaderDiagnostic("SaveLoaded+3s");
             }
-            if (BoundPadTypes.Count >= 2 && _extHarmonyPatchesInstalled && PatchedTouchHookTypes.Count >= 1)
+            if (BoundPadTypes.Count >= 2 && _extHarmonyPatchesInstalled && (_gardenHooksInstalled || PatchedTouchHookTypes.Count >= 1))
                 return;
             if (BoundPadTypes.Count > 0 && _retryTicks > 300)
                 return;
             if (++_retryTicks % 30 == 0)
             {
                 BindAllLoadedTouchVirtualPads("UpdateTicked");
+                EnsureGardenModHooksInstalled("UpdateTicked");
                 InstallExternalInputHarmonyPatches("UpdateTicked");
             }
         }
@@ -703,8 +890,20 @@ namespace SDVMobileControls
                 }
                 catch { }
 
+                // 8-9. Repair upstream v1.0.1 MonoGame iOS SoundBank.Exists (which returned false and muted all audio!)
+                //      while also returning a non-null CueDefinition so SVE Data/AudioChanges never throws NRE.
+                try
+                {
+                    _soundBankSoundsField = typeof(SoundBank).GetField("_sounds", instAny);
+                    MethodInfo mSbExists = typeof(SoundBank).GetMethod("Exists", instAny, null, new[] { typeof(string) }, null);
+                    TryApply("SoundBank.Exists", mSbExists, nameof(PrefixSoundBankExists), null);
+                    MethodInfo mSbGetCueDef = typeof(SoundBank).GetMethod("GetCueDefinition", instAny, null, new[] { typeof(string) }, null);
+                    TryApply("SoundBank.GetCueDefinition", mSbGetCueDef, nameof(PrefixSoundBankGetCueDefinition), null);
+                }
+                catch { }
+
                 _harmonyPatchesInstalled = true;
-                _monitor?.Log($"[{phase}] Installed {applied}/7 Mobile Harmony patches (FishingRod + BobberBar + Direct HUDMessage + TapAction RightClick + BootAssetProgress).", LogLevel.Info);
+                _monitor?.Log($"[{phase}] Installed {applied}/9 Mobile Harmony patches (FishingRod + BobberBar + Direct HUDMessage + TapAction RightClick + BootAssetProgress + SoundBank Audio Fix).", LogLevel.Info);
             }
             catch (Exception ex)
             {
@@ -790,8 +989,9 @@ namespace SDVMobileControls
                         patchMethod.Invoke(harmony, invokeArgs);
                         return 1;
                     }
-                    catch
+                    catch (Exception ex)
                     {
+                        _monitor?.Log($"[{phase}] ExternalInput patch failed on {original?.DeclaringType?.Name}.{original?.Name}: {ex.Message}", LogLevel.Warn);
                         return 0;
                     }
                 }
@@ -800,23 +1000,23 @@ namespace SDVMobileControls
 
                 if (!_extHarmonyPatchesInstalled)
                 {
-                    // 1. GamePad (Priority.High = 600 -> preempts SDViOSTouchControls when physical gamepad is active!)
-                    patchedNow += ApplyExtPatch(typeof(GamePad).GetMethod("GetState", any, null, new[] { typeof(PlayerIndex) }, null), nameof(PrefixExtGamePadState), 600, null, 400);
-                    patchedNow += ApplyExtPatch(typeof(InputState).GetMethod("GetGamePadState", any, null, Type.EmptyTypes, null), nameof(PrefixExtGamePadState), 600, null, 400);
+                    // 1. GamePad (Priority.First = 800 -> always preempts SDViOSTouchControls [400] when physical gamepad is active!)
+                    patchedNow += ApplyExtPatch(typeof(GamePad).GetMethod("GetState", any, null, new[] { typeof(PlayerIndex) }, null), nameof(PrefixExtGamePadState), 800, null, 400);
+                    patchedNow += ApplyExtPatch(typeof(InputState).GetMethod("GetGamePadState", any, null, Type.EmptyTypes, null), nameof(PrefixExtGamePadState), 800, null, 400);
 
-                    // 2. Mouse (Priority.High = 600 -> full external mouse/hover/right-click/scroll + gamepad snapped cursor!)
-                    patchedNow += ApplyExtPatch(typeof(Mouse).GetMethod("GetState", any, null, Type.EmptyTypes, null), nameof(PrefixExtMouseState), 600, null, 400);
-                    patchedNow += ApplyExtPatch(typeof(Mouse).GetMethod("GetState", any, null, new[] { typeof(GameWindow) }, null), nameof(PrefixExtMouseState), 600, null, 400);
-                    patchedNow += ApplyExtPatch(typeof(Mouse).GetMethod("PlatformGetState", any, null, new[] { typeof(GameWindow) }, null), nameof(PrefixExtMouseState), 600, null, 400);
-                    patchedNow += ApplyExtPatch(typeof(InputState).GetMethod("GetMouseState", any, null, Type.EmptyTypes, null), nameof(PrefixExtMouseState), 600, null, 400);
-                    patchedNow += ApplyExtPatch(typeof(Game1).GetMethod("setMousePositionRaw", any, null, new[] { typeof(int), typeof(int) }, null), nameof(PrefixExtSetMousePositionRaw), 600, null, 400);
+                    // 2. Mouse (Priority.First = 800 -> full external mouse/hover/right-click/scroll + gamepad right-stick & menu cursor!)
+                    patchedNow += ApplyExtPatch(typeof(Mouse).GetMethod("GetState", any, null, Type.EmptyTypes, null), nameof(PrefixExtMouseState), 800, null, 400);
+                    patchedNow += ApplyExtPatch(typeof(Mouse).GetMethod("GetState", any, null, new[] { typeof(GameWindow) }, null), nameof(PrefixExtMouseState), 800, null, 400);
+                    patchedNow += ApplyExtPatch(typeof(Mouse).GetMethod("PlatformGetState", any, null, new[] { typeof(GameWindow) }, null), nameof(PrefixExtMouseState), 800, null, 400);
+                    patchedNow += ApplyExtPatch(typeof(InputState).GetMethod("GetMouseState", any, null, Type.EmptyTypes, null), nameof(PrefixExtMouseState), 800, null, 400);
+                    patchedNow += ApplyExtPatch(typeof(Game1).GetMethod("setMousePositionRaw", any, null, new[] { typeof(int), typeof(int) }, null), nameof(PrefixExtSetMousePositionRaw), 800, null, 400);
 
                     // 3. Keyboard (Priority.Low = 200 Postfix -> merges physical hardware keys into ANY returned KeyboardState!)
                     patchedNow += ApplyExtPatch(typeof(Keyboard).GetMethod("GetState", any, null, Type.EmptyTypes, null), null, 400, nameof(PostfixExtKeyboardState), 200);
                     patchedNow += ApplyExtPatch(typeof(Game1).GetMethod("GetKeyboardState", any, null, Type.EmptyTypes, null), null, 400, nameof(PostfixExtKeyboardState), 200);
                     patchedNow += ApplyExtPatch(typeof(InputState).GetMethod("GetKeyboardState", any, null, Type.EmptyTypes, null), null, 400, nameof(PostfixExtKeyboardState), 200);
 
-                    // 4. SMAPI SInputState (so ALL SMAPI mods & Events.Input.ButtonPressed receive real external Gamepad/Keyboard/Mouse!)
+                    // 4. SMAPI SInputState (so ALL SMAPI mods & UI Info Suite 2 receive real external Gamepad/Keyboard/Mouse!)
                     Type sInputType = null;
                     foreach (Assembly asm in AppDomain.CurrentDomain.GetAssemblies())
                     {
@@ -829,10 +1029,10 @@ namespace SDVMobileControls
                     }
                     if (sInputType != null)
                     {
-                        patchedNow += ApplyExtPatch(sInputType.GetMethod("GetGamePadState", any, null, Type.EmptyTypes, null), nameof(PrefixExtGamePadState), 600, null, 400);
-                        patchedNow += ApplyExtPatch(sInputType.GetProperty("GamePadState", any)?.GetGetMethod(true), nameof(PrefixExtGamePadState), 600, null, 400);
-                        patchedNow += ApplyExtPatch(sInputType.GetMethod("GetMouseState", any, null, Type.EmptyTypes, null), nameof(PrefixExtMouseState), 600, null, 400);
-                        patchedNow += ApplyExtPatch(sInputType.GetProperty("MouseState", any)?.GetGetMethod(true), nameof(PrefixExtMouseState), 600, null, 400);
+                        patchedNow += ApplyExtPatch(sInputType.GetMethod("GetGamePadState", any, null, Type.EmptyTypes, null), nameof(PrefixExtGamePadState), 800, null, 400);
+                        patchedNow += ApplyExtPatch(sInputType.GetProperty("ControllerState", any)?.GetGetMethod(true), nameof(PrefixExtGamePadState), 800, null, 400);
+                        patchedNow += ApplyExtPatch(sInputType.GetMethod("GetMouseState", any, null, Type.EmptyTypes, null), nameof(PrefixExtMouseState), 800, null, 400);
+                        patchedNow += ApplyExtPatch(sInputType.GetProperty("MouseState", any)?.GetGetMethod(true), nameof(PrefixExtMouseState), 800, null, 400);
                         patchedNow += ApplyExtPatch(sInputType.GetMethod("GetKeyboardState", any, null, Type.EmptyTypes, null), null, 400, nameof(PostfixExtKeyboardState), 200);
                         patchedNow += ApplyExtPatch(sInputType.GetProperty("KeyboardState", any)?.GetGetMethod(true), null, 400, nameof(PostfixExtKeyboardState), 200);
                     }
@@ -840,26 +1040,29 @@ namespace SDVMobileControls
                     _extHarmonyPatchesInstalled = true;
                 }
 
-                // 5. Patch SDViOSTouchControls.TouchDelegatingModHooks.OnGame1_UpdateControlInput so it yields cleanly to real external devices!
-                foreach (Assembly asm in AppDomain.CurrentDomain.GetAssemblies())
+                // 5. Patch SDViOSTouchControls.TouchDelegatingModHooks.OnGame1_UpdateControlInput ONLY if Zero-Harmony GardenDelegatingModHooks is not yet spliced in!
+                if (!_gardenHooksInstalled)
                 {
-                    Type thType = null;
-                    try { thType = asm.GetType("SDViOSTouchControls.TouchDelegatingModHooks", throwOnError: false); }
-                    catch { continue; }
-                    if (thType == null || PatchedTouchHookTypes.Contains(thType)) continue;
-
-                    MethodInfo mUpdCtrl = thType.GetMethod("OnGame1_UpdateControlInput", any);
-                    if (mUpdCtrl != null)
+                    foreach (Assembly asm in AppDomain.CurrentDomain.GetAssemblies())
                     {
-                        if (_delegatingParentProp == null && thType.BaseType != null)
+                        Type thType = null;
+                        try { thType = asm.GetType("SDViOSTouchControls.TouchDelegatingModHooks", throwOnError: false); }
+                        catch { continue; }
+                        if (thType == null || PatchedTouchHookTypes.Contains(thType)) continue;
+
+                        MethodInfo mUpdCtrl = thType.GetMethod("OnGame1_UpdateControlInput", any);
+                        if (mUpdCtrl != null)
                         {
-                            _delegatingParentProp = thType.BaseType.GetProperty("Parent", any);
-                            _modHooksUpdateControlInput = _delegatingParentProp?.PropertyType.GetMethod("OnGame1_UpdateControlInput", any);
-                        }
-                        if (ApplyExtPatch(mUpdCtrl, nameof(PrefixExtUpdateControlInput), 600, null, 400) > 0)
-                        {
-                            PatchedTouchHookTypes.Add(thType);
-                            patchedNow++;
+                            if (_delegatingParentProp == null && thType.BaseType != null)
+                            {
+                                _delegatingParentProp = thType.BaseType.GetProperty("Parent", any);
+                                _modHooksUpdateControlInput = _delegatingParentProp?.PropertyType.GetMethod("OnGame1_UpdateControlInput", any);
+                            }
+                            if (ApplyExtPatch(mUpdCtrl, nameof(PrefixExtUpdateControlInput), 800, null, 400) > 0)
+                            {
+                                PatchedTouchHookTypes.Add(thType);
+                                patchedNow++;
+                            }
                         }
                     }
                 }
@@ -933,30 +1136,41 @@ namespace SDVMobileControls
 
             ext.ApplyStardewGamepadMode();
 
-            if (ext.HasPhysicalKeysPressed)
-                keyboardState = ext.MergeKeyboardState(keyboardState);
-
             if (ext.ShouldOverrideMouse)
                 mouseState = ext.CurrentMouseState;
 
             if (ext.IsPhysicalGamepadActive)
             {
-                gamePadState = ext.CurrentGamePadState;
+                ext.EnsureValidLocalMultiplayerWindow();
+                // Never allow stale touch-simulated WASD keys from TouchVirtualPad to leak
+                // into Game1.UpdateControlInput while a physical controller is driving movement!
+                keyboardState = ext.BuildPhysicalKeyboardState();
+                // When ExternalInputBridge is directly steering the free gameplay cursor with the right stick,
+                // strip ThumbSticks.Right from the state passed into Game1.<UpdateControlInput>b__0 so Stardew
+                // never double-moves the cursor or teleports it via localMultiplayerWindow/lastMousePositionBeforeFade!
+                gamePadState = ext.IsRightStickSteeringGameplayCursor
+                    ? ExternalInputBridge.StripRightStick(ext.CurrentGamePadState)
+                    : ext.CurrentGamePadState;
                 Game1.lastCursorMotionWasMouse = false;
-                // Show cursor in menus/title when gamepad snaps cursor, or during gameplay when right stick steers cursor
-                if (Game1.activeClickableMenu != null || gamePadState.ThumbSticks.Right.LengthSquared() > 0.04f)
+                // Keep cursor visible in menus AND throughout the 4-second fade window after releasing R-stick
+                // so players can comfortably hover and read UI Info Suite 2 tooltips!
+                if (Game1.activeClickableMenu != null || Game1.timerUntilMouseFade > 0 || ext.IsRightStickSteeringGameplayCursor)
                     Game1.wasMouseVisibleThisFrame = true;
                 else
                     Game1.wasMouseVisibleThisFrame = false;
             }
             else if (ext.IsExternalMouseActive)
             {
+                if (ext.HasPhysicalKeysPressed)
+                    keyboardState = ext.MergeKeyboardState(keyboardState);
                 gamePadState = default;
                 Game1.lastCursorMotionWasMouse = true;
                 Game1.wasMouseVisibleThisFrame = true;
             }
             else
             {
+                if (ext.HasPhysicalKeysPressed)
+                    keyboardState = ext.MergeKeyboardState(keyboardState);
                 gamePadState = default;
             }
 
@@ -977,6 +1191,223 @@ namespace SDVMobileControls
 
             action?.Invoke();
             return false;
+        }
+
+        private static void EnsureGardenModHooksInstalled(string phase)
+        {
+            if (_gardenHooksInstalled)
+                return;
+            try
+            {
+                const BindingFlags any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+                if (_game1HooksField == null)
+                    _game1HooksField = typeof(Game1).GetField("hooks", any);
+                if (_game1HooksField == null)
+                    return;
+
+                ModHooks topHooks = _game1HooksField.GetValue(null) as ModHooks;
+                if (topHooks == null)
+                    return;
+
+                // Walk DelegatingModHooks chain: ONLY splice inside TouchDelegatingModHooks.Parent once
+                // SDViOSTouchControls has wrapped Game1.hooks (prevents EnsureModHooksWrapped from re-wrapping!).
+                FieldInfo parentBackingField = typeof(DelegatingModHooks).GetField("<Parent>k__BackingField", any);
+                if (parentBackingField == null)
+                    return;
+
+                ModHooks cur = topHooks;
+                DelegatingModHooks touchWrapper = null;
+                int guard = 0;
+                while (cur is DelegatingModHooks dmh && guard++ < 16)
+                {
+                    if (cur is GardenDelegatingModHooks)
+                    {
+                        _gardenHooksInstalled = true;
+                        return;
+                    }
+                    if (string.Equals(cur.GetType().FullName, "SDViOSTouchControls.TouchDelegatingModHooks", StringComparison.Ordinal))
+                        touchWrapper = dmh;
+                    cur = dmh.Parent;
+                }
+
+                if (touchWrapper != null && touchWrapper.Parent != null)
+                {
+                    var gardenHooks = new GardenDelegatingModHooks(touchWrapper.Parent);
+                    parentBackingField.SetValue(touchWrapper, gardenHooks);
+                    _gardenHooksInstalled = true;
+                    _monitor?.Log($"[{phase}] Installed Zero-Harmony GardenDelegatingModHooks inside TouchDelegatingModHooks.Parent (ExternalInput + Mailbox Guard active on 0% JIT!).", LogLevel.Info);
+                }
+            }
+            catch (Exception ex)
+            {
+                _monitor?.Log($"[{phase}] GardenDelegatingModHooks install skipped: {ex.Message}", LogLevel.Trace);
+            }
+        }
+
+        internal static void ApplyExternalControlInputStates(ExternalInputBridge ext, ref KeyboardState keyboardState, ref MouseState mouseState, ref GamePadState gamePadState)
+        {
+            ext.ApplyStardewGamepadMode();
+
+            if (ext.ShouldOverrideMouse)
+                mouseState = ext.CurrentMouseState;
+
+            if (ext.IsPhysicalGamepadActive)
+            {
+                ext.EnsureValidLocalMultiplayerWindow();
+                keyboardState = ext.BuildPhysicalKeyboardState();
+                gamePadState = ext.IsRightStickSteeringGameplayCursor
+                    ? ExternalInputBridge.StripRightStick(ext.CurrentGamePadState)
+                    : ext.CurrentGamePadState;
+                Game1.lastCursorMotionWasMouse = false;
+                if (Game1.activeClickableMenu != null || Game1.timerUntilMouseFade > 0 || ext.IsRightStickSteeringGameplayCursor)
+                    Game1.wasMouseVisibleThisFrame = true;
+                else
+                    Game1.wasMouseVisibleThisFrame = false;
+            }
+            else if (ext.IsExternalMouseActive)
+            {
+                if (ext.HasPhysicalKeysPressed)
+                    keyboardState = ext.MergeKeyboardState(keyboardState);
+                gamePadState = default;
+                Game1.lastCursorMotionWasMouse = true;
+                Game1.wasMouseVisibleThisFrame = true;
+            }
+            else
+            {
+                if (ext.HasPhysicalKeysPressed)
+                    keyboardState = ext.MergeKeyboardState(keyboardState);
+                gamePadState = default;
+            }
+        }
+
+        private static bool TryShowMailFrameworkModLetter(string topMailId)
+        {
+            if (string.IsNullOrEmpty(topMailId))
+                return false;
+            try
+            {
+                if (!_mfmResolved)
+                {
+                    _mfmResolved = true;
+                    const BindingFlags statAny = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+                    foreach (Assembly asm in AppDomain.CurrentDomain.GetAssemblies())
+                    {
+                        if (!string.Equals(asm.GetName().Name, "MailFrameworkMod", StringComparison.OrdinalIgnoreCase))
+                            continue;
+                        Type ctrl = asm.GetType("MailFrameworkMod.MailController", throwOnError: false);
+                        if (ctrl != null)
+                        {
+                            _mfmShowLetterMethod = ctrl.GetMethod("ShowLetter", statAny, null, Type.EmptyTypes, null)
+                                                ?? ctrl.GetMethod("mailbox", statAny, null, Type.EmptyTypes, null);
+                        }
+                        break;
+                    }
+                }
+                if (_mfmShowLetterMethod == null)
+                    return false;
+
+                // Only invoke MailFrameworkMod when vanilla Data/mail does NOT contain topMailId
+                var mailDict = DataLoader.Mail(Game1.content);
+                if (mailDict != null && mailDict.TryGetValue(topMailId, out string vText) && !string.IsNullOrEmpty(vText))
+                    return false;
+                if (topMailId.StartsWith("passedOut", StringComparison.Ordinal))
+                    return false;
+
+                object ret = _mfmShowLetterMethod.Invoke(null, null);
+                if ((ret is bool b && b) || Game1.activeClickableMenu is LetterViewerMenu)
+                {
+                    _monitor?.Log($"[MailGuard] Opened MailFrameworkMod letter '{topMailId}' via Zero-Harmony bridge.", LogLevel.Info);
+                    return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private static bool IsPlayerMailboxTile(GameLocation loc, int tx, int ty)
+        {
+            if (loc == null) return false;
+            try
+            {
+                if (loc is Farm farm)
+                {
+                    Point mainMb = farm.GetMainMailboxPosition();
+                    if (mainMb.X == tx && (mainMb.Y == ty || mainMb.Y - 1 == ty))
+                        return true;
+                }
+                if (loc.buildings != null)
+                {
+                    for (int i = 0; i < loc.buildings.Count; i++)
+                    {
+                        var b = loc.buildings[i];
+                        if (b == null) continue;
+                        Point bMb = b.getMailboxPosition();
+                        if (bMb.X == tx && (bMb.Y == ty || bMb.Y - 1 == ty))
+                            return true;
+                    }
+                }
+                string prop = loc.doesTileHaveProperty(tx, ty, "Action", "Buildings");
+                if (!string.IsNullOrEmpty(prop) && prop.StartsWith("Mailbox", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            catch { }
+            return false;
+        }
+
+        private sealed class GardenDelegatingModHooks : DelegatingModHooks
+        {
+            public GardenDelegatingModHooks(ModHooks parent) : base(parent) { }
+
+            public override void OnGame1_UpdateControlInput(ref KeyboardState keyboardState, ref MouseState mouseState, ref GamePadState gamePadState, Action action)
+            {
+                var ext = ExternalInput;
+                if (ext != null && ext.IsExternalDeviceActive)
+                {
+                    ApplyExternalControlInputStates(ext, ref keyboardState, ref mouseState, ref gamePadState);
+                }
+                base.OnGame1_UpdateControlInput(ref keyboardState, ref mouseState, ref gamePadState, action);
+            }
+
+            public override bool OnGameLocation_CheckAction(GameLocation location, xTile.Dimensions.Location tileLocation, xTile.Dimensions.Rectangle viewport, Farmer who, Func<bool> action)
+            {
+                int mbBefore = Game1.mailbox?.Count ?? 0;
+                string topMailBefore = (mbBefore > 0 && Game1.mailbox != null) ? Game1.mailbox[0] : null;
+                bool isMbTile = mbBefore > 0 && IsPlayerMailboxTile(location, tileLocation.X, tileLocation.Y);
+
+                // Zero-Harmony bridge for MailFrameworkMod on 0% JIT iOS
+                if (isMbTile && !string.IsNullOrEmpty(topMailBefore) && TryShowMailFrameworkModLetter(topMailBefore))
+                {
+                    ResetMailboxWatchdogSnapshot();
+                    return true;
+                }
+
+                bool result = base.OnGameLocation_CheckAction(location, tileLocation, viewport, who, action);
+
+                int mbAfter = Game1.mailbox?.Count ?? 0;
+                if (mbBefore > 0 && mbAfter < mbBefore)
+                {
+                    bool hasViewer = Game1.activeClickableMenu is LetterViewerMenu;
+                    _monitor?.Log($"[MailDiag:Open] Popped '{topMailBefore}' -> viewer={hasViewer}, remaining={mbAfter}", LogLevel.Info);
+
+                    // If topMailBefore was an empty/flag-only entry that had no text in Data/mail,
+                    // automatically advance through remaining valid letters in Game1.mailbox instead of stranding the player!
+                    int safety = 0;
+                    while (!hasViewer && location != null && Game1.mailbox != null && Game1.mailbox.Count > 0 && safety++ < 8)
+                    {
+                        string nextId = Game1.mailbox[0];
+                        if (TryShowMailFrameworkModLetter(nextId))
+                        {
+                            hasViewer = true;
+                            break;
+                        }
+                        location.mailbox();
+                        hasViewer = Game1.activeClickableMenu is LetterViewerMenu;
+                    }
+                    ResetMailboxWatchdogSnapshot();
+                }
+
+                return result;
+            }
         }
 
         private static bool ShouldBlockPrematureFishingRelease(FishingRod rod, bool logRelease)
@@ -1306,6 +1737,33 @@ namespace SDVMobileControls
             catch { }
         }
 
+        private static bool PrefixSoundBankExists(SoundBank __instance, string __0, ref bool __result)
+        {
+            if (__instance == null || string.IsNullOrEmpty(__0))
+            {
+                __result = false;
+                return false;
+            }
+            try
+            {
+                var f = _soundBankSoundsField ?? (_soundBankSoundsField = typeof(SoundBank).GetField("_sounds", BindingFlags.Instance | BindingFlags.NonPublic));
+                if (f?.GetValue(__instance) is System.Collections.IDictionary dict)
+                {
+                    __result = dict.Contains(__0);
+                    return false;
+                }
+            }
+            catch { }
+            __result = true;
+            return false;
+        }
+
+        private static bool PrefixSoundBankGetCueDefinition(string __0, ref CueDefinition __result)
+        {
+            __result = new CueDefinition { name = __0 ?? string.Empty };
+            return false;
+        }
+
         private static void PostfixDidPlayerJustRightClick(ref bool __result)
         {
             if (SynthesizingTapAction)
@@ -1335,16 +1793,46 @@ namespace SDVMobileControls
 
             try
             {
-                ExternalInput?.PollFrame();
                 Engine.TrackPadReference(pad);
+                Engine.PollPendingEditLayoutFlag();
+                bool blockExt = Engine.IsUiOverlayBlockingExternalInput(pad);
+                if (ExternalInput != null)
+                {
+                    ExternalInput.SetManagedSuppressed(blockExt);
+                    ExternalInput.PollFrame();
+                }
+
                 if (Engine.ShouldInterceptGameplay(pad))
                 {
                     Engine.UpdateGameplay(pad, gameTime);
+                    ExternalInput?.ApplyStardewGamepadMode();
                     return true;
                 }
 
                 if (Engine.UpdateInMenu(pad, gameTime))
+                {
+                    ExternalInput?.ApplyStardewGamepadMode();
                     return true;
+                }
+
+                // Even when VirtualGamepad UI mode is selected (IsMobileModeActive == false) or
+                // during dialogue/cutscenes, if an external controller/keyboard/mouse is active
+                // with 0 direct screen touches, NEVER fall through to SDViOSTouchControls.TouchVirtualPad.Update()
+                // -> ForwardInputToGame() (which calls Game1.player.Halt() every frame when LeftStick==Zero,
+                // resetting the farmer's running animation back to frame 0 every tick!).
+                if (ExternalInput != null && ExternalInput.IsExternalDeviceActive && !blockExt &&
+                    !Engine.IsLegacyFullScreenModalOpen(pad) && !Engine.IsQuickSaveReloading(pad))
+                {
+                    TouchCollection fallbackTouches = TouchPanel.GetState();
+                    int activeTouchCnt = MobileControlsEngine.CountActiveTouches(fallbackTouches);
+                    if (activeTouchCnt == 0)
+                    {
+                        Engine.ResetVirtualPadForExternal(pad);
+                        ExternalInput.ApplyStardewGamepadMode();
+                        return true;
+                    }
+                    ExternalInput.NotifyDirectTouch(activeTouchCnt);
+                }
 
                 return false;
             }
@@ -1371,6 +1859,10 @@ namespace SDVMobileControls
                 if (Engine.ShouldSuppressOriginalDraw(pad))
                 {
                     Engine.DrawMenuContextOverlay(pad, spriteBatch);
+                    return true;
+                }
+                if (Engine.ShouldAutoHideLegacyVirtualGamepad(pad))
+                {
                     return true;
                 }
                 return false;

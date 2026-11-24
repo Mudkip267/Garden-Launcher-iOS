@@ -1930,14 +1930,62 @@ if ($mCapInit -and $fGlMaj -and $mSetNpot) {
     Write-Host "  iOS DynamicShader Fix #3 (MonoGame): Enabled SupportsNonPowerOfTwo for OpenGL ES 3.0+!"
 }
 
-# 3.10 Fix SVE & Mod Data/AudioChanges NullReferenceException (MonoGame iOS SoundBank stub):
-# SoundBank.Exists(string) returned true while SoundBank.GetCueDefinition(string) returned null,
-# causing StardewValley.Audio.AudioCueModificationManager.ApplyCueModification to throw NullReferenceException!
+# 3.10 Fix BOTH vanilla/modded audio playback AND SVE Data/AudioChanges NullReferenceException:
+# - SoundBank.Exists(string) must check _sounds.TryGetValue(name, out _) instead of returning hardcoded false (which mutes ALL game audio!).
+# - SoundBank.GetCueDefinition(string) must return a non-null CueDefinition { name = name } so AudioCueModificationManager never throws NRE!
 $tSoundBank = $mgMod.GetType("Microsoft.Xna.Framework.Audio.SoundBank")
-$mSbExists = if ($tSoundBank) { $tSoundBank.Methods | Where-Object { $_.Name -eq "Exists" -and $_.Parameters.Count -eq 1 } | Select-Object -First 1 } else { $null }
-if ($mSbExists -and $mSbExists.HasBody -and $mSbExists.Body.Instructions.Count -eq 2 -and $mSbExists.Body.Instructions[0].OpCode.Name -eq "ldc.i4.1") {
-    $mSbExists.Body.Instructions[0].OpCode = [Mono.Cecil.Cil.OpCodes]::Ldc_I4_0
-    Write-Host "  iOS AudioChanges Fix (MonoGame): SoundBank.Exists now returns false when GetCueDefinition is stubbed (fixes SVE Data/AudioChanges NRE)!"
+if ($tSoundBank) {
+    $fSbSounds = $tSoundBank.Fields | Where-Object { $_.Name -eq "_sounds" } | Select-Object -First 1
+    $mSbPlayCue = $tSoundBank.Methods | Where-Object { $_.Name -eq "PlayCue" -and $_.Parameters.Count -eq 1 } | Select-Object -First 1
+    $mSbExists = $tSoundBank.Methods | Where-Object { $_.Name -eq "Exists" -and $_.Parameters.Count -eq 1 } | Select-Object -First 1
+    if ($fSbSounds -and $mSbPlayCue -and $mSbExists -and $mSbExists.HasBody) {
+        $mIsNullOrEmpty = ($mSbPlayCue.Body.Instructions | Where-Object { $_.Operand -and $_.Operand.ToString().Contains("IsNullOrEmpty") } | Select-Object -First 1).Operand
+        $mTryGetValue = ($mSbPlayCue.Body.Instructions | Where-Object { $_.Operand -and $_.Operand.ToString().Contains("TryGetValue") -and $_.Operand.ToString().Contains("XactSound") } | Select-Object -First 1).Operand
+        if ($mIsNullOrEmpty -and $mTryGetValue) {
+            $tXactArr = ($fSbSounds.FieldType -as [Mono.Cecil.GenericInstanceType]).GenericArguments[1]
+            $mSbExists.Body.Variables.Clear()
+            $mSbExists.Body.ExceptionHandlers.Clear()
+            $mSbExists.Body.Instructions.Clear()
+            $mSbExists.Body.InitLocals = $true
+            $vDummy = New-Object Mono.Cecil.Cil.VariableDefinition($tXactArr)
+            $mSbExists.Body.Variables.Add($vDummy)
+            $ilSb = $mSbExists.Body.GetILProcessor()
+            $lblFalse = $ilSb.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0)
+            $ilSb.Append($ilSb.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
+            $ilSb.Append($ilSb.Create([Mono.Cecil.Cil.OpCodes]::Call, [Mono.Cecil.MethodReference]$mIsNullOrEmpty))
+            $ilSb.Append($ilSb.Create([Mono.Cecil.Cil.OpCodes]::Brtrue_S, $lblFalse))
+            $ilSb.Append($ilSb.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+            $ilSb.Append($ilSb.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fSbSounds))
+            $ilSb.Append($ilSb.Create([Mono.Cecil.Cil.OpCodes]::Brfalse_S, $lblFalse))
+            $ilSb.Append($ilSb.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+            $ilSb.Append($ilSb.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fSbSounds))
+            $ilSb.Append($ilSb.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
+            $ilSb.Append($ilSb.Create([Mono.Cecil.Cil.OpCodes]::Ldloca_S, $vDummy))
+            $ilSb.Append($ilSb.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, [Mono.Cecil.MethodReference]$mTryGetValue))
+            $ilSb.Append($ilSb.Create([Mono.Cecil.Cil.OpCodes]::Ret))
+            $ilSb.Append($lblFalse)
+            $ilSb.Append($ilSb.Create([Mono.Cecil.Cil.OpCodes]::Ret))
+            Write-Host "  iOS Audio Fix (MonoGame): SoundBank.Exists now checks _sounds.TryGetValue (full audio + music restored)!"
+        }
+    }
+    $tCueDef = $mgMod.GetType("Microsoft.Xna.Framework.Audio.CueDefinition")
+    $mSbGetCueDef = $tSoundBank.Methods | Where-Object { $_.Name -eq "GetCueDefinition" -and $_.Parameters.Count -eq 1 } | Select-Object -First 1
+    if ($tCueDef -and $mSbGetCueDef -and $mSbGetCueDef.HasBody) {
+        $mCdCtor = $tCueDef.Methods | Where-Object { $_.Name -eq ".ctor" -and $_.Parameters.Count -eq 0 } | Select-Object -First 1
+        $fCdName = $tCueDef.Fields | Where-Object { $_.Name -eq "name" } | Select-Object -First 1
+        if ($mCdCtor -and $fCdName) {
+            $mSbGetCueDef.Body.Variables.Clear()
+            $mSbGetCueDef.Body.ExceptionHandlers.Clear()
+            $mSbGetCueDef.Body.Instructions.Clear()
+            $ilCd = $mSbGetCueDef.Body.GetILProcessor()
+            $ilCd.Append($ilCd.Create([Mono.Cecil.Cil.OpCodes]::Newobj, $mCdCtor))
+            $ilCd.Append($ilCd.Create([Mono.Cecil.Cil.OpCodes]::Dup))
+            $ilCd.Append($ilCd.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
+            $ilCd.Append($ilCd.Create([Mono.Cecil.Cil.OpCodes]::Stfld, $fCdName))
+            $ilCd.Append($ilCd.Create([Mono.Cecil.Cil.OpCodes]::Ret))
+            Write-Host "  iOS AudioChanges Fix (MonoGame): SoundBank.GetCueDefinition now returns valid CueDefinition (fixes SVE NRE without muting audio)!"
+        }
+    }
 }
 
 $mgAsm.Write($outMG)

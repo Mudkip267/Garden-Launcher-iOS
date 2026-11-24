@@ -23,10 +23,23 @@ namespace SDVMobileControls
             typeof(ShopMenu).GetMethod("tryToPurchaseItem", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
         private static readonly FieldInfo ShopIsStorageField =
             typeof(ShopMenu).GetField("_isStorageShop", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly FieldInfo ShopScrollRunnerField =
+            typeof(ShopMenu).GetField("scrollBarRunner", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        private static readonly MethodInfo ShopSetScrollBarMethod =
+            typeof(ShopMenu).GetMethod("setScrollBarToCurrentIndex", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
         private static readonly MethodInfo CraftClickRecipeMethod =
             typeof(CraftingPage).GetMethod("clickCraftingRecipe", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
 
+        internal enum ChestTapMode { FullStack = 0, SingleOne = 1, HalfStack = 2 }
+
         private enum PopupKind { None = 0, ShopBuy = 1, ShopSell = 2, ChestSplit = 3, BagSplit = 4, Craft = 5 }
+
+        public ChestTapMode TapMode { get; set; } = ChestTapMode.FullStack;
+
+        public void ToggleTapMode(ChestTapMode mode)
+        {
+            TapMode = (TapMode == mode) ? ChestTapMode.FullStack : mode;
+        }
 
         // Active Popup state
         private PopupKind _popupKind = PopupKind.None;
@@ -54,6 +67,7 @@ namespace SDVMobileControls
         private Rectangle _popPanel;
         private Rectangle _popCloseX;
         private Rectangle _popSliderTrack;
+        private int _popKnobW = 44;
         private Rectangle _popBtnM10;
         private Rectangle _popBtnM1;
         private Rectangle _popBtnP1;
@@ -67,16 +81,22 @@ namespace SDVMobileControls
         private int _popHoldDelta;
         private double _popHoldStartSec;
         private double _popHoldLastStepSec;
+        private double _popSliderLastTickSec;
 
-        // Touch Drag-and-Drop & Short-Tap / Long-Press state
+        // Touch Drag-and-Drop & Short-Tap / Long-Press / Smooth Shop Scroll state
         private int _touchId = -1;
         private Vector2 _touchStartVp;
         private Vector2 _touchCurVp;
         private double _touchStartSec;
         private bool _isDragging;
         private bool _isShopScrolling;
+        private bool _isShopThumbDragging;
+        private bool _shopSwipeInCatalog;
         private float _shopScrollLastY;
         private float _shopScrollAccum;
+        private float _shopScrollVel;
+        private float _shopCachedRowPitch = 96f;
+        private double _shopScrollLastSfxSec;
         private IClickableMenu _trackedMenu;
 
         // Dragged & Tap-Selected slot info (NEVER uses Game1.player.CursorSlotItem!)
@@ -96,6 +116,8 @@ namespace SDVMobileControls
             ClosePopup();
             ResetTouch();
             ClearSelection();
+            _shopScrollVel = 0f;
+            TapMode = ChestTapMode.FullStack;
         }
 
         private void ClearSelection()
@@ -226,10 +248,43 @@ namespace SDVMobileControls
             _touchId = -1;
             _isDragging = false;
             _isShopScrolling = false;
+            _isShopThumbDragging = false;
+            _shopSwipeInCatalog = false;
             _dragSrcInv = null;
             _dragSrcSlot = -1;
             _dragItem = null;
             _tappedShopBtnIdx = -1;
+        }
+
+        private static bool TryFindTouchById(TouchCollection touches, int id, out TouchLocation found)
+        {
+            for (int i = 0; i < touches.Count; i++)
+            {
+                if (touches[i].Id == id)
+                {
+                    found = touches[i];
+                    return true;
+                }
+            }
+            found = default;
+            return false;
+        }
+
+        private static bool TryPickPrimaryTouch(TouchCollection touches, int trackedId, out TouchLocation chosen)
+        {
+            if (trackedId >= 0)
+                return TryFindTouchById(touches, trackedId, out chosen);
+
+            for (int i = 0; i < touches.Count; i++)
+            {
+                if (touches[i].State == TouchLocationState.Pressed)
+                {
+                    chosen = touches[i];
+                    return true;
+                }
+            }
+            chosen = default;
+            return false;
         }
 
         public bool Update(
@@ -237,6 +292,7 @@ namespace SDVMobileControls
             TouchCollection touches,
             Func<Vector2, Vector2> rawToVp,
             Func<Vector2, Point> vpToUi,
+            Func<Point, Vector2> uiToVp,
             int vpW, int vpH,
             double nowSec)
         {
@@ -252,6 +308,8 @@ namespace SDVMobileControls
                 _trackedMenu = activeMenu;
                 ResetTouch();
                 ClearSelection();
+                _shopScrollVel = 0f;
+                TapMode = ChestTapMode.FullStack;
             }
 
             // Consume lingering touch release after popup dismiss/confirm
@@ -287,7 +345,14 @@ namespace SDVMobileControls
             {
                 ResetTouch();
                 ClearSelection();
+                _shopScrollVel = 0f;
                 return false;
+            }
+
+            // Smooth iOS-style momentum scrolling for Shop catalog when no finger is dragging
+            if (shop != null && _touchId < 0 && Math.Abs(_shopScrollVel) > 0.5f)
+            {
+                UpdateShopMomentum(shop, uiToVp, vpH);
             }
 
             if (touches.Count == 0)
@@ -295,58 +360,242 @@ namespace SDVMobileControls
                 ResetTouch();
                 return false;
             }
-            if (touches.Count > 1)
+
+            // Track active touch ID cleanly across multi-touch so stray palm brushes NEVER drop drags or scrolls!
+            if (!TryPickPrimaryTouch(touches, _touchId, out TouchLocation tl))
             {
-                ResetTouch();
+                if (_touchId >= 0)
+                    ResetTouch();
                 return false;
             }
 
-            TouchLocation tl = touches[0];
             Vector2 vp = rawToVp(tl.Position);
             Point uiPt = vpToUi(vp);
 
             if (shop != null)
-                return UpdateShopTouch(shop, tl, vp, uiPt, vpH);
+                return UpdateShopTouch(shop, tl, vp, uiPt, uiToVp, vpH, nowSec);
 
             if (grab != null)
-                return UpdateInventoryTouch(grab, grab.inventory, grab.ItemsToGrabMenu, grab.trashCan, null, isChestMenu: true, tl, vp, uiPt, nowSec);
+                return UpdateInventoryTouch(grab, grab.inventory, grab.ItemsToGrabMenu, grab.trashCan, null, isChestMenu: true, tl, vp, uiPt, vpH, nowSec);
 
             if (invPage != null)
-                return UpdateInventoryTouch(invPage, invPage.inventory, null, invPage.trashCan, invPage.equipmentIcons, isChestMenu: false, tl, vp, uiPt, nowSec);
+                return UpdateInventoryTouch(invPage, invPage.inventory, null, invPage.trashCan, invPage.equipmentIcons, isChestMenu: false, tl, vp, uiPt, vpH, nowSec);
 
             return false;
         }
 
         // =========================================================================
-        // A. MOBILE SHOPPING (Pixel Quantity Slider -> Direct into Backpack!)
+        // A. MOBILE SHOPPING (Silky Scrollbar + Momentum Swipe + Precision Slider!)
         // =========================================================================
-        private bool UpdateShopTouch(ShopMenu shop, TouchLocation tl, Vector2 vp, Point uiPt, int vpH)
+        private static bool TryGetShopScrollTrackUi(ShopMenu shop, out Rectangle trackUi, out int maxIdx)
+        {
+            trackUi = Rectangle.Empty;
+            maxIdx = 0;
+            if (shop == null || shop.forSale == null || shop.forSaleButtons == null)
+                return false;
+
+            int visible = Math.Max(1, shop.forSaleButtons.Count);
+            maxIdx = Math.Max(0, shop.forSale.Count - visible);
+            if (maxIdx <= 0)
+                return false;
+
+            try
+            {
+                if (ShopScrollRunnerField != null && ShopScrollRunnerField.GetValue(shop) is Rectangle runner && runner.Height > 8)
+                {
+                    trackUi = runner;
+                }
+            }
+            catch { }
+
+            if (trackUi.IsEmpty && shop.upArrow != null && shop.downArrow != null)
+            {
+                int top = shop.upArrow.bounds.Bottom + 4;
+                int bot = shop.downArrow.bounds.Top - 4;
+                if (bot > top + 8)
+                    trackUi = new Rectangle(shop.upArrow.bounds.X, top, Math.Max(24, shop.upArrow.bounds.Width), bot - top);
+            }
+
+            if (shop.scrollBar != null && shop.scrollBar.bounds.Width > 0 && shop.scrollBar.bounds.Height > 0)
+            {
+                trackUi = trackUi.IsEmpty ? shop.scrollBar.bounds : Rectangle.Union(trackUi, shop.scrollBar.bounds);
+            }
+
+            return !trackUi.IsEmpty && trackUi.Height > 8;
+        }
+
+        private static bool IsOnShopChromeButton(ShopMenu shop, Point uiPt)
+        {
+            if (shop == null) return false;
+            if (shop.upArrow != null && shop.upArrow.containsPoint(uiPt.X, uiPt.Y)) return true;
+            if (shop.downArrow != null && shop.downArrow.containsPoint(uiPt.X, uiPt.Y)) return true;
+            if (shop.upperRightCloseButton != null && shop.upperRightCloseButton.containsPoint(uiPt.X, uiPt.Y)) return true;
+            if (shop.tabButtons != null)
+            {
+                for (int i = 0; i < shop.tabButtons.Count; i++)
+                {
+                    if (shop.tabButtons[i] != null && shop.tabButtons[i].containsPoint(uiPt.X, uiPt.Y))
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        private static float ComputeShopRowPitchVp(ShopMenu shop, Func<Point, Vector2> uiToVp, int vpH)
+        {
+            if (shop?.forSaleButtons != null && shop.forSaleButtons.Count > 0 && uiToVp != null)
+            {
+                Rectangle b0 = shop.forSaleButtons[0].bounds;
+                if (shop.forSaleButtons.Count >= 2)
+                {
+                    int dyUi = shop.forSaleButtons[1].bounds.Y - b0.Y;
+                    if (dyUi > 16)
+                    {
+                        Vector2 p0 = uiToVp(new Point(b0.X, b0.Y));
+                        Vector2 p1 = uiToVp(new Point(b0.X, b0.Y + dyUi));
+                        float pitch = Math.Abs(p1.Y - p0.Y);
+                        if (pitch >= 24f)
+                            return Math.Clamp(pitch, 38f, vpH * 0.28f);
+                    }
+                }
+                if (b0.Height > 16)
+                {
+                    Vector2 p0 = uiToVp(new Point(b0.X, b0.Y));
+                    Vector2 p1 = uiToVp(new Point(b0.X, b0.Bottom));
+                    float pitch = Math.Abs(p1.Y - p0.Y);
+                    if (pitch >= 24f)
+                        return Math.Clamp(pitch, 38f, vpH * 0.28f);
+                }
+            }
+            return Math.Max(48f, vpH * 0.115f);
+        }
+
+        private void ApplyShopScrollFromThumbY(ShopMenu shop, int uiY, Rectangle trackUi, int maxIdx, double nowSec)
+        {
+            if (shop == null || maxIdx <= 0 || trackUi.Height <= 4) return;
+            int thumbH = (shop.scrollBar != null && shop.scrollBar.bounds.Height > 0) ? shop.scrollBar.bounds.Height : 40;
+            float minY = trackUi.Top + thumbH * 0.5f;
+            float maxY = trackUi.Bottom - thumbH * 0.5f;
+            float frac = Math.Clamp((uiY - minY) / Math.Max(1f, maxY - minY), 0f, 1f);
+            int targetIdx = Math.Clamp((int)Math.Round(frac * maxIdx), 0, maxIdx);
+
+            if (targetIdx != shop.currentItemIndex)
+            {
+                shop.currentItemIndex = targetIdx;
+                try { ShopSetScrollBarMethod?.Invoke(shop, null); } catch { }
+                if ((nowSec - _shopScrollLastSfxSec) >= 0.055)
+                {
+                    _shopScrollLastSfxSec = nowSec;
+                    try { Game1.playSound("shiny4"); } catch { }
+                }
+            }
+        }
+
+        private void ConsumeShopScrollAccum(ShopMenu shop, float rowPitch)
+        {
+            if (shop == null || shop.forSale == null || shop.forSaleButtons == null)
+                return;
+            int maxIdx = Math.Max(0, shop.forSale.Count - Math.Max(1, shop.forSaleButtons.Count));
+            if (maxIdx <= 0)
+            {
+                _shopScrollAccum = 0f;
+                _shopScrollVel = 0f;
+                return;
+            }
+
+            float step = Math.Max(34f, rowPitch * 0.88f);
+            int safety = 0;
+            while (Math.Abs(_shopScrollAccum) >= step && safety++ < 12)
+            {
+                int wheel = _shopScrollAccum > 0 ? 120 : -120;
+                int before = shop.currentItemIndex;
+                _shopScrollAccum -= Math.Sign(_shopScrollAccum) * step;
+                try { shop.receiveScrollWheelAction(wheel); } catch { }
+                if (shop.currentItemIndex == before)
+                {
+                    _shopScrollAccum = 0f;
+                    _shopScrollVel = 0f;
+                    break;
+                }
+            }
+        }
+
+        private void UpdateShopMomentum(ShopMenu shop, Func<Point, Vector2> uiToVp, int vpH)
+        {
+            if (shop == null || _isShopScrolling || _isShopThumbDragging)
+            {
+                _shopScrollVel = 0f;
+                return;
+            }
+            float rowPitch = _shopCachedRowPitch > 24f ? _shopCachedRowPitch : ComputeShopRowPitchVp(shop, uiToVp, vpH);
+            _shopScrollAccum += _shopScrollVel;
+            ConsumeShopScrollAccum(shop, rowPitch);
+            _shopScrollVel *= 0.88f;
+            if (Math.Abs(_shopScrollVel) < 0.5f)
+            {
+                _shopScrollVel = 0f;
+                _shopScrollAccum = 0f;
+            }
+        }
+
+        private bool UpdateShopTouch(ShopMenu shop, TouchLocation tl, Vector2 vp, Point uiPt, Func<Point, Vector2> uiToVp, int vpH, double nowSec)
         {
             if (tl.State == TouchLocationState.Pressed)
             {
                 ResetTouch();
+                _shopScrollVel = 0f;
 
-                if (shop.forSaleButtons != null)
+                // 1. Direct 1:1 touch-friendly Scrollbar Drag (expanded +/-30 UI px horizontal hit zone!)
+                if (TryGetShopScrollTrackUi(shop, out Rectangle trackUi, out int maxIdx))
                 {
-                    for (int i = 0; i < shop.forSaleButtons.Count; i++)
+                    Rectangle expandedTrack = new Rectangle(trackUi.X - 30, trackUi.Y - 14, trackUi.Width + 60, trackUi.Height + 28);
+                    if (expandedTrack.Contains(uiPt) && !IsOnShopChromeButton(shop, uiPt))
                     {
-                        if (shop.forSaleButtons[i].containsPoint(uiPt.X, uiPt.Y))
-                        {
-                            int saleIdx = shop.currentItemIndex + i;
-                            if (saleIdx >= 0 && saleIdx < shop.forSale.Count)
-                            {
-                                _touchId = tl.Id;
-                                _touchStartVp = vp;
-                                _touchCurVp = vp;
-                                _tappedShopBtnIdx = i;
-                                _shopScrollLastY = vp.Y;
-                                _shopScrollAccum = 0f;
-                                return true;
-                            }
-                        }
+                        _touchId = tl.Id;
+                        _touchStartVp = vp;
+                        _touchCurVp = vp;
+                        _isShopThumbDragging = true;
+                        ApplyShopScrollFromThumbY(shop, uiPt.Y, trackUi, maxIdx, nowSec);
+                        return true;
                     }
                 }
 
+                // 2. Catalog item tap OR smooth swipe anywhere across catalog rows (including row gaps!)
+                if (shop.forSaleButtons != null && shop.forSaleButtons.Count > 0 && !IsOnShopChromeButton(shop, uiPt))
+                {
+                    int hitBtn = -1;
+                    Rectangle catalogBounds = Rectangle.Empty;
+                    for (int i = 0; i < shop.forSaleButtons.Count; i++)
+                    {
+                        Rectangle b = shop.forSaleButtons[i].bounds;
+                        if (b.Width <= 0 || b.Height <= 0) continue;
+                        catalogBounds = catalogBounds.IsEmpty ? b : Rectangle.Union(catalogBounds, b);
+                        if (hitBtn < 0 && b.Contains(uiPt))
+                        {
+                            int saleIdx = shop.currentItemIndex + i;
+                            if (saleIdx >= 0 && saleIdx < shop.forSale.Count)
+                                hitBtn = i;
+                        }
+                    }
+
+                    bool inCatalogArea = hitBtn >= 0 || (!catalogBounds.IsEmpty &&
+                        new Rectangle(catalogBounds.X - 8, catalogBounds.Y - 6, catalogBounds.Width + 16, catalogBounds.Height + 12).Contains(uiPt));
+
+                    if (inCatalogArea)
+                    {
+                        _touchId = tl.Id;
+                        _touchStartVp = vp;
+                        _touchCurVp = vp;
+                        _tappedShopBtnIdx = hitBtn;
+                        _shopSwipeInCatalog = true;
+                        _shopScrollLastY = vp.Y;
+                        _shopScrollAccum = 0f;
+                        _shopCachedRowPitch = ComputeShopRowPitchVp(shop, uiToVp, vpH);
+                        return true;
+                    }
+                }
+
+                // 3. Backpack item tap to sell (or store in Dresser)
                 if (!shop.readOnly && shop.inventory != null)
                 {
                     int slot = FindSlotAt(shop.inventory, uiPt);
@@ -375,37 +624,52 @@ namespace SDVMobileControls
             if (tl.State == TouchLocationState.Moved)
             {
                 _touchCurVp = vp;
-                float dist = Vector2.Distance(vp, _touchStartVp);
 
-                if (_tappedShopBtnIdx >= 0 && dist > 18f)
+                if (_isShopThumbDragging)
                 {
-                    _isShopScrolling = true;
+                    if (TryGetShopScrollTrackUi(shop, out Rectangle trackUi, out int maxIdx))
+                        ApplyShopScrollFromThumbY(shop, uiPt.Y, trackUi, maxIdx, nowSec);
+                    return true;
+                }
+
+                if (_shopSwipeInCatalog)
+                {
                     float dy = vp.Y - _shopScrollLastY;
                     _shopScrollLastY = vp.Y;
-                    _shopScrollAccum += dy;
-                    float step = Math.Max(28f, vpH * 0.052f);
-                    while (Math.Abs(_shopScrollAccum) >= step)
+                    float totalDy = Math.Abs(vp.Y - _touchStartVp.Y);
+                    float dragThresh = Math.Max(16f, vpH * 0.018f);
+
+                    if (!_isShopScrolling && totalDy >= dragThresh)
                     {
-                        int wheel = _shopScrollAccum > 0 ? 120 : -120;
-                        _shopScrollAccum -= Math.Sign(_shopScrollAccum) * step;
-                        try { shop.receiveScrollWheelAction(wheel); } catch { }
+                        _isShopScrolling = true;
+                        _shopScrollAccum = vp.Y - _touchStartVp.Y;
+                        _shopScrollVel = dy;
+                        ConsumeShopScrollAccum(shop, _shopCachedRowPitch);
                     }
-                }
-                else
-                {
-                    _shopScrollLastY = vp.Y;
+                    else if (_isShopScrolling)
+                    {
+                        _shopScrollAccum += dy;
+                        if (Math.Abs(dy) >= 0.4f)
+                            _shopScrollVel = _shopScrollVel * 0.42f + dy * 0.58f;
+                        else
+                            _shopScrollVel *= 0.80f;
+                        ConsumeShopScrollAccum(shop, _shopCachedRowPitch);
+                    }
                 }
                 return true;
             }
 
             if (tl.State == TouchLocationState.Released || tl.State == TouchLocationState.Invalid)
             {
-                bool wasScrolling = _isShopScrolling;
+                bool wasScrolling = _isShopScrolling || _isShopThumbDragging;
+                bool keepMomentum = _isShopScrolling && !_isShopThumbDragging;
+                float releaseVel = keepMomentum ? Math.Clamp(_shopScrollVel, -vpH * 0.14f, vpH * 0.14f) : 0f;
                 int btnIdx = _tappedShopBtnIdx;
                 InventoryMenu sellInv = _dragSrcInv;
                 int sellSlot = _dragSrcSlot;
                 Item sellItem = _dragItem;
                 ResetTouch();
+                _shopScrollVel = Math.Abs(releaseVel) >= 2.2f ? releaseVel : 0f;
 
                 if (!wasScrolling)
                 {
@@ -609,11 +873,15 @@ namespace SDVMobileControls
                     catch { }
                 }
 
-                // ALWAYS move purchased item from shop.heldItem STRAIGHT into Backpack!
+                // ALWAYS move purchased item from shop.heldItem STRAIGHT into Backpack (NEVER leave stuck on cursor!)
                 if (shop.heldItem is Item bought)
                 {
                     Item leftover = Game1.player.addItemToInventory(bought);
-                    shop.heldItem = leftover;
+                    if (leftover != null && Game1.player != null)
+                    {
+                        try { Game1.createItemDebris(leftover, Game1.player.getStandingPosition(), Game1.player.FacingDirection); } catch { }
+                    }
+                    shop.heldItem = null;
                 }
                 else
                 {
@@ -674,8 +942,15 @@ namespace SDVMobileControls
             }
             else if (_popupKind == PopupKind.ShopSell && _popupOwnerMenu is ShopMenu sellShop && _popupSrcInv != null && _popupSrcSlot >= 0)
             {
+                if (sellShop.heldItem is Item prevSellHeld && Game1.player != null)
+                {
+                    Item rem = Game1.player.addItemToInventory(prevSellHeld);
+                    if (rem != null)
+                        try { Game1.createItemDebris(rem, Game1.player.getStandingPosition(), Game1.player.FacingDirection); } catch { }
+                    sellShop.heldItem = null;
+                }
                 Item cur = GetItemAt(_popupSrcInv, _popupSrcSlot);
-                if (cur != null && _popupQty > 0)
+                if (cur != null && _popupQty > 0 && sellShop.highlightItemToSell(cur))
                 {
                     int sellQty = Math.Min(_popupQty, cur.Stack);
                     if (sellQty >= cur.Stack)
@@ -748,6 +1023,7 @@ namespace SDVMobileControls
             TouchLocation tl,
             Vector2 vp,
             Point uiPt,
+            int vpH,
             double nowSec)
         {
             if (tl.State == TouchLocationState.Pressed)
@@ -888,16 +1164,18 @@ namespace SDVMobileControls
             {
                 _touchCurVp = vp;
                 float dist = Vector2.Distance(vp, _touchStartVp);
+                // Retina-safe drag threshold (~15-18pt on iPhone) so quick taps into chests NEVER misfire as drags!
+                float dragThresh = Math.Max(28f, vpH * 0.032f);
 
                 if (!_isDragging)
                 {
-                    if (dist >= 14f)
+                    if (dist >= dragThresh)
                     {
                         _isDragging = true;
                         ClearSelection();
                         try { Game1.playSound("smallSelect"); } catch { }
                     }
-                    else if ((nowSec - _touchStartSec) >= 0.35)
+                    else if ((nowSec - _touchStartSec) >= 0.36)
                     {
                         if (_dragItem != null && _dragItem.Stack > 1)
                         {
@@ -947,6 +1225,7 @@ namespace SDVMobileControls
             if (tl.State == TouchLocationState.Released || tl.State == TouchLocationState.Invalid)
             {
                 bool wasDragging = _isDragging;
+                double heldSec = nowSec - _touchStartSec;
                 InventoryMenu srcInv = _dragSrcInv;
                 int srcSlot = _dragSrcSlot;
                 Item item = _dragItem;
@@ -980,7 +1259,14 @@ namespace SDVMobileControls
                     if (dstInv != null && dstSlot >= 0)
                     {
                         if (dstInv == srcInv && dstSlot == srcSlot)
+                        {
+                            // Fast thumb wobble on a Chest slot -> recover cleanly as a 1-tap transfer!
+                            if (isChestMenu && ownerMenu is ItemGrabMenu grabRecover && heldSec < 0.28)
+                            {
+                                ExecuteChestTapTransfer(grabRecover, playerInv, chestInv, srcInv, srcSlot, item);
+                            }
                             return true;
+                        }
                         if (!IsSlotUnlocked(dstInv, dstSlot))
                         {
                             try { Game1.playSound("cancel"); } catch { }
@@ -993,6 +1279,27 @@ namespace SDVMobileControls
                         }
                         MoveOrSwapSlots(ownerMenu as ItemGrabMenu, srcInv, srcSlot, dstInv, dstSlot);
                         return true;
+                    }
+
+                    // Generous Chest/Backpack Drop-Zone Forgiveness:
+                    // Dropping anywhere inside the opposite inventory panel (even on slot gaps or borders!) transfers cleanly!
+                    if (isChestMenu && ownerMenu is ItemGrabMenu grabArea)
+                    {
+                        if (srcInv == playerInv && chestInv != null && IsPointInInventoryPanel(chestInv, uiPt, 26))
+                        {
+                            if (!grabArea.reverseGrab && !grabArea.shippingBin)
+                            {
+                                try { Game1.playSound("cancel"); } catch { }
+                                return true;
+                            }
+                            TransferQuantityBetweenInventories(grabArea, srcInv, srcSlot, chestInv, item.Stack);
+                            return true;
+                        }
+                        if (srcInv == chestInv && playerInv != null && IsPointInInventoryPanel(playerInv, uiPt, 26))
+                        {
+                            TransferQuantityBetweenInventories(grabArea, srcInv, srcSlot, playerInv, item.Stack);
+                            return true;
+                        }
                     }
 
                     if (playerInv != null && IsPointInLockedBackpackSlot(playerInv, uiPt))
@@ -1021,18 +1328,33 @@ namespace SDVMobileControls
                     // SHORT TAP!
                     if (isChestMenu && ownerMenu is ItemGrabMenu grab)
                     {
-                        if (srcInv == playerInv && !grab.reverseGrab && !grab.shippingBin)
-                        {
-                            // Read-only Fishing Treasure Chest / Mine Reward Chest: never push player items into treasure chest!
-                            try { Game1.playSound("cancel"); } catch { }
-                            return true;
-                        }
-                        InventoryMenu dstInv = (srcInv == playerInv) ? chestInv : playerInv;
-                        TransferQuantityBetweenInventories(grab, srcInv, srcSlot, dstInv, item.Stack);
+                        ExecuteChestTapTransfer(grab, playerInv, chestInv, srcInv, srcSlot, item);
                         return true;
                     }
                     else if (ownerMenu is InventoryPage ip)
                     {
+                        // Mobile Backpack Tap-Split when X1 or 1/2 mode is active (zero stuck mouse cursor!)
+                        if (TapMode != ChestTapMode.FullStack && item.Stack > 1)
+                        {
+                            int splitQty = TapMode == ChestTapMode.SingleOne ? 1 : Math.Max(1, item.Stack / 2);
+                            splitQty = Math.Clamp(splitQty, 1, item.Stack - 1);
+                            int emptySlot = FindFirstEmptySlot(srcInv);
+                            if (emptySlot >= 0)
+                            {
+                                Item split = item.getOne();
+                                split.Stack = splitQty;
+                                item.Stack -= splitQty;
+                                SetItemAt(srcInv, emptySlot, split);
+                                ClearSelection();
+                                try { Game1.playSound("dwop"); } catch { }
+                            }
+                            else
+                            {
+                                try { Game1.playSound("cancel"); } catch { }
+                            }
+                            return true;
+                        }
+
                         // Mobile Backpack Tap-Select / Tap-Swap (NEVER puts item on mouse cursor!)
                         if (_selectedBagSlot < 0)
                         {
@@ -1175,10 +1497,11 @@ namespace SDVMobileControls
             bool srcLockedStranded = !IsSlotUnlocked(srcInv, srcSlot);
             Item srcItem = GetItemAt(srcInv, srcSlot);
             if (srcItem == null) return;
+            if (srcItem.Stack <= 0) srcItem.Stack = 1;
 
             if (grab != null && grab.shippingBin && dstInv == grab.ItemsToGrabMenu && srcInv == grab.inventory)
             {
-                TransferQuantityBetweenInventories(grab, srcInv, srcSlot, dstInv, srcItem.Stack);
+                TransferQuantityBetweenInventories(grab, srcInv, srcSlot, dstInv, Math.Max(1, srcItem.Stack));
                 return;
             }
 
@@ -1245,23 +1568,113 @@ namespace SDVMobileControls
             }
         }
 
+        private void ExecuteChestTapTransfer(ItemGrabMenu grab, InventoryMenu playerInv, InventoryMenu chestInv, InventoryMenu srcInv, int srcSlot, Item item)
+        {
+            if (grab == null || srcInv == null || item == null)
+                return;
+            if (item.Stack <= 0)
+                item.Stack = 1;
+            if (srcInv == playerInv && !grab.reverseGrab && !grab.shippingBin)
+            {
+                // Read-only Fishing Treasure Chest / Mine Reward Chest: never push player items into treasure chest!
+                try { Game1.playSound("cancel"); } catch { }
+                return;
+            }
+            InventoryMenu dstInv = (srcInv == playerInv) ? chestInv : playerInv;
+            int stackNow = Math.Max(1, item.Stack);
+            int qty = TapMode == ChestTapMode.SingleOne
+                ? 1
+                : (TapMode == ChestTapMode.HalfStack ? Math.Max(1, (stackNow + 1) / 2) : stackNow);
+            TransferQuantityBetweenInventories(grab, srcInv, srcSlot, dstInv, qty);
+        }
+
+        private static bool IsPointInInventoryPanel(InventoryMenu inv, Point uiPt, int pad)
+        {
+            if (inv?.inventory == null || inv.inventory.Count == 0)
+                return false;
+            Rectangle bounds = Rectangle.Empty;
+            int count = IsPlayerBackpack(inv) ? GetUnlockedCapacity(inv) : Math.Min(inv.capacity, inv.inventory.Count);
+            for (int i = 0; i < count; i++)
+            {
+                var cc = inv.inventory[i];
+                if (cc == null || cc.bounds.Width <= 0 || cc.bounds.Height <= 0) continue;
+                bounds = bounds.IsEmpty ? cc.bounds : Rectangle.Union(bounds, cc.bounds);
+            }
+            if (bounds.IsEmpty)
+                return false;
+            return new Rectangle(bounds.X - pad, bounds.Y - pad, bounds.Width + pad * 2, bounds.Height + pad * 2).Contains(uiPt);
+        }
+
+        private static bool IsSpecialRewardGrabItem(Item item)
+        {
+            if (item == null) return false;
+            if (item.IsRecipe) return true;
+            string qid = item.QualifiedItemId;
+            return qid == "(O)326" || qid == "(O)434"; // Dwarvish Translation Guide / Stardrop
+        }
+
+        private static void SpawnTransferVisual(ItemGrabMenu grab, InventoryMenu srcInv, int srcSlot, InventoryMenu dstInv, int dstSlot, Item movedPreview)
+        {
+            try
+            {
+                if (grab?._transferredItemSprites != null && movedPreview != null &&
+                    srcInv?.inventory != null && srcSlot >= 0 && srcSlot < srcInv.inventory.Count)
+                {
+                    Rectangle r = srcInv.inventory[srcSlot].bounds;
+                    grab._transferredItemSprites.Add(new ItemGrabMenu.TransferredItemSprite(movedPreview.getOne(), r.X, r.Y));
+                }
+                if (dstInv != null && dstSlot >= 0)
+                    dstInv.ShakeItem(dstSlot);
+            }
+            catch { }
+        }
+
         private void TransferQuantityBetweenInventories(ItemGrabMenu grab, InventoryMenu srcInv, int srcSlot, InventoryMenu dstInv, int qty)
         {
             Item srcItem = GetItemAt(srcInv, srcSlot);
-            if (srcItem == null || qty <= 0) return;
+            if (srcItem == null) return;
+            // Tools (Pickaxe, Axe, Hoe, WateringCan, Scythe, FishingRod) frequently carry Stack == 0 in Stardew Valley
+            // (matching vanilla Chest.grabItemFromInventory's `if (item.Stack == 0) item.Stack = 1;`).
+            if (srcItem.Stack <= 0)
+                srcItem.Stack = 1;
+            if (qty <= 0) return;
 
             bool fromPlayerToChest = (grab != null && srcInv == grab.inventory);
 
+            // Always enforce source inventory highlight filter (prevents shipping tools/unshippable items & honors Special Order dropboxes!)
+            if (fromPlayerToChest && srcInv.highlightMethod != null && !srcInv.highlightMethod(srcItem))
+            {
+                try { Game1.playSound("cancel"); } catch { }
+                return;
+            }
+
+            // Special reward items (Recipes, Stardrop, Dwarvish Guide) in reward chests MUST go through native ItemGrabMenu.receiveLeftClick!
+            if (!fromPlayerToChest && grab != null && IsSpecialRewardGrabItem(srcItem) &&
+                srcInv.inventory != null && srcSlot >= 0 && srcSlot < srcInv.inventory.Count)
+            {
+                Point c = srcInv.inventory[srcSlot].bounds.Center;
+                try { grab.receiveLeftClick(c.X, c.Y, true); } catch { }
+                if (grab.heldItem != null && Game1.player != null)
+                {
+                    Item rem = Game1.player.addItemToInventory(grab.heldItem);
+                    grab.heldItem = rem;
+                }
+                return;
+            }
+
+            int curStack = Math.Max(1, srcItem.Stack);
+
             if (fromPlayerToChest && grab != null && (grab.shippingBin || !grab.showReceivingMenu) && grab.behaviorFunction != null)
             {
-                int count = Math.Min(qty, srcItem.Stack);
-                Item toSend = (count >= srcItem.Stack) ? srcItem : srcItem.getOne();
+                int count = Math.Min(qty, curStack);
+                Item toSend = (count >= curStack) ? srcItem : srcItem.getOne();
                 toSend.Stack = count;
-                if (count >= srcItem.Stack) SetItemAt(srcInv, srcSlot, null);
-                else srcItem.Stack -= count;
+                if (count >= curStack) SetItemAt(srcInv, srcSlot, null);
+                else srcItem.Stack = curStack - count;
 
                 try { grab.behaviorFunction(toSend, Game1.player); } catch { }
-                try { Game1.playSound("Ship"); } catch { }
+                SpawnTransferVisual(grab, srcInv, srcSlot, null, -1, toSend);
+                try { Game1.playSound(grab.shippingBin ? "Ship" : "dwop"); } catch { }
                 return;
             }
 
@@ -1273,22 +1686,31 @@ namespace SDVMobileControls
                 return;
             }
 
-            int toMove = Math.Min(qty, srcItem.Stack);
-            Item moving = (toMove >= srcItem.Stack) ? srcItem : srcItem.getOne();
+            int toMove = Math.Min(qty, curStack);
+            Item moving = (toMove >= curStack) ? srcItem : srcItem.getOne();
             moving.Stack = toMove;
 
-            int leftover = AddItemToInventoryMenu(dstInv, moving);
+            int leftover = AddItemToInventoryMenu(dstInv, moving, out int dstSlotIdx);
             int actuallyMoved = toMove - leftover;
 
             if (actuallyMoved > 0)
             {
-                if (actuallyMoved >= srcItem.Stack) SetItemAt(srcInv, srcSlot, null);
-                else srcItem.Stack -= actuallyMoved;
+                int originalStack = curStack;
+                if (actuallyMoved >= originalStack) SetItemAt(srcInv, srcSlot, null);
+                else srcItem.Stack = originalStack - actuallyMoved;
 
-                if (!fromPlayerToChest && grab?.behaviorOnItemGrab != null)
+                // Only invoke non-Chest behaviorOnItemGrab (Fishing Treasure / Mine Reward / Quest Reward / Mod callbacks).
+                // NEVER call Chest.grabItemFromChest here — it calls clearNulls() + Chest.ShowMenu() which destroys/recreates the menu & shifts every slot!
+                if (!fromPlayerToChest && grab?.behaviorOnItemGrab != null && actuallyMoved >= originalStack)
                 {
-                    try { grab.behaviorOnItemGrab(moving, Game1.player); } catch { }
+                    bool isVanillaChestGrab = grab.behaviorOnItemGrab.Method?.DeclaringType == typeof(StardewValley.Objects.Chest);
+                    if (!isVanillaChestGrab)
+                    {
+                        try { grab.behaviorOnItemGrab(moving, Game1.player); } catch { }
+                    }
                 }
+
+                SpawnTransferVisual(grab, srcInv, srcSlot, dstInv, dstSlotIdx, moving);
                 try { Game1.playSound("dwop"); } catch { }
             }
             else
@@ -1297,37 +1719,80 @@ namespace SDVMobileControls
             }
         }
 
-        private static int AddItemToInventoryMenu(InventoryMenu inv, Item item)
+        private static int AddItemToInventoryMenu(InventoryMenu inv, Item item, out int placedSlot)
         {
+            placedSlot = -1;
             if (inv == null || item == null) return item?.Stack ?? 0;
 
             if (IsPlayerBackpack(inv))
             {
+                int capP = GetUnlockedCapacity(inv);
+                // Find target slot for shake animation before/after adding
+                int hintSlot = -1;
+                if (Game1.player?.Items != null)
+                {
+                    int cnt = Math.Min(capP, Game1.player.Items.Count);
+                    for (int i = 0; i < cnt; i++)
+                    {
+                        Item ex = Game1.player.Items[i];
+                        if (ex != null && ex.canStackWith(item) && ex.Stack < ex.maximumStackSize())
+                        {
+                            hintSlot = i;
+                            break;
+                        }
+                    }
+                    if (hintSlot < 0)
+                    {
+                        for (int i = 0; i < cnt; i++)
+                        {
+                            if (Game1.player.Items[i] == null) { hintSlot = i; break; }
+                        }
+                    }
+                }
                 Item rem = Game1.player.addItemToInventory(item);
+                placedSlot = hintSlot;
                 return rem != null ? rem.Stack : 0;
             }
 
             int cap = Math.Min(inv.capacity, inv.inventory != null ? inv.inventory.Count : inv.capacity);
-            EnsureInventoryListSize(inv, cap);
+            int curCount = inv.actualInventory.Count;
+            int scanMax = Math.Min(cap, curCount);
 
-            for (int i = 0; i < cap; i++)
+            // 1. Stack onto existing matching stacks first (identical to Stardew Mobile & FillOutStacks!)
+            for (int i = 0; i < scanMax; i++)
             {
                 Item ex = inv.actualInventory[i];
                 if (ex != null && ex.canStackWith(item))
                 {
+                    int before = item.Stack;
                     int rem = ex.addToStack(item);
                     item.Stack = rem;
-                    if (rem <= 0) return 0;
+                    if (rem < before && placedSlot < 0)
+                        placedSlot = i;
+                    if (rem <= 0)
+                        return 0;
                 }
             }
 
-            for (int i = 0; i < cap; i++)
+            // 2. Fill first existing null hole inside actualInventory
+            for (int i = 0; i < scanMax; i++)
             {
                 if (inv.actualInventory[i] == null)
                 {
+                    try { item.onDetachedFromParent(); } catch { }
                     inv.actualInventory[i] = item;
+                    placedSlot = i;
                     return 0;
                 }
+            }
+
+            // 3. Append cleanly if chest still has capacity (avoids padding 70 empty nulls!)
+            if (curCount < cap)
+            {
+                try { item.onDetachedFromParent(); } catch { }
+                inv.actualInventory.Add(item);
+                placedSlot = curCount;
+                return 0;
             }
 
             return item.Stack;
@@ -1445,59 +1910,69 @@ namespace SDVMobileControls
                 return;
             }
 
-            TouchLocation tl = touches[0];
-            Vector2 vp = rawToVp(tl.Position);
-            Point pt = new Point((int)vp.X, (int)vp.Y);
-
-            if (tl.Id == _popSliderTouchId)
+            // 1. Track active slider finger across ALL touches (immune to stray palm/2nd finger!)
+            if (_popSliderTouchId >= 0)
             {
-                if (tl.State == TouchLocationState.Pressed || tl.State == TouchLocationState.Moved)
+                if (TryFindTouchById(touches, _popSliderTouchId, out TouchLocation stl))
                 {
-                    SetQtyFromSliderX(vp.X);
-                    return;
+                    if (stl.State == TouchLocationState.Pressed || stl.State == TouchLocationState.Moved)
+                    {
+                        SetQtyFromSliderX(rawToVp(stl.Position).X, nowSec);
+                        return;
+                    }
                 }
                 _popSliderTouchId = -1;
                 return;
             }
 
-            // Hold-to-repeat accelerated +/- quantity stepper
-            if (tl.Id == _popHoldTouchId && _popHoldDelta != 0)
+            // 2. Track active hold-to-repeat +/- stepper finger across ALL touches
+            if (_popHoldTouchId >= 0 && _popHoldDelta != 0)
             {
-                if (tl.State == TouchLocationState.Moved)
+                if (TryFindTouchById(touches, _popHoldTouchId, out TouchLocation htl))
                 {
-                    Rectangle holdR = _popHoldDelta == -10 ? _popBtnM10 :
-                                      _popHoldDelta == -1  ? _popBtnM1  :
-                                      _popHoldDelta == 1   ? _popBtnP1  : _popBtnP10;
-                    if (holdR.Contains(pt) && _popupMaxQty > _popupMinQty)
+                    if (htl.State == TouchLocationState.Pressed || htl.State == TouchLocationState.Moved)
                     {
-                        double held = nowSec - _popHoldStartSec;
-                        double interval = held >= 1.15 ? 0.05 : 0.11;
-                        if (held >= 0.34 && (nowSec - _popHoldLastStepSec) >= interval)
+                        Vector2 hvp = rawToVp(htl.Position);
+                        Point hpt = new Point((int)hvp.X, (int)hvp.Y);
+                        Rectangle holdR = _popHoldDelta == -10 ? _popBtnM10 :
+                                          _popHoldDelta == -1  ? _popBtnM1  :
+                                          _popHoldDelta == 1   ? _popBtnP1  : _popBtnP10;
+                        Rectangle forgivenR = new Rectangle(holdR.X - 16, holdR.Y - 16, holdR.Width + 32, holdR.Height + 32);
+                        if (forgivenR.Contains(hpt) && _popupMaxQty > _popupMinQty)
                         {
-                            _popHoldLastStepSec = nowSec;
-                            int next = Math.Clamp(_popupQty + _popHoldDelta, _popupMinQty, _popupMaxQty);
-                            if (next != _popupQty)
+                            double held = nowSec - _popHoldStartSec;
+                            double interval = held >= 1.15 ? 0.045 : 0.105;
+                            if (held >= 0.30 && (nowSec - _popHoldLastStepSec) >= interval)
                             {
-                                _popupQty = next;
-                                TryClickSound();
+                                _popHoldLastStepSec = nowSec;
+                                int next = Math.Clamp(_popupQty + _popHoldDelta, _popupMinQty, _popupMaxQty);
+                                if (next != _popupQty)
+                                {
+                                    _popupQty = next;
+                                    TryClickSound();
+                                }
                             }
                         }
+                        return;
                     }
-                    return;
                 }
                 _popHoldTouchId = -1;
                 _popHoldDelta = 0;
                 return;
             }
 
-            if (tl.State != TouchLocationState.Pressed)
+            // 3. Process new Pressed touch cleanly
+            if (!TryPickPrimaryTouch(touches, -1, out TouchLocation tl))
                 return;
 
-            var sliderHit = new Rectangle(_popSliderTrack.X - 20, _popSliderTrack.Y - 28, _popSliderTrack.Width + 40, _popSliderTrack.Height + 56);
+            Vector2 vp = rawToVp(tl.Position);
+            Point pt = new Point((int)vp.X, (int)vp.Y);
+
+            var sliderHit = new Rectangle(_popSliderTrack.X - 28, _popSliderTrack.Y - 34, _popSliderTrack.Width + 56, _popSliderTrack.Height + 68);
             if (_popupMaxQty > _popupMinQty && sliderHit.Contains(pt))
             {
                 _popSliderTouchId = tl.Id;
-                SetQtyFromSliderX(vp.X);
+                SetQtyFromSliderX(vp.X, nowSec);
                 return;
             }
 
@@ -1542,13 +2017,48 @@ namespace SDVMobileControls
             }
         }
 
-        private void SetQtyFromSliderX(float vpX)
+        private float GetSliderExponent()
+        {
+            int span = _popupMaxQty - _popupMinQty;
+            if (span > 200) return 1.70f;
+            if (span > 80)  return 1.45f;
+            return 1.0f;
+        }
+
+        private float QtyToSliderFrac(int qty)
+        {
+            int span = Math.Max(1, _popupMaxQty - _popupMinQty);
+            float norm = Math.Clamp((float)(qty - _popupMinQty) / span, 0f, 1f);
+            float exp = GetSliderExponent();
+            return exp > 1.01f ? MathF.Pow(norm, 1f / exp) : norm;
+        }
+
+        private int SliderFracToQty(float frac)
+        {
+            frac = Math.Clamp(frac, 0f, 1f);
+            int span = Math.Max(0, _popupMaxQty - _popupMinQty);
+            if (span <= 0) return _popupMinQty;
+            float exp = GetSliderExponent();
+            float norm = exp > 1.01f ? MathF.Pow(frac, exp) : frac;
+            return Math.Clamp(_popupMinQty + (int)Math.Round(norm * span), _popupMinQty, _popupMaxQty);
+        }
+
+        private void SetQtyFromSliderX(float vpX, double nowSec)
         {
             if (_popSliderTrack.Width <= 4 || _popupMaxQty <= _popupMinQty) return;
-            float frac = Math.Clamp((vpX - _popSliderTrack.X) / _popSliderTrack.Width, 0f, 1f);
-            int next = _popupMinQty + (int)Math.Round(frac * (_popupMaxQty - _popupMinQty));
+            float minX = _popSliderTrack.X + _popKnobW * 0.5f;
+            float maxX = _popSliderTrack.Right - _popKnobW * 0.5f;
+            float frac = Math.Clamp((vpX - minX) / Math.Max(1f, maxX - minX), 0f, 1f);
+            int next = SliderFracToQty(frac);
             if (next != _popupQty)
-                _popupQty = Math.Clamp(next, _popupMinQty, _popupMaxQty);
+            {
+                _popupQty = next;
+                if ((nowSec - _popSliderLastTickSec) >= 0.065)
+                {
+                    _popSliderLastTickSec = nowSec;
+                    TryClickSound();
+                }
+            }
         }
 
         private static void TryClickSound()
@@ -1594,9 +2104,10 @@ namespace SDVMobileControls
             _popBtnP10 = new Rectangle(px + pad + (qW + qGap) * 3, qY, qW, qH);
             _popBtnMax = new Rectangle(px + pad + (qW + qGap) * 4, qY, qW, qH);
 
-            int trackH = Math.Max(22, Math.Min(34, ph / 20));
+            int trackH = Math.Max(24, Math.Min(38, ph / 18));
             int sliderY = qY - Math.Max(14, ph / 34) - trackH;
             _popSliderTrack = new Rectangle(px + pad, sliderY, pw - pad * 2, trackH);
+            _popKnobW = Math.Max(42, (int)(_popSliderTrack.Height * 1.75f));
         }
 
         // =========================================================================
@@ -1662,6 +2173,21 @@ namespace SDVMobileControls
                         Rectangle hvVp = UiRectToVp(hoverUi, uiToVp);
                         sb.Draw(pixel, hvVp, new Color(90, 215, 90) * 0.24f);
                         DrawBorder(sb, pixel, hvVp, Math.Max(3, vpH / 260), new Color(90, 225, 90));
+                    }
+                    else if (grab != null)
+                    {
+                        InventoryMenu targetDropInv = null;
+                        if (_dragSrcInv == grab.inventory && (grab.reverseGrab || grab.shippingBin) && grab.ItemsToGrabMenu != null && IsPointInInventoryPanel(grab.ItemsToGrabMenu, uiHover, 26))
+                            targetDropInv = grab.ItemsToGrabMenu;
+                        else if (_dragSrcInv == grab.ItemsToGrabMenu && grab.inventory != null && IsPointInInventoryPanel(grab.inventory, uiHover, 26))
+                            targetDropInv = grab.inventory;
+
+                        if (targetDropInv != null && TryGetInventoryPanelRect(targetDropInv, out Rectangle areaUi))
+                        {
+                            Rectangle areaVp = UiRectToVp(areaUi, uiToVp);
+                            sb.Draw(pixel, areaVp, new Color(90, 215, 90) * 0.12f);
+                            DrawBorder(sb, pixel, areaVp, Math.Max(3, vpH / 240), new Color(110, 235, 110));
+                        }
                     }
                 }
 
@@ -1915,15 +2441,16 @@ namespace SDVMobileControls
                     sb.Draw(pixel, _popSliderTrack, primaryInk * 0.25f);
                 }
 
-                float frac = (float)(_popupQty - _popupMinQty) / Math.Max(1, _popupMaxQty - _popupMinQty);
-                int knobW = Math.Max(36, (int)(_popSliderTrack.Height * 1.65f));
-                int knobH = Math.Max(28, (int)(_popSliderTrack.Height * 1.15f));
+                float frac = QtyToSliderFrac(_popupQty);
+                int knobW = _popKnobW;
+                int knobH = Math.Max(30, (int)(_popSliderTrack.Height * 1.24f));
                 int usableW = Math.Max(1, _popSliderTrack.Width - knobW);
-                int kx = _popSliderTrack.X + (int)(usableW * frac);
+                int kx = _popSliderTrack.X + (int)Math.Round(usableW * frac);
                 int ky = _popSliderTrack.Center.Y - knobH / 2;
 
-                if (kx > _popSliderTrack.X + 4)
-                    sb.Draw(pixel, new Rectangle(_popSliderTrack.X + 4, _popSliderTrack.Y + 4, kx - _popSliderTrack.X, Math.Max(4, _popSliderTrack.Height - 8)), primaryInk * 0.22f);
+                int fillEnd = kx + knobW / 2;
+                if (fillEnd > _popSliderTrack.X + 4)
+                    sb.Draw(pixel, new Rectangle(_popSliderTrack.X + 4, _popSliderTrack.Y + 4, Math.Max(0, fillEnd - (_popSliderTrack.X + 4)), Math.Max(4, _popSliderTrack.Height - 8)), primaryInk * 0.24f);
 
                 try
                 {
@@ -1936,6 +2463,22 @@ namespace SDVMobileControls
                 catch
                 {
                     sb.Draw(pixel, new Rectangle(kx, ky, knobW, knobH), primaryInk * 0.70f);
+                }
+
+                // Live floating quantity callout right above knob while dragging so finger NEVER covers the number!
+                if (_popSliderTouchId >= 0)
+                {
+                    string qTxt = $"×{_popupQty}";
+                    float qScale = fontScale * 0.92f;
+                    int bubW = Math.Max(68, (int)MeasureWidth(qTxt, qScale) + 24);
+                    int bubH = Math.Max(34, (int)(36f * qScale));
+                    int bx = Math.Clamp(kx + knobW / 2 - bubW / 2, _popPanel.X + 12, _popPanel.Right - bubW - 12);
+                    int by = Math.Max(_popPanel.Y + 8, ky - bubH - 10);
+                    var bubR = new Rectangle(bx, by, bubW, bubH);
+                    PixelUi.DrawNativeSubBox(sb, pixel, bubR, new Color(255, 248, 224), 0.98f);
+                    float tx = bubR.X + (bubR.Width - MeasureWidth(qTxt, qScale)) * 0.5f;
+                    float ty = bubR.Y + Math.Max(3f, (bubR.Height - 26f * qScale) * 0.45f);
+                    DrawStardewText(sb, qTxt, new Vector2(tx, ty), primaryInk, qScale);
                 }
 
                 DrawStardewPixelButton(sb, _popBtnM10, "-10", Color.White, fontScale * 0.88f);
@@ -2171,6 +2714,21 @@ namespace SDVMobileControls
                 Utility.drawTextWithShadow(sb, text, Game1.smallFont, pos, color, scale);
             }
             catch { }
+        }
+
+        private static bool TryGetInventoryPanelRect(InventoryMenu inv, out Rectangle bounds)
+        {
+            bounds = Rectangle.Empty;
+            if (inv?.inventory == null || inv.inventory.Count == 0)
+                return false;
+            int count = IsPlayerBackpack(inv) ? GetUnlockedCapacity(inv) : Math.Min(inv.capacity, inv.inventory.Count);
+            for (int i = 0; i < count; i++)
+            {
+                var cc = inv.inventory[i];
+                if (cc == null || cc.bounds.Width <= 0 || cc.bounds.Height <= 0) continue;
+                bounds = bounds.IsEmpty ? cc.bounds : Rectangle.Union(bounds, cc.bounds);
+            }
+            return !bounds.IsEmpty;
         }
 
         private static Rectangle FindHoveredSlotRect(InventoryMenu a, InventoryMenu b, Point uiPt)

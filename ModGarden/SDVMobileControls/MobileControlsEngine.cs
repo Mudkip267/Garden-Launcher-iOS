@@ -219,6 +219,11 @@ namespace SDVMobileControls
         // Community Center bundle & safe 2-tap Dialogue state
         private static readonly System.Reflection.FieldInfo RenovateFreezeField =
             typeof(RenovateMenu).GetField("freeze", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+        private static readonly System.Reflection.FieldInfo ShopScrollRunnerField =
+            typeof(ShopMenu).GetField("scrollBarRunner", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+        private static readonly System.Reflection.FieldInfo LoadGameScrollRunnerField =
+            typeof(LoadGameMenu).GetField("scrollBarRunner", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+        private int _menuDragClampX = -1;
         private JunimoNoteMenu _junimoHoverMenu;
         private ClickableComponent _junimoHoveredSlot;
         private DialogueBox _dlgHoverMenu;
@@ -263,6 +268,10 @@ namespace SDVMobileControls
             typeof(TextBox).GetField("OnEnterPressed", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
         private static readonly FieldInfo InputCurrentMouseStateField =
             typeof(InputState).GetField("_currentMouseState", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        private static readonly FieldInfo LevelUpProfessionsField =
+            typeof(LevelUpMenu).GetField("professionsToChoose", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        private static readonly FieldInfo SkillsHoverTextField =
+            typeof(SkillsPage).GetField("hoverText", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
         private static FieldInfo _hostVkmActiveField;
         private static bool _hostVkmResolved;
 
@@ -536,16 +545,7 @@ namespace SDVMobileControls
                 try { Game1.playSound(isCrit ? "cancel" : "warn"); } catch { try { Game1.playSound("crafting"); } catch { } }
             }
 
-            if (Context.IsWorldReady && Game1.activeClickableMenu == null && _cfg.ConsumeEditLayoutFlag())
-            {
-                if (_cfg.Mode == MobileControlMode.VirtualGamepad)
-                {
-                    _cfg.Mode = MobileControlMode.InvisibleJoystick2Btn;
-                    _cfg.Save();
-                }
-                _saveMenuOpen = false;
-                EnterEditLayoutMode();
-            }
+            PollPendingEditLayoutFlag();
 
             if (!IsMobileModeActive)
                 return false;
@@ -564,8 +564,68 @@ namespace SDVMobileControls
             return true;
         }
 
+        public static int CountActiveTouches(TouchCollection touches)
+        {
+            int cnt = 0;
+            for (int i = 0; i < touches.Count; i++)
+            {
+                var st = touches[i].State;
+                if (st == TouchLocationState.Pressed || st == TouchLocationState.Moved)
+                    cnt++;
+            }
+            return cnt;
+        }
+
+        public void PollPendingEditLayoutFlag()
+        {
+            if (Context.IsWorldReady && Game1.activeClickableMenu == null && _cfg.ConsumeEditLayoutFlag())
+            {
+                if (_cfg.Mode == MobileControlMode.VirtualGamepad)
+                {
+                    _cfg.Mode = MobileControlMode.InvisibleJoystick2Btn;
+                    _cfg.Save();
+                }
+                if (_saveMenuOpen)
+                    CloseSaveMenu(flushExternal: false);
+                EnterEditLayoutMode();
+            }
+        }
+
+        public bool IsLegacyFullScreenModalOpen(object pad)
+        {
+            object target = pad ?? _lastPadObj;
+            return target != null && (EnsureBridge(target)?.IsFullScreenModalOpen(target) ?? false);
+        }
+
+        public bool IsQuickSaveReloading(object pad)
+        {
+            object target = pad ?? _lastPadObj;
+            return target != null && (EnsureBridge(target)?.IsQuickSaveReloading() ?? false);
+        }
+
+        public bool IsUiOverlayBlockingExternalInput(object pad)
+        {
+            return _editMode || _saveMenuOpen || IsLegacyFullScreenModalOpen(pad);
+        }
+
+        public void ResetVirtualPadForExternal(object pad)
+        {
+            if (pad != null)
+                EnsureBridge(pad)?.ResetVirtualPad(pad);
+        }
+
+        public bool ShouldAutoHideLegacyVirtualGamepad(object pad)
+        {
+            return _cfg.AutoHideOnGamepad &&
+                   ModEntry.ExternalInput != null &&
+                   ModEntry.ExternalInput.IsExternalDeviceActive &&
+                   !ModEntry.ExternalInput.IsSuppressed &&
+                   !IsLegacyFullScreenModalOpen(pad);
+        }
+
         private void EnterEditLayoutMode()
         {
+            _gamepadHideHud = false;
             ResetGameplayState();
             _editMode = true;
             _keyPickerOpen = false;
@@ -575,6 +635,25 @@ namespace SDVMobileControls
             _editDragCustomId = -1;
             _editResizing = false;
             _editTouchId = -1;
+            ModEntry.ExternalInput?.SetManagedSuppressed(true);
+            ModEntry.ExternalInput?.FlushFarmerMovementAndState(restoreAutoRun: false);
+        }
+
+        private void ExitEditLayoutMode()
+        {
+            bool wasEdit = _editMode;
+            _editMode = false;
+            _keyPickerOpen = false;
+            _editDragTarget = EditTarget.None;
+            _editDragCustomId = -1;
+            _editResizing = false;
+            _editTouchId = -1;
+            ResetGameplayState();
+            if (wasEdit)
+            {
+                ModEntry.ExternalInput?.SetManagedSuppressed(IsUiOverlayBlockingExternalInput(_lastPadObj));
+                ModEntry.ExternalInput?.FlushFarmerMovementAndState(restoreAutoRun: true);
+            }
         }
 
         public void TrackPadReference(object pad)
@@ -1086,6 +1165,7 @@ namespace SDVMobileControls
             _menuTapImmediateDrag = false;
             _menuTapCameraPan = false;
             _menuTapRightClicked = false;
+            _menuDragClampX = -1;
             _modTouchState = ModTouchState.None;
         }
 
@@ -1250,7 +1330,7 @@ namespace SDVMobileControls
             {
                 if (_guiHidden && (Game1.activeClickableMenu != null || Game1.eventUp || Game1.currentMinigame != null))
                     SetGuiHidden(false);
-                _verticalToolbar.SyncHorizontalToolbarVisibility(IsMobileModeActive && ((_cfg.VerticalToolbar && !_gamepadHideHud) || _guiHidden));
+                _verticalToolbar.SyncHorizontalToolbarVisibility(IsMobileModeActive && ((_cfg.VerticalToolbar && (!_gamepadHideHud || _editMode)) || _guiHidden));
             }
             else
             {
@@ -1411,12 +1491,14 @@ namespace SDVMobileControls
             double nowSec = Environment.TickCount64 / 1000.0;
             if (mode == ExternalInputMode.Gamepad)
             {
-                _gamepadHideHud = _cfg.AutoHideOnGamepad;
+                ResetGameplayState();
+                _gamepadHideHud = _cfg.AutoHideOnGamepad && !_editMode && !_saveMenuOpen;
                 ShowSaveToast("TAY CAM NGOAI (FULL)", nowSec);
             }
             else if (mode == ExternalInputMode.KeyboardMouse)
             {
-                _gamepadHideHud = _cfg.AutoHideOnGamepad;
+                ResetGameplayState();
+                _gamepadHideHud = _cfg.AutoHideOnGamepad && !_editMode && !_saveMenuOpen;
                 ShowSaveToast("BAN PHIM / CHUOT NGOAI", nowSec);
             }
             else
@@ -1434,7 +1516,7 @@ namespace SDVMobileControls
                 _hasPhysicalGamePadState = ext.IsPhysicalGamepadActive;
                 if (_hasPhysicalGamePadState)
                     _lastPhysicalGamePadState = ext.CurrentGamePadState;
-                _gamepadHideHud = _cfg.AutoHideOnGamepad && ext.IsExternalDeviceActive && touchCount == 0;
+                _gamepadHideHud = _cfg.AutoHideOnGamepad && ext.IsExternalDeviceActive && touchCount == 0 && !_editMode && !_saveMenuOpen;
                 return;
             }
 
@@ -1482,6 +1564,9 @@ namespace SDVMobileControls
         {
             if (menu == null) return false;
             if (menu is DialogueBox || menu is LetterViewerMenu || menu is BobberBar || menu is TitleMenu || menu is EmoteMenu)
+                return false;
+            // Never show ESC over a Level 5/10 profession chooser (prevents accidentally skipping professions!)
+            if (menu is LevelUpMenu lum && lum.isProfessionChooser)
                 return false;
             // Show top-left ESC pill on ALL PC/Mod menus (GMCM, CJB, Lookup Anything, Forge, Tailoring, Museum, Carpenter, QuestLog, etc.)!
             return true;
@@ -1883,10 +1968,27 @@ namespace SDVMobileControls
             return true;
         }
 
-        private static bool IsTouchOnOptionsSliderOrBar(List<ClickableComponent> slots, List<OptionsElement> opts, int curIdx, int menuRightX, Point uiPt)
+        private static bool IsPointNearScrollTrack(Rectangle track, ClickableComponent thumb, Point uiPt, out int centerX)
         {
-            // Right-edge scrollbar drag strip
-            if (uiPt.X >= menuRightX - 76)
+            centerX = -1;
+            Rectangle r = track;
+            if (thumb != null && thumb.bounds.Width > 0 && thumb.bounds.Height > 0)
+                r = r.IsEmpty ? thumb.bounds : Rectangle.Union(r, thumb.bounds);
+            if (r.IsEmpty || r.Height <= 4)
+                return false;
+            Rectangle hit = new Rectangle(r.X - 28, r.Y - 12, r.Width + 56, r.Height + 24);
+            if (hit.Contains(uiPt))
+            {
+                centerX = r.Center.X;
+                return true;
+            }
+            return false;
+        }
+
+        private static bool IsTouchOnOptionsSliderOrBar(List<ClickableComponent> slots, List<OptionsElement> opts, int curIdx, int menuTopY, int menuRightX, Point uiPt)
+        {
+            // Right-edge scrollbar drag strip (skip top close-X area!)
+            if (uiPt.X >= menuRightX - 76 && uiPt.Y >= menuTopY + 64)
                 return true;
             if (slots == null || opts == null) return false;
             for (int i = 0; i < slots.Count; i++)
@@ -1902,19 +2004,20 @@ namespace SDVMobileControls
             return false;
         }
 
-        private static bool IsImmediateDragMenu(IClickableMenu menu, Point uiPt)
+        private static bool IsImmediateDragMenu(IClickableMenu menu, Point uiPt, out int clampDragX)
         {
+            clampDragX = -1;
             if (menu is GameMenu gm)
             {
                 try
                 {
                     IClickableMenu page = gm.GetCurrentPage();
                     if (page is OptionsPage op)
-                        return IsTouchOnOptionsSliderOrBar(op.optionSlots, op.options, op.currentItemIndex, op.xPositionOnScreen + op.width, uiPt);
+                        return IsTouchOnOptionsSliderOrBar(op.optionSlots, op.options, op.currentItemIndex, op.yPositionOnScreen, op.xPositionOnScreen + op.width, uiPt);
                     if (page is SocialPage sp)
-                        return (sp.scrollBar != null && sp.scrollBar.containsPoint(uiPt.X, uiPt.Y)) || sp.scrollBarRunner.Contains(uiPt);
+                        return IsPointNearScrollTrack(sp.scrollBarRunner, sp.scrollBar, uiPt, out clampDragX);
                     if (page is AnimalPage ap)
-                        return (ap.scrollBar != null && ap.scrollBar.containsPoint(uiPt.X, uiPt.Y)) || ap.scrollBarRunner.Contains(uiPt);
+                        return IsPointNearScrollTrack(ap.scrollBarRunner, ap.scrollBar, uiPt, out clampDragX);
                 }
                 catch { }
             }
@@ -1922,7 +2025,7 @@ namespace SDVMobileControls
             {
                 try
                 {
-                    return IsTouchOnOptionsSliderOrBar(ago.optionSlots, ago.options, ago.currentItemIndex, ago.xPositionOnScreen + ago.width, uiPt);
+                    return IsTouchOnOptionsSliderOrBar(ago.optionSlots, ago.options, ago.currentItemIndex, ago.yPositionOnScreen, ago.xPositionOnScreen + ago.width, uiPt);
                 }
                 catch { }
             }
@@ -1951,8 +2054,8 @@ namespace SDVMobileControls
             {
                 try
                 {
-                    if (sm.scrollBar != null && sm.scrollBar.containsPoint(uiPt.X, uiPt.Y))
-                        return true;
+                    Rectangle runner = (ShopScrollRunnerField?.GetValue(sm) is Rectangle r) ? r : Rectangle.Empty;
+                    return IsPointNearScrollTrack(runner, sm.scrollBar, uiPt, out clampDragX);
                 }
                 catch { }
             }
@@ -1960,8 +2063,8 @@ namespace SDVMobileControls
             {
                 try
                 {
-                    if (lgm.scrollBar != null && lgm.scrollBar.containsPoint(uiPt.X, uiPt.Y))
-                        return true;
+                    Rectangle runner = (LoadGameScrollRunnerField?.GetValue(lgm) is Rectangle r) ? r : Rectangle.Empty;
+                    return IsPointNearScrollTrack(runner, lgm.scrollBar, uiPt, out clampDragX);
                 }
                 catch { }
             }
@@ -1969,8 +2072,7 @@ namespace SDVMobileControls
             {
                 try
                 {
-                    if (ql.scrollBarBounds.Contains(uiPt))
-                        return true;
+                    return IsPointNearScrollTrack(ql.scrollBarBounds, ql.scrollBar, uiPt, out clampDragX);
                 }
                 catch { }
             }
@@ -1981,9 +2083,11 @@ namespace SDVMobileControls
         {
             _cfg.PollReload();
             ApplyLiveUiScaleAndWeather();
-            _editMode = false;
+            if (_editMode)
+                ExitEditLayoutMode();
             _keyPickerOpen = false;
-            _saveMenuOpen = false;
+            if (_saveMenuOpen)
+                CloseSaveMenu(flushExternal: true);
             _wasInMenu = true;
             ResetGameplayState();
             TickCustomButtonPulses();
@@ -2022,8 +2126,9 @@ namespace SDVMobileControls
                 {
                     ComputeLayout();
                     TouchCollection evTouches = TouchPanel.GetState();
-                    PollGamepadAutoHide(evTouches.Count);
-                    if (ModEntry.ExternalInput != null && ModEntry.ExternalInput.IsExternalDeviceActive && evTouches.Count == 0)
+                    int activeEvTouches = CountActiveTouches(evTouches);
+                    PollGamepadAutoHide(activeEvTouches);
+                    if (ModEntry.ExternalInput != null && ModEntry.ExternalInput.IsExternalDeviceActive && activeEvTouches == 0)
                     {
                         br?.ResetVirtualPad(pad);
                         return true;
@@ -2068,8 +2173,9 @@ namespace SDVMobileControls
                     return false;
 
                 TouchCollection fishTouches = TouchPanel.GetState();
-                PollGamepadAutoHide(fishTouches.Count);
-                if (ModEntry.ExternalInput != null && ModEntry.ExternalInput.IsExternalDeviceActive && fishTouches.Count == 0)
+                int activeFishTouches = CountActiveTouches(fishTouches);
+                PollGamepadAutoHide(activeFishTouches);
+                if (ModEntry.ExternalInput != null && ModEntry.ExternalInput.IsExternalDeviceActive && activeFishTouches == 0)
                 {
                     br?.ResetVirtualPad(pad);
                     return true;
@@ -2126,8 +2232,9 @@ namespace SDVMobileControls
 
             // Single TouchPanel.GetState() read per frame — from here on, ALWAYS return true!
             TouchCollection touches = TouchPanel.GetState();
-            PollGamepadAutoHide(touches.Count);
-            if (ModEntry.ExternalInput != null && ModEntry.ExternalInput.IsExternalDeviceActive && touches.Count == 0)
+            int activeMenuTouches = CountActiveTouches(touches);
+            PollGamepadAutoHide(activeMenuTouches);
+            if (ModEntry.ExternalInput != null && ModEntry.ExternalInput.IsExternalDeviceActive && activeMenuTouches == 0)
             {
                 ResetMenuTapState();
                 _invShop.Reset();
@@ -2151,6 +2258,17 @@ namespace SDVMobileControls
             {
                 _invShop.Reset();
                 UpdateTitleScreenTouches(pad, touches, nowSec);
+                return true;
+            }
+
+            // Dedicated LevelUpMenu handler (#GL-LTQ82M):
+            // Vanilla LevelUpMenu.receiveLeftClick(x, y, playSound) is completely empty (`ret`)!
+            // Both OK button dismissal and Level 5/10 profession cards are handled inside LevelUpMenu.update(GameTime)
+            // via live mouse state — handle them directly here so OK and Profession choices ALWAYS respond in 1 tap!
+            if (topMenu is LevelUpMenu lumTop && (!showEscOnly || !IsTapInsideEscPill(touches)))
+            {
+                _invShop.Reset();
+                UpdateLevelUpMenuTouches(pad, lumTop, touches, nowSec);
                 return true;
             }
 
@@ -2218,7 +2336,7 @@ namespace SDVMobileControls
             // If Mobile Buy/Sell/Split/Crafting Popup is open OR dragging an item, give it top priority!
             if (_invShop.IsPopupOpen || (_cfg.MobileShopAndDrag && _invShop.IsDraggingItem))
             {
-                if (_invShop.Update(topMenu, touches, MapRawToViewport, ViewportToUi, _vpW, _vpH, nowSec))
+                if (_invShop.Update(topMenu, touches, MapRawToViewport, ViewportToUi, UiToViewport, _vpW, _vpH, nowSec))
                 {
                     ResetMenuTapState();
                     ApplyToPad(pad, Vector2.Zero, false, false, false);
@@ -2263,11 +2381,32 @@ namespace SDVMobileControls
                     {
                         if (showInvCtx)
                         {
-                            if (_ctxX1Rect.Contains(pt)) { br?.ToggleSingleItemMode(pad); _ctxTouchId = tl.Id; sawCtx = true; try { Game1.playSound("smallSelect"); } catch { } continue; }
-                            if (_ctxHalfRect.Contains(pt)) { br?.ToggleHalfStackMode(pad); _ctxTouchId = tl.Id; sawCtx = true; try { Game1.playSound("smallSelect"); } catch { } continue; }
-                            if (_ctxXferRect.Contains(pt)) { br?.ToggleQuickTransferMode(pad); _ctxTouchId = tl.Id; sawCtx = true; try { Game1.playSound("smallSelect"); } catch { } continue; }
-                            if (_ctxKeyRect.Contains(pt)) { TriggerKeyboardSmart(pad, br, null, topMenu); _ctxTouchId = tl.Id; sawCtx = true; continue; }
-                            if (_ctxEscRect.Contains(pt)) { _invShop.Reset(); CloseTopmostMenu(rawMenu, topMenu); _ctxTouchId = tl.Id; sawCtx = true; continue; }
+                            if (_cfg.MobileShopAndDrag)
+                            {
+                                GetMobileInvCtxRects(topMenu, out Rectangle rX1, out Rectangle rHalf, out Rectangle rGop, out Rectangle rXep, out Rectangle rKey, out Rectangle rEsc);
+                                if (!rX1.IsEmpty && rX1.Contains(pt)) { _invShop.ToggleTapMode(MobileInventoryShopHelper.ChestTapMode.SingleOne); _ctxTouchId = tl.Id; sawCtx = true; try { Game1.playSound("smallSelect"); } catch { } continue; }
+                                if (!rHalf.IsEmpty && rHalf.Contains(pt)) { _invShop.ToggleTapMode(MobileInventoryShopHelper.ChestTapMode.HalfStack); _ctxTouchId = tl.Id; sawCtx = true; try { Game1.playSound("smallSelect"); } catch { } continue; }
+                                if (!rGop.IsEmpty && rGop.Contains(pt) && topMenu is ItemGrabMenu grabGop)
+                                {
+                                    try { grabGop.FillOutStacks(); Game1.playSound("Ship"); } catch { }
+                                    _ctxTouchId = tl.Id; sawCtx = true; continue;
+                                }
+                                if (!rXep.IsEmpty && rXep.Contains(pt) && topMenu is ItemGrabMenu grabXep && grabXep.ItemsToGrabMenu?.actualInventory != null)
+                                {
+                                    try { ItemGrabMenu.organizeItemsInList(grabXep.ItemsToGrabMenu.actualInventory); Game1.playSound("Ship"); } catch { }
+                                    _ctxTouchId = tl.Id; sawCtx = true; continue;
+                                }
+                                if (!rKey.IsEmpty && rKey.Contains(pt)) { TriggerKeyboardSmart(pad, br, null, topMenu); _ctxTouchId = tl.Id; sawCtx = true; continue; }
+                                if (!rEsc.IsEmpty && rEsc.Contains(pt)) { _invShop.Reset(); CloseTopmostMenu(rawMenu, topMenu); _ctxTouchId = tl.Id; sawCtx = true; continue; }
+                            }
+                            else
+                            {
+                                if (_ctxX1Rect.Contains(pt)) { br?.ToggleSingleItemMode(pad); _ctxTouchId = tl.Id; sawCtx = true; try { Game1.playSound("smallSelect"); } catch { } continue; }
+                                if (_ctxHalfRect.Contains(pt)) { br?.ToggleHalfStackMode(pad); _ctxTouchId = tl.Id; sawCtx = true; try { Game1.playSound("smallSelect"); } catch { } continue; }
+                                if (_ctxXferRect.Contains(pt)) { br?.ToggleQuickTransferMode(pad); _ctxTouchId = tl.Id; sawCtx = true; try { Game1.playSound("smallSelect"); } catch { } continue; }
+                                if (_ctxKeyRect.Contains(pt)) { TriggerKeyboardSmart(pad, br, null, topMenu); _ctxTouchId = tl.Id; sawCtx = true; continue; }
+                                if (_ctxEscRect.Contains(pt)) { _invShop.Reset(); CloseTopmostMenu(rawMenu, topMenu); _ctxTouchId = tl.Id; sawCtx = true; continue; }
+                            }
                         }
                         else if (showKeyOnly)
                         {
@@ -2314,12 +2453,18 @@ namespace SDVMobileControls
                 UpdateThirdPartyModMenu(pad, topMenu, touches, nowSec);
                 return true;
             }
+            if (topMenu is GameMenu gmSub && IsThirdPartyGameMenuPageTap(gmSub, touches))
+            {
+                _invShop.Reset();
+                UpdateThirdPartyModMenu(pad, topMenu, touches, nowSec);
+                return true;
+            }
 
             // 2. Mobile-style Shop (Buy/Sell/Dresser) & Inventory/Chest Drag-and-Drop / Tap-to-Transfer / Long-Press Split
-            bool pcSplitActive = br != null && (br.GetSingleItemMode(pad) || br.GetHalfStackMode(pad) || br.GetQuickTransferMode(pad));
-            if (_cfg.MobileShopAndDrag && !pcSplitActive)
+            // NEVER let legacy PC split flags kill MobileShopAndDrag when Mobile mode is enabled!
+            if (_cfg.MobileShopAndDrag)
             {
-                if (_invShop.Update(topMenu, touches, MapRawToViewport, ViewportToUi, _vpW, _vpH, nowSec))
+                if (_invShop.Update(topMenu, touches, MapRawToViewport, ViewportToUi, UiToViewport, _vpW, _vpH, nowSec))
                 {
                     ResetMenuTapState();
                     ApplyToPad(pad, Vector2.Zero, false, false, false);
@@ -2357,14 +2502,17 @@ namespace SDVMobileControls
                     _menuTapDragged = false;
                     _menuTapRightClicked = false;
                     _menuTapStartSec = nowSec;
-                    _menuTapImmediateDrag = IsImmediateDragMenu(topMenu, ui);
+                    _menuTapImmediateDrag = IsImmediateDragMenu(topMenu, ui, out _menuDragClampX);
                     _menuTapCameraPan = !_menuTapImmediateDrag && IsCameraPanMenu(topMenu, ui);
 
+                    int dragUiX = (_menuTapImmediateDrag && _menuDragClampX >= 0) ? _menuDragClampX : ui.X;
                     SyncVanillaMouse(vp, _menuTapImmediateDrag);
-                    try { topMenu.performHoverAction(ui.X, ui.Y); } catch { }
+                    try { topMenu.performHoverAction(dragUiX, ui.Y); } catch { }
+                    if (!_menuTapImmediateDrag)
+                        ApplySkillsPageHoverAssist(topMenu, ui);
                     if (_menuTapImmediateDrag)
                     {
-                        try { topMenu.receiveLeftClick(ui.X, ui.Y, true); } catch { }
+                        try { topMenu.receiveLeftClick(dragUiX, ui.Y, true); } catch { }
                     }
                 }
                 else if (tl.State == TouchLocationState.Moved && tl.Id == _menuTapTouchId)
@@ -2374,8 +2522,9 @@ namespace SDVMobileControls
 
                     if (_menuTapImmediateDrag)
                     {
+                        int dragUiX = _menuDragClampX >= 0 ? _menuDragClampX : ui.X;
                         SyncVanillaMouse(vp, true);
-                        try { topMenu.leftClickHeld(ui.X, ui.Y); } catch { }
+                        try { topMenu.leftClickHeld(dragUiX, ui.Y); } catch { }
                     }
                     else if (_menuTapCameraPan)
                     {
@@ -2410,10 +2559,13 @@ namespace SDVMobileControls
                             _menuTapDragged = true;
                             _menuTapAccumY = vp.Y - _menuTapStartVp.Y;
                         }
-                        if (_menuTapDragged)
+                        else if (_menuTapDragged)
                         {
                             _menuTapAccumY += dy;
-                            float step = Math.Max(26f, _vpH * 0.045f);
+                        }
+                        if (_menuTapDragged)
+                        {
+                            float step = Math.Max(28f, _vpH * 0.052f);
                             while (Math.Abs(_menuTapAccumY) >= step)
                             {
                                 int wheel = _menuTapAccumY > 0 ? 120 : -120;
@@ -2433,6 +2585,7 @@ namespace SDVMobileControls
                         {
                             SyncVanillaMouse(vp, false);
                             try { topMenu.performHoverAction(ui.X, ui.Y); } catch { }
+                            ApplySkillsPageHoverAssist(topMenu, ui);
                         }
                     }
                 }
@@ -2446,7 +2599,8 @@ namespace SDVMobileControls
                     }
                     if (_menuTapImmediateDrag)
                     {
-                        try { topMenu.releaseLeftClick(ui.X, ui.Y); } catch { }
+                        int dragUiX = _menuDragClampX >= 0 ? _menuDragClampX : ui.X;
+                        try { topMenu.releaseLeftClick(dragUiX, ui.Y); } catch { }
                     }
                     else if (!_menuTapDragged)
                     {
@@ -2504,6 +2658,10 @@ namespace SDVMobileControls
                             _junimoHoverMenu = null;
                             _junimoHoveredSlot = null;
                         }
+                        else if (topMenu is ItemGrabMenu grabBtn && TryClickExpandedChestSideButton(grabBtn, ui))
+                        {
+                            // Expanded touch target for Chest side buttons (Fill Stacks, Organize, Color Picker, Junimo, Last Shipped)!
+                        }
                         else if (topMenu is MineElevatorMenu mem && mem.elevators != null && TryClickExpandedElevator(mem, ui))
                         {
                             // Expanded touch target for Mine Elevator floor buttons!
@@ -2516,6 +2674,10 @@ namespace SDVMobileControls
                         {
                             // 1st tap highlights choice, 2nd tap confirms cleanly (prevents Heart Event mis-taps!)
                         }
+                        else if (TryRescueUnchosenSkillProfessionTap(topMenu, ui))
+                        {
+                            // 1-tap recovery on SkillsPage when a Level 5/10 profession bar has name == "-1" (#GL-LTQ82M)!
+                        }
                         else
                         {
                             _junimoHoverMenu = null;
@@ -2526,6 +2688,7 @@ namespace SDVMobileControls
                             try { topMenu.performHoverAction(ui.X, ui.Y); } catch { }
                             try { topMenu.receiveLeftClick(ui.X, ui.Y, true); } catch { }
                             try { topMenu.releaseLeftClick(ui.X, ui.Y); } catch { }
+                            ApplySkillsPageHoverAssist(topMenu, ui);
                         }
                     }
                     ResetMenuTapState();
@@ -2612,8 +2775,268 @@ namespace SDVMobileControls
             EnsureBridge(pad)?.ApplyInputWithMouse(pad, Vector2.Zero, false, false, false, outPos, outLeft, false, _rawW, _rawH);
         }
 
+        private bool IsTapInsideEscPill(TouchCollection touches)
+        {
+            for (int i = 0; i < touches.Count; i++)
+            {
+                Vector2 vp = MapRawToViewport(touches[i].Position);
+                if (_ctxQuestEscRect.Contains((int)vp.X, (int)vp.Y))
+                    return true;
+            }
+            return false;
+        }
+
+        private bool IsThirdPartyGameMenuPageTap(GameMenu gm, TouchCollection touches)
+        {
+            IClickableMenu curPage = null;
+            try { curPage = gm?.GetCurrentPage(); } catch { }
+            if (!IsThirdPartyModMenu(curPage))
+                return false;
+            if (_modTouchState != ModTouchState.None || _simMouseLeftPulseFrames > 0 || _simMouseRightPulseFrames > 0)
+                return true;
+            for (int i = 0; i < touches.Count; i++)
+            {
+                Point ui = ViewportToUi(MapRawToViewport(touches[i].Position));
+                // Keep top tab strip & upper-right close button on vanilla GameMenu; route page interior to 3rd-party mouse bridge!
+                if (ui.Y >= gm.yPositionOnScreen + 64 &&
+                    (gm.upperRightCloseButton == null || !gm.upperRightCloseButton.containsPoint(ui.X, ui.Y)))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Dedicated touch handler for Stardew Valley's LevelUpMenu (#GL-LTQ82M):
+        /// Vanilla LevelUpMenu.receiveLeftClick(x, y, playSound) is an empty method (`ret`);
+        /// OK button clicks and Level 5/10 left/right profession card clicks are only processed inside
+        /// LevelUpMenu.update(GameTime) via mouse button state transitions.
+        /// </summary>
+        private void UpdateLevelUpMenuTouches(object pad, LevelUpMenu lum, TouchCollection touches, double nowSec)
+        {
+            if (lum == null)
+                return;
+
+            // Modded LevelUpMenu subclasses (e.g. SpaceCore): drive via real 2-frame simulated mouse click!
+            if (lum.GetType() != typeof(LevelUpMenu))
+            {
+                UpdateTitleScreenTouches(pad, touches, nowSec);
+                return;
+            }
+
+            bool sawTracked = false;
+            for (int i = 0; i < touches.Count; i++)
+            {
+                TouchLocation tl = touches[i];
+                Vector2 vp = MapRawToViewport(tl.Position);
+                Point ui = ViewportToUi(vp);
+                Point rawPt = ViewportToRaw(vp);
+
+                if (tl.State == TouchLocationState.Pressed && _menuTapTouchId < 0)
+                {
+                    _menuTapTouchId = tl.Id;
+                    _menuTapStartVp = vp;
+                    _menuTapStartSec = nowSec;
+                    _menuTapDragged = false;
+                    _lastMenuMouseRaw = rawPt;
+                    SyncVanillaMouse(vp, false);
+                    try { lum.performHoverAction(ui.X, ui.Y); } catch { }
+                    sawTracked = true;
+                }
+                else if (tl.State == TouchLocationState.Moved && tl.Id == _menuTapTouchId)
+                {
+                    _lastMenuMouseRaw = rawPt;
+                    if (Vector2.Distance(vp, _menuTapStartVp) >= Math.Max(28f, _vpH * 0.04f))
+                        _menuTapDragged = true;
+                    SyncVanillaMouse(vp, false);
+                    try { lum.performHoverAction(ui.X, ui.Y); } catch { }
+                    sawTracked = true;
+                }
+                else if ((tl.State == TouchLocationState.Released || tl.State == TouchLocationState.Invalid) && tl.Id == _menuTapTouchId)
+                {
+                    sawTracked = true;
+                    _lastMenuMouseRaw = rawPt;
+                    SyncVanillaMouse(vp, false);
+                    if (!_menuTapDragged)
+                        ExecuteLevelUpMenuTap(lum, ui);
+                    ResetMenuTapState();
+                }
+            }
+
+            if (!sawTracked && _menuTapTouchId >= 0)
+            {
+                if (!_menuTapDragged && (nowSec - _menuTapStartSec) < 0.40)
+                {
+                    Point tapUi = ViewportToUi(_menuTapStartVp);
+                    _lastMenuMouseRaw = ViewportToRaw(_menuTapStartVp);
+                    SyncVanillaMouse(_menuTapStartVp, false);
+                    ExecuteLevelUpMenuTap(lum, tapUi);
+                }
+                ResetMenuTapState();
+            }
+
+            EnsureBridge(pad)?.ApplyInputWithMouse(pad, Vector2.Zero, false, false, false, _lastMenuMouseRaw, false, false, _rawW, _rawH);
+        }
+
+        private static void ExecuteLevelUpMenuTap(LevelUpMenu lum, Point ui)
+        {
+            if (lum == null || !lum.isActive || !lum.CanReceiveInput() || !lum.readyToClose())
+                return;
+
+            try { lum.performHoverAction(ui.X, ui.Y); } catch { }
+
+            if (lum.isProfessionChooser)
+            {
+                var profs = LevelUpProfessionsField?.GetValue(lum) as List<int>;
+                if (profs == null || profs.Count < 2)
+                    return;
+
+                int midX = lum.xPositionOnScreen + lum.width / 2;
+                bool inCardBand = ui.Y >= lum.yPositionOnScreen + 160 && ui.Y <= lum.yPositionOnScreen + lum.height + 24;
+                int pickedIdx = -1;
+
+                if ((lum.leftProfession != null && lum.leftProfession.containsPoint(ui.X, ui.Y)) ||
+                    (inCardBand && ui.X >= lum.xPositionOnScreen - 16 && ui.X < midX))
+                {
+                    pickedIdx = 0;
+                }
+                else if ((lum.rightProfession != null && lum.rightProfession.containsPoint(ui.X, ui.Y)) ||
+                         (inCardBand && ui.X >= midX && ui.X <= lum.xPositionOnScreen + lum.width + 16))
+                {
+                    pickedIdx = 1;
+                }
+
+                if (pickedIdx == 0 || pickedIdx == 1)
+                {
+                    int chosen = profs[pickedIdx];
+                    try
+                    {
+                        if (Game1.player != null && !Game1.player.professions.Contains(chosen))
+                            Game1.player.professions.Add(chosen);
+                        lum.getImmediateProfessionPerk(chosen);
+                        lum.isActive = false;
+                        lum.informationUp = false;
+                        lum.isProfessionChooser = false;
+                        lum.RemoveLevelFromLevelList();
+                        Game1.playSound("shiny4");
+                    }
+                    catch { }
+                }
+                return;
+            }
+
+            if (lum.informationUp && lum.okButton != null)
+            {
+                Rectangle b = lum.okButton.bounds;
+                Rectangle hitRect = new Rectangle(b.X - 32, b.Y - 32, b.Width + 64, b.Height + 64);
+                if (hitRect.Contains(ui))
+                {
+                    try { lum.okButtonClicked(); } catch { }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Expands SkillsPage hover detection across the entire horizontal skill row (icon, name, yellow pips,
+        /// and level number) and anchors _lastMenuMouseRaw onto the row's skillArea so the skill tooltip stays
+        /// visible after lifting the finger on mobile!
+        /// </summary>
+        private void ApplySkillsPageHoverAssist(IClickableMenu topMenu, Point ui)
+        {
+            if (!(topMenu is GameMenu gm))
+                return;
+            SkillsPage sp = null;
+            try { sp = gm.GetCurrentPage() as SkillsPage; } catch { }
+            if (sp == null || sp.skillAreas == null)
+                return;
+
+            try
+            {
+                string curHover = SkillsHoverTextField?.GetValue(sp) as string;
+                if (!string.IsNullOrEmpty(curHover))
+                    return;
+
+                if (ui.X < sp.xPositionOnScreen + 24 || ui.X > sp.xPositionOnScreen + sp.width - 24)
+                    return;
+
+                for (int i = 0; i < sp.skillAreas.Count; i++)
+                {
+                    ClickableTextureComponent area = sp.skillAreas[i];
+                    if (area == null) continue;
+                    if (ui.Y >= area.bounds.Y - 8 && ui.Y <= area.bounds.Bottom + 8)
+                    {
+                        Point c = area.bounds.Center;
+                        sp.performHoverAction(c.X, c.Y);
+                        Vector2 snapVp = UiToViewport(c);
+                        _lastMenuMouseRaw = ViewportToRaw(snapVp);
+                        SyncVanillaMouse(snapVp, false);
+                        return;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// 1-tap rescue on SkillsPage (#GL-LTQ82M): if a player previously missed choosing a Level 5 or 10
+        /// profession (shown as an unchosen skillBar with name == "-1"), tapping that bar opens LevelUpMenu
+        /// immediately so they can pick their profession right away without waiting for bedtime!
+        /// </summary>
+        private static bool TryRescueUnchosenSkillProfessionTap(IClickableMenu topMenu, Point ui)
+        {
+            if (!(topMenu is GameMenu gm))
+                return false;
+            SkillsPage sp = null;
+            try { sp = gm.GetCurrentPage() as SkillsPage; } catch { }
+            if (sp?.skillBars == null)
+                return false;
+
+            for (int i = 0; i < sp.skillBars.Count; i++)
+            {
+                ClickableTextureComponent bar = sp.skillBars[i];
+                if (bar == null || bar.name != "-1")
+                    continue;
+                Rectangle padded = new Rectangle(bar.bounds.X - 8, bar.bounds.Y - 8, bar.bounds.Width + 16, bar.bounds.Height + 16);
+                if (!padded.Contains(ui))
+                    continue;
+
+                int row = bar.myID % 100;
+                int targetLevel = bar.myID >= 200 ? 10 : 5;
+                // SkillsPage row layout -> Farmer skill index: 0=Farming(0), 1=Mining(3), 2=Foraging(2), 3=Fishing(1), 4=Combat(4), 5=Luck(5)
+                int skillIdx = row == 0 ? 0 : (row == 1 ? 3 : (row == 2 ? 2 : (row == 3 ? 1 : (row == 4 ? 4 : 5))));
+                if (targetLevel == 10 && Game1.player != null && LevelUpMenu.getProfessionTitleFromNumber(0) != null)
+                {
+                    // Ensure prerequisite Level 5 profession exists before opening Level 10 chooser
+                    int lv5 = sp.skillBars.Exists(b => b != null && b.myID == 100 + row && b.name == "-1") ? 5 : 10;
+                    targetLevel = lv5;
+                }
+                try
+                {
+                    Game1.playSound("bigSelect");
+                    Game1.activeClickableMenu = new LevelUpMenu(skillIdx, targetLevel);
+                    return true;
+                }
+                catch { }
+            }
+            return false;
+        }
+
         private static void CloseTopmostMenu(IClickableMenu rawMenu, IClickableMenu topMenu)
         {
+            if (topMenu is LevelUpMenu lumEsc)
+            {
+                if (lumEsc.isProfessionChooser)
+                {
+                    try { Game1.playSound("cancel"); } catch { }
+                    return;
+                }
+                if (lumEsc.readyToClose() && lumEsc.CanReceiveInput())
+                {
+                    try { lumEsc.okButtonClicked(); } catch { }
+                    return;
+                }
+            }
             try { Game1.playSound("bigDeSelect"); } catch { }
             try
             {
@@ -2828,6 +3251,88 @@ namespace SDVMobileControls
             return true;
         }
 
+        private void GetMobileInvCtxRects(
+            IClickableMenu topMenu,
+            out Rectangle rX1,
+            out Rectangle rHalf,
+            out Rectangle rGop,
+            out Rectangle rXep,
+            out Rectangle rKey,
+            out Rectangle rEsc)
+        {
+            rX1 = rHalf = rGop = rXep = rKey = rEsc = Rectangle.Empty;
+            int x = _ctxX1Rect.X;
+            int y = _ctxX1Rect.Y;
+            int w = _ctxX1Rect.Width;
+            int h = _ctxX1Rect.Height;
+            int wWide = _ctxXferRect.Width;
+            int gap = Math.Max(4, _ctxHalfRect.X - _ctxX1Rect.Right);
+
+            if (topMenu is ItemGrabMenu grab)
+            {
+                bool hasQuickStack = grab.fillStacksButton != null && grab.reverseGrab && !grab.shippingBin;
+                bool hasOrganize = grab.organizeButton != null && grab.ItemsToGrabMenu?.actualInventory != null;
+                rX1 = new Rectangle(x, y, w, h); x += w + gap;
+                rHalf = new Rectangle(x, y, w, h); x += w + gap;
+                if (hasQuickStack) { rGop = new Rectangle(x, y, wWide, h); x += wWide + gap; }
+                if (hasOrganize) { rXep = new Rectangle(x, y, w, h); x += w + gap; }
+                rEsc = new Rectangle(x, y, w, h);
+                return;
+            }
+            if (topMenu is GameMenu gm && gm.GetCurrentPage() is InventoryPage)
+            {
+                rX1 = new Rectangle(x, y, w, h); x += w + gap;
+                rHalf = new Rectangle(x, y, w, h); x += w + gap;
+                rKey = new Rectangle(x, y, w, h); x += w + gap;
+                rEsc = new Rectangle(x, y, w, h);
+                return;
+            }
+            rEsc = new Rectangle(x, y, w, h);
+        }
+
+        private static bool TryClickExpandedChestSideButton(ItemGrabMenu grab, Point ui)
+        {
+            if (grab == null) return false;
+            // Never steal taps meant for open Chest Color Picker swatches!
+            if (grab.chestColorPicker != null && grab.chestColorPicker.visible && grab.chestColorPicker.isWithinBounds(ui.X, ui.Y))
+                return false;
+
+            const int pad = 14;
+            ClickableComponent[] btns =
+            {
+                grab.fillStacksButton,
+                grab.organizeButton,
+                grab.colorPickerToggleButton,
+                grab.specialButton,
+                grab.junimoNoteIcon,
+                grab.shippingBin ? grab.lastShippedHolder : null
+            };
+            ClickableComponent best = null;
+            float bestDistSq = float.MaxValue;
+            for (int i = 0; i < btns.Length; i++)
+            {
+                var cc = btns[i];
+                if (cc == null || !cc.visible || cc.bounds.Width <= 0 || cc.bounds.Height <= 0) continue;
+                var expanded = new Rectangle(cc.bounds.X - pad, cc.bounds.Y - pad, cc.bounds.Width + pad * 2, cc.bounds.Height + pad * 2);
+                if (expanded.Contains(ui))
+                {
+                    float dx = cc.bounds.Center.X - ui.X;
+                    float dy = cc.bounds.Center.Y - ui.Y;
+                    float dSq = dx * dx + dy * dy;
+                    if (dSq < bestDistSq)
+                    {
+                        bestDistSq = dSq;
+                        best = cc;
+                    }
+                }
+            }
+            if (best == null) return false;
+            try { grab.performHoverAction(best.bounds.Center.X, best.bounds.Center.Y); } catch { }
+            try { grab.receiveLeftClick(best.bounds.Center.X, best.bounds.Center.Y, true); } catch { }
+            try { grab.releaseLeftClick(best.bounds.Center.X, best.bounds.Center.Y); } catch { }
+            return true;
+        }
+
         private static bool TryClickExpandedElevator(MineElevatorMenu mem, Point ui)
         {
             ClickableComponent best = null;
@@ -3028,11 +3533,30 @@ namespace SDVMobileControls
 
             if (showInvCtx)
             {
-                DrawMinimalPill(sb, _ctxX1Rect, "X1", br != null && br.GetSingleItemMode(pad));
-                DrawMinimalPill(sb, _ctxHalfRect, "1/2", br != null && br.GetHalfStackMode(pad));
-                DrawMinimalPill(sb, _ctxXferRect, "XFER", br != null && br.GetQuickTransferMode(pad));
-                DrawMinimalPill(sb, _ctxKeyRect, "KEY", false);
-                PixelUi.DrawPixelPill(sb, _pixel, br, _ctxEscRect, "ESC", PixelRole.Special, false, _vpH);
+                if (_cfg.MobileShopAndDrag)
+                {
+                    GetMobileInvCtxRects(topMenu, out Rectangle rX1, out Rectangle rHalf, out Rectangle rGop, out Rectangle rXep, out Rectangle rKey, out Rectangle rEsc);
+                    if (!rX1.IsEmpty)
+                        DrawMinimalPill(sb, rX1, "X1", _invShop.TapMode == MobileInventoryShopHelper.ChestTapMode.SingleOne);
+                    if (!rHalf.IsEmpty)
+                        DrawMinimalPill(sb, rHalf, "1/2", _invShop.TapMode == MobileInventoryShopHelper.ChestTapMode.HalfStack);
+                    if (!rGop.IsEmpty)
+                        PixelUi.DrawPixelPill(sb, _pixel, br, rGop, "GOP", PixelRole.Action, false, _vpH);
+                    if (!rXep.IsEmpty)
+                        PixelUi.DrawPixelPill(sb, _pixel, br, rXep, "XEP", PixelRole.Tool, false, _vpH);
+                    if (!rKey.IsEmpty)
+                        DrawMinimalPill(sb, rKey, "KEY", false);
+                    if (!rEsc.IsEmpty)
+                        PixelUi.DrawPixelPill(sb, _pixel, br, rEsc, "ESC", PixelRole.Special, false, _vpH);
+                }
+                else
+                {
+                    DrawMinimalPill(sb, _ctxX1Rect, "X1", br != null && br.GetSingleItemMode(pad));
+                    DrawMinimalPill(sb, _ctxHalfRect, "1/2", br != null && br.GetHalfStackMode(pad));
+                    DrawMinimalPill(sb, _ctxXferRect, "XFER", br != null && br.GetQuickTransferMode(pad));
+                    DrawMinimalPill(sb, _ctxKeyRect, "KEY", false);
+                    PixelUi.DrawPixelPill(sb, _pixel, br, _ctxEscRect, "ESC", PixelRole.Special, false, _vpH);
+                }
             }
             else if (showKeyOnly)
             {
@@ -3105,8 +3629,9 @@ namespace SDVMobileControls
                 ClearCustomButtonTouches();
                 ResetGameplayState();
                 TouchCollection mgTouches = TouchPanel.GetState();
-                PollGamepadAutoHide(mgTouches.Count);
-                if (ModEntry.ExternalInput != null && ModEntry.ExternalInput.IsExternalDeviceActive && mgTouches.Count == 0)
+                int activeMgTouches = CountActiveTouches(mgTouches);
+                PollGamepadAutoHide(activeMgTouches);
+                if (ModEntry.ExternalInput != null && ModEntry.ExternalInput.IsExternalDeviceActive && activeMgTouches == 0)
                 {
                     _minigamePad.Reset();
                     br?.ResetVirtualPad(pad);
@@ -3166,11 +3691,12 @@ namespace SDVMobileControls
             }
             PollAutoKeyboard(pad, br, nowSec, null);
             TouchCollection touches = TouchPanel.GetState();
-            PollGamepadAutoHide(touches.Count);
+            int activeTouches = CountActiveTouches(touches);
+            PollGamepadAutoHide(activeTouches);
 
             // Physical External Peripheral active (Full Gamepad / Keyboard / Mouse) with no direct screen touch:
             // yield completely to Harmony ExternalInputBridge so Stardew & SMAPI receive 100% real controller/keyboard/mouse state!
-            if (ModEntry.ExternalInput != null && ModEntry.ExternalInput.IsExternalDeviceActive && touches.Count == 0 && !_guiHidden)
+            if (ModEntry.ExternalInput != null && ModEntry.ExternalInput.IsExternalDeviceActive && activeTouches == 0 && !_guiHidden)
             {
                 br?.ResetVirtualPad(pad);
                 return;
@@ -3245,6 +3771,13 @@ namespace SDVMobileControls
                     // Multi-touch (e.g. 3-finger double tap for Mod Garden) cancels single-tap restore timer
                     _hideTapTouchId = -1;
                     _lastHideTapSec = -10.0;
+                }
+                if (ModEntry.ExternalInput != null && ModEntry.ExternalInput.IsExternalDeviceActive && activeTouches == 0)
+                {
+                    // Do NOT call ApplyToPad/ForwardInputToGame while external gamepad is driving in HIDE GUI mode,
+                    // otherwise TouchVirtualPad calls Game1.player.Halt() every frame and breaks running animation!
+                    br?.ResetVirtualPad(pad);
+                    return;
                 }
                 ApplyToPad(pad, Vector2.Zero, false, false, false);
                 return;
@@ -3421,7 +3954,8 @@ namespace SDVMobileControls
                         {
                             EnterEditLayoutMode();
                             try { Game1.playSound("smallSelect"); } catch { }
-                            continue;
+                            ApplyToPad(pad, Vector2.Zero, false, false, false);
+                            return;
                         }
                     }
                 }
@@ -4511,14 +5045,14 @@ namespace SDVMobileControls
                     if (_editCancelBtnRect.Contains(pt))
                     {
                         _cfg.Reload(force: true);
-                        _editMode = false;
+                        ExitEditLayoutMode();
                         try { Game1.playSound("cancel"); } catch { }
                         return;
                     }
                     if (_editSaveBtnRect.Contains(pt))
                     {
                         _cfg.Save();
-                        _editMode = false;
+                        ExitEditLayoutMode();
                         try { Game1.playSound("coin"); } catch { }
                         return;
                     }
@@ -5575,6 +6109,7 @@ namespace SDVMobileControls
 
         private void OpenSaveMenu()
         {
+            _gamepadHideHud = false;
             ResetGameplayState();
             _saveMenuOpen = true;
             _saveSwipeTouchId = -1;
@@ -5582,7 +6117,22 @@ namespace SDVMobileControls
             var slots = _saveSlots.GetSlotsForCurrentSave(forceRefresh: true);
             _saveSelectedIdx = slots.Count > 0 ? 0 : -1;
             _saveScrollIdx = 0;
+            ModEntry.ExternalInput?.SetManagedSuppressed(true);
+            ModEntry.ExternalInput?.FlushFarmerMovementAndState(restoreAutoRun: false);
             try { Game1.playSound("bigSelect"); } catch { }
+        }
+
+        private void CloseSaveMenu(bool flushExternal = true)
+        {
+            bool wasOpen = _saveMenuOpen;
+            _saveMenuOpen = false;
+            _saveSwipeTouchId = -1;
+            _saveSwipeMoved = false;
+            if (wasOpen && flushExternal)
+            {
+                ModEntry.ExternalInput?.SetManagedSuppressed(IsUiOverlayBlockingExternalInput(_lastPadObj));
+                ModEntry.ExternalInput?.FlushFarmerMovementAndState(restoreAutoRun: true);
+            }
         }
 
         private Rectangle GetSaveSlotRowRect(int visibleRowIdx)
@@ -5617,7 +6167,7 @@ namespace SDVMobileControls
                 {
                     if (_saveCloseRect.Contains(pt) || !_savePanelRect.Contains(pt))
                     {
-                        _saveMenuOpen = false;
+                        CloseSaveMenu(flushExternal: true);
                         try { Game1.playSound("bigDeSelect"); } catch { }
                         return;
                     }
@@ -5634,7 +6184,7 @@ namespace SDVMobileControls
                         else
                         {
                             ShowSaveToast("DANG LUU BAN MOI...", nowSec);
-                            _saveMenuOpen = false;
+                            CloseSaveMenu(flushExternal: true);
                             try { Game1.playSound("coin"); } catch { }
                         }
                         return;
@@ -5647,7 +6197,7 @@ namespace SDVMobileControls
                             ShowSaveToast(msg, nowSec);
                             if (ok)
                             {
-                                _saveMenuOpen = false;
+                                CloseSaveMenu(flushExternal: true);
                                 try { Game1.playSound("bigSelect"); } catch { }
                             }
                             else
@@ -5659,7 +6209,7 @@ namespace SDVMobileControls
                         {
                             bool ok = br.TryQuickLoad(out string msg);
                             ShowSaveToast(msg, nowSec);
-                            if (ok) _saveMenuOpen = false;
+                            if (ok) CloseSaveMenu(flushExternal: true);
                         }
                         else
                         {

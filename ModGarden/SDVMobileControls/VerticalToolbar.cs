@@ -202,14 +202,18 @@ namespace SDVMobileControls
                 {
                     float dy = vp.Y - _touchLastY;
                     _touchLastY = vp.Y;
-                    if (!_touchDragged && Math.Abs(vp.Y - _touchStartY) >= 14f)
+                    float dragThresh = Math.Max(18f, _slotSize * 0.24f);
+                    if (!_touchDragged && Math.Abs(vp.Y - _touchStartY) >= dragThresh)
                         _touchDragged = true;
 
                     if (_touchDragged && maxScroll > 0f)
                     {
                         float deltaRows = -dy / Math.Max(20f, rowPitch);
                         _scrollRows = Math.Clamp(_scrollRows + deltaRows, 0f, maxScroll);
-                        _scrollVel = deltaRows;
+                        if (Math.Abs(dy) >= 0.4f)
+                            _scrollVel = _scrollVel * 0.45f + deltaRows * 0.55f;
+                        else
+                            _scrollVel *= 0.80f;
                     }
                     return true;
                 }

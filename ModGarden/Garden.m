@@ -1864,6 +1864,19 @@ static NSArray<NSDictionary *> *sdvDiagnoseMods(NSString *root) {
                             [NSString stringWithFormat:@"Mod biên dịch riêng Android: %@", dispName],
                             [NSString stringWithFormat:@"%@ dùng SMAPI Android, có thể lỗi trên bản PC 1.6.15 — khuyên tải bản PC.", entryDll], nil);
                     }
+                    // Inform users when an active C# mod relies on 0Harmony runtime IL patching (which is a safe no-op on 0% JIT iOS)
+                    BOOL isSafeHarmonyUser = [uidLow hasPrefix:@"pathoschild.contentpatcher"] ||
+                                             [uidLow hasPrefix:@"spacechase0.genericmodconfigmenu"] ||
+                                             [uidLow hasPrefix:@"smapi."] ||
+                                             [uidLow containsString:@"portraiture"] ||
+                                             [uidLow containsString:@"hdportraits"] ||
+                                             [uidLow containsString:@"hd.portraits"] ||
+                                             [uidLow isEqualToString:@"digus.mailframeworkmod"];
+                    if (!isSafeHarmonyUser && (sdvDataContainsAscii(dd, "0Harmony") || sdvDataContainsAscii(dd, "HarmonyLib"))) {
+                        addIssue([@"harmony0jit:" stringByAppendingString:uidLow], @"warn",
+                            [NSString stringWithFormat:@"Mod C# dùng Harmony (0%% JIT): %@", dispName],
+                            @"Trên iOS không bật JIT, các móc nối Harmony C# (như Visible Fish, Alternative Textures, More Grass…) tự bỏ qua để tránh văng game; chỉ phần sự kiện SMAPI & gói Content Patcher ([CP]) hoạt động.", nil);
+                    }
                     NSSet<NSString *> *doms = sdvExtractModHookDomains(packDir, entryDll, dd);
                     if (doms.count) modHookDomains[uidLow] = doms;
                 }

@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
+using Microsoft.Xna.Framework.Input;
 
 namespace SDVMobileControls
 {
@@ -62,6 +64,11 @@ namespace SDVMobileControls
         private readonly PropertyInfo _settingsMouseModeProp;
         private readonly FieldInfo _rawScreenWidthField;
         private readonly FieldInfo _rawScreenHeightField;
+        private readonly FieldInfo _activeKeysListField;
+        private readonly FieldInfo _simKeysSetField;
+        private readonly FieldInfo _inputInstanceField;
+        private readonly FieldInfo _currentKeyboardStateFieldInfo;
+        private readonly FieldInfo _emptyKeyboardStateField;
         private readonly object _mouseModePointAndClick;
 
         private readonly MethodInfo _drawCenteredString;
@@ -134,6 +141,11 @@ namespace SDVMobileControls
             _settingsMouseModeProp = setType?.GetProperty("MouseControlMode", any);
             _rawScreenWidthField = padType.GetField("_rawScreenWidth", any);
             _rawScreenHeightField = padType.GetField("_rawScreenHeight", any);
+            _activeKeysListField = padType.GetField("_activeKeysList", any);
+            _simKeysSetField = padType.GetField("_simKeysSet", any);
+            _inputInstanceField = padType.GetField("_inputInstance", stat);
+            _currentKeyboardStateFieldInfo = padType.GetField("_currentKeyboardStateField", stat);
+            _emptyKeyboardStateField = padType.GetField("_emptyKeyboardState", stat);
             if (_settingsMouseModeProp != null && _settingsMouseModeProp.PropertyType.IsEnum)
             {
                 try { _mouseModePointAndClick = Enum.ToObject(_settingsMouseModeProp.PropertyType, 0); } catch { }
@@ -439,7 +451,40 @@ namespace SDVMobileControls
             _setButtonLT?.Invoke(pad, _argBoolFalse);
             _setButtonRT?.Invoke(pad, _argBoolFalse);
             _setButtonMenu?.Invoke(pad, _argBoolFalse);
-            _resetSimulatedMouse?.Invoke(pad, null);
+            var ext = ModEntry.ExternalInput;
+            if (ext != null && ext.ShouldOverrideMouse)
+            {
+                var ms = ext.CurrentMouseState;
+                _arg1[0] = new Point(ms.X, ms.Y);
+                _setSimulatedMousePosition?.Invoke(pad, _arg1);
+                _setSimulatedMouseLeftDown?.Invoke(pad, _argBoolFalse);
+                _setSimulatedMouseRightDown?.Invoke(pad, _argBoolFalse);
+            }
+            else
+            {
+                _resetSimulatedMouse?.Invoke(pad, null);
+            }
+
+            // Clear any leftover touch-simulated WASD keys inside TouchVirtualPad and Game1.input
+            // WITHOUT invoking ForwardInputToGame() (which would call Game1.player.Halt() and
+            // break the farmer's running animation when an external gamepad is driving movement!).
+            try
+            {
+                if (_activeKeysListField?.GetValue(pad) is List<Keys> activeKeys && activeKeys.Count > 0)
+                    activeKeys.Clear();
+                if (_simKeysSetField?.GetValue(pad) is HashSet<Keys> simSet && simSet.Count > 0)
+                    simSet.Clear();
+                if (ModEntry.ExternalInput == null || !ModEntry.ExternalInput.HasPhysicalKeysPressed)
+                {
+                    object inp = _inputInstanceField?.GetValue(null);
+                    if (inp != null && _currentKeyboardStateFieldInfo?.GetValue(null) is FieldInfo curKbFld)
+                    {
+                        object emptyKb = _emptyKeyboardStateField?.GetValue(null) ?? default(KeyboardState);
+                        curKbFld.SetValue(inp, emptyKb);
+                    }
+                }
+            }
+            catch { }
         }
 
         public void ApplyPhysicalGamePad(object pad, Vector2 stick, bool btnX, bool btnA, bool btnB, bool btnY, bool btnLT, bool btnRT, bool btnMenu)

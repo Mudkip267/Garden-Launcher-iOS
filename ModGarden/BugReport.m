@@ -221,9 +221,10 @@ static NSDictionary *sdvBuildBugReportBundle(NSString *docsPath) {
     [sysTxt appendFormat:@"Device      : %@\n", hwModel];
     [sysTxt appendFormat:@"iOS Version : %@\n", iosVer];
     [sysTxt appendFormat:@"RAM         : %@\n", ramInfo];
-    [sysTxt appendFormat:@"Control Mode: %@ (VerticalTB=%d, AutoTool=%d, AutoAttack=%d, 30FPS=%d, ReduceWeather=%d)\n",
+    NSString *ecoFpsStr = (mc.batterySaverFpsMode == 1) ? @"30" : ((mc.batterySaverFpsMode == 2) ? @"45" : @"60");
+    [sysTxt appendFormat:@"Control Mode: %@ (VerticalTB=%d, AutoTool=%d, AutoAttack=%d, EcoFPS=%@, ReduceWeather=%d)\n",
         ctrlMode, mc.verticalToolbar ? 1 : 0, mc.autoTool ? 1 : 0, mc.autoAttack ? 1 : 0,
-        mc.batterySaver30Fps ? 1 : 0, mc.reduceWeather ? 1 : 0];
+        ecoFpsStr, mc.reduceWeather ? 1 : 0];
     [sysTxt appendFormat:@"\nInstalled Mods (%lu enabled / %lu total):\n", (unsigned long)enabledLines.count, (unsigned long)allModLines.count];
     for (NSString *ml in allModLines) [sysTxt appendFormat:@"  %@\n", ml];
     if (issueLines.count) {

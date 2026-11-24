@@ -308,11 +308,27 @@ static NSString *sdvProbeLocalNetwork(void) {
     BOOL _showPcKeyPicker;
     BOOL _tbAutoEnabledBySlider;
     NSInteger _ctrlSectionTab; // 0=Điều khiển, 1=Giao diện, 2=Phím PC, 3=Hiệu năng
+
+    // Live SMAPI / Engine Console Log tab refs
+    NSInteger _consoleSource; // 0=SMAPI, 1=Engine, 2=Boot
+    NSInteger _consoleFilter; // 0=All, 1=Warn+Err, 2=Info+Warn+Err
+    BOOL _consoleAutoScroll;
+    BOOL _consolePaused;
+    UITextView *_consoleTextView;
+    UILabel *_consoleMetaLbl;
+    SDVAppleButton *_consoleLiveBtn;
+    SDVAppleButton *_consoleScrollBtn;
+    NSTimer *_consoleTimer;
+    long long _consoleLastSize;
+    time_t _consoleLastMtime;
+    NSString *_consoleRawCache;
 }
 
 -(void)dealloc {
     [_ramUiTimer invalidate];
     _ramUiTimer = nil;
+    [_consoleTimer invalidate];
+    _consoleTimer = nil;
 }
 
 -(void)viewWillAppear:(BOOL)animated {
@@ -329,6 +345,8 @@ static NSString *sdvProbeLocalNetwork(void) {
     [super viewWillDisappear:animated];
     [_ramUiTimer invalidate];
     _ramUiTimer = nil;
+    [_consoleTimer invalidate];
+    _consoleTimer = nil;
 }
 
 -(BOOL)prefersStatusBarHidden { return YES; }
@@ -375,6 +393,10 @@ static NSString *sdvProbeLocalNetwork(void) {
     _savesList = sdvListSaves(_root.path);
     _tab = 0;
     _uiSubTab = 0;
+    _consoleSource = 0;
+    _consoleFilter = 0;
+    _consoleAutoScroll = YES;
+    _consolePaused = NO;
 
     [self buildShell];
     [self renderAll:NO];
@@ -516,7 +538,7 @@ static NSString *sdvProbeLocalNetwork(void) {
     pinInsets(brandRow, brandWrap, UIEdgeInsetsMake(2, 4, 4, 2));
     [sideStack addArrangedSubview:brandWrap];
 
-    // 8 Native iOS Split-View Sidebar Rows (Cài Mod | Thư viện | File Save | Hiệu năng & Nút | Co-op LAN | Hướng dẫn | Báo lỗi | Credit)
+    // 9 Native iOS Split-View Sidebar Rows (Cài Mod | Thư viện | Console Log | File Save | Hiệu năng & Nút | Co-op LAN | Hướng dẫn | Báo lỗi | Credit)
     UIScrollView *tabScroll = [UIScrollView new];
     tabScroll.showsVerticalScrollIndicator = NO;
     tabScroll.alwaysBounceVertical = NO;
@@ -535,10 +557,13 @@ static NSString *sdvProbeLocalNetwork(void) {
         [_sidebarTabs.widthAnchor constraintEqualToAnchor:tabScroll.frameLayoutGuide.widthAnchor]
     ]];
 
+    // Display order places Console Log (tag 8) right beside Thư viện Mod while preserving all existing tab IDs 0..7!
+    NSInteger tabOrder[9] = {0, 1, 8, 2, 3, 4, 5, 6, 7};
     NSMutableArray *tBtns = [NSMutableArray array];
-    for (NSInteger i = 0; i < 8; i++) {
+    for (NSInteger pos = 0; pos < 9; pos++) {
+        NSInteger tagId = tabOrder[pos];
         SDVAppleButton *b = [SDVAppleButton buttonWithType:UIButtonTypeCustom];
-        b.tag = i;
+        b.tag = tagId;
         b.layer.cornerRadius = 8.5;
         b.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeading;
 #pragma clang diagnostic push
@@ -547,7 +572,7 @@ static NSString *sdvProbeLocalNetwork(void) {
         b.imageEdgeInsets = UIEdgeInsetsMake(0, 0, 0, 8);
         b.titleEdgeInsets = UIEdgeInsetsMake(0, 8, 0, -8);
 #pragma clang diagnostic pop
-        [b.heightAnchor constraintEqualToConstant:28.0].active = YES;
+        [b.heightAnchor constraintEqualToConstant:26.5].active = YES;
         [b addTarget:self action:@selector(selectTab:) forControlEvents:UIControlEventTouchUpInside];
         [_sidebarTabs addArrangedSubview:b];
         [tBtns addObject:b];
@@ -560,8 +585,13 @@ static NSString *sdvProbeLocalNetwork(void) {
     [sideStack addArrangedSubview:hint];
 
 #ifdef GARDEN_IN_GAME
+    SDVAppleButton *restartBtn = mkIOSButton(@"Khởi động lại", @"arrow.clockwise", kBgCardSubtle, kTintOrange, 13, UIEdgeInsetsMake(6, 10, 6, 10));
+    [restartBtn.heightAnchor constraintEqualToConstant:32].active = YES;
+    [restartBtn addTarget:self action:@selector(restartGameTapped) forControlEvents:UIControlEventTouchUpInside];
+    [sideStack addArrangedSubview:restartBtn];
+
     SDVAppleButton *closeBtn = mkIOSButton(@"Về game", @"play.fill", kTintBlue, UIColor.whiteColor, 14, UIEdgeInsetsMake(8, 12, 8, 12));
-    [closeBtn.heightAnchor constraintEqualToConstant:38].active = YES;
+    [closeBtn.heightAnchor constraintEqualToConstant:36].active = YES;
     [closeBtn addTarget:self action:@selector(closeManager) forControlEvents:UIControlEventTouchUpInside];
     [sideStack addArrangedSubview:closeBtn];
 #endif
@@ -582,11 +612,12 @@ static NSString *sdvProbeLocalNetwork(void) {
         @"Co-op LAN",
         @"Hướng dẫn",
         @"Báo lỗi",
-        @"Credit"
+        @"Credit",
+        @"Console Log"
     ];
-    NSArray *navTitles = @[@"Cài đặt Mod", @"Thư viện Mod", @"Quản lý File Save", @"Hiệu năng & Điều khiển", @"Co-op LAN / IP", @"Hướng dẫn sử dụng", @"Báo lỗi cho Admin", @"Credit & Cộng đồng"];
-    NSArray *icons = @[@"square.and.arrow.down.fill", @"square.stack.3d.up.fill", @"externaldrive.fill", @"slider.horizontal.3", @"wifi", @"book.fill", @"ladybug.fill", @"heart.fill"];
-    NSArray *iconTints = @[kTintBlue, kTintIndigo, kTintOrange, kTintGreen, kTintTeal, kTintPurple, kTintRed, kTintPink];
+    NSArray *navTitles = @[@"Cài đặt Mod", @"Thư viện Mod", @"Quản lý File Save", @"Hiệu năng & Điều khiển", @"Co-op LAN / IP", @"Hướng dẫn sử dụng", @"Báo lỗi cho Admin", @"Credit & Cộng đồng", @"Console Log (Realtime)"];
+    NSArray *icons = @[@"square.and.arrow.down.fill", @"square.stack.3d.up.fill", @"externaldrive.fill", @"slider.horizontal.3", @"wifi", @"book.fill", @"ladybug.fill", @"heart.fill", @"terminal.fill"];
+    NSArray *iconTints = @[kTintBlue, kTintIndigo, kTintOrange, kTintGreen, kTintTeal, kTintPurple, kTintRed, kTintPink, kTintTeal];
 
     if (_tab >= 0 && _tab < (NSInteger)navTitles.count) {
         _navTitleLabel.text = navTitles[_tab];
@@ -594,12 +625,14 @@ static NSString *sdvProbeLocalNetwork(void) {
 
     for (NSInteger i = 0; i < (NSInteger)_tabButtons.count; i++) {
         SDVAppleButton *b = _tabButtons[i];
-        BOOL active = (i == _tab);
+        NSInteger tid = b.tag;
+        if (tid < 0 || tid >= (NSInteger)titles.count) continue;
+        BOOL active = (tid == _tab);
         b.backgroundColor = active ? kTintBlue : UIColor.clearColor;
         UIColor *fg = active ? UIColor.whiteColor : kInkPrimary;
-        b.tintColor = active ? UIColor.whiteColor : iconTints[i];
-        [b setImage:sfIcon(icons[i], 14.0, active ? UIImageSymbolWeightSemibold : UIImageSymbolWeightMedium) forState:UIControlStateNormal];
-        [b setTitle:titles[i] forState:UIControlStateNormal];
+        b.tintColor = active ? UIColor.whiteColor : iconTints[tid];
+        [b setImage:sfIcon(icons[tid], 14.0, active ? UIImageSymbolWeightSemibold : UIImageSymbolWeightMedium) forState:UIControlStateNormal];
+        [b setTitle:titles[tid] forState:UIControlStateNormal];
         [b setTitleColor:fg forState:UIControlStateNormal];
         b.titleLabel.font = iosFont(13.0, active ? UIFontWeightSemibold : UIFontWeightRegular);
     }
@@ -636,6 +669,12 @@ static NSString *sdvProbeLocalNetwork(void) {
     _ramBarFillW = nil;
     [_ramUiTimer invalidate];
     _ramUiTimer = nil;
+    [_consoleTimer invalidate];
+    _consoleTimer = nil;
+    _consoleTextView = nil;
+    _consoleMetaLbl = nil;
+    _consoleLiveBtn = nil;
+    _consoleScrollBtn = nil;
     [_sliderLabels removeAllObjects];
 
     if (_message.length) {
@@ -680,6 +719,7 @@ static NSString *sdvProbeLocalNetwork(void) {
     else if (_tab == 3) [self renderUiStudioTab];
     else if (_tab == 4) [self renderCoopTab];
     else if (_tab == 5) [self renderGuideTab];
+    else if (_tab == 8) [self renderConsoleLogTab];
     else [self renderCreditTab];
 
     if (animate && !UIAccessibilityIsReduceMotionEnabled()) {
@@ -1630,9 +1670,23 @@ static NSString *sdvProbeLocalNetwork(void) {
 
         // Card 2: FPS, Thời tiết & Pin
         [_pane addArrangedSubview:mkSectionTitle(@"FPS, Thời tiết & Pin")];
+        UIStackView *fpsRow = mkVStack(6);
+        UIStackView *fpsTop = mkHStack(10);
+        [fpsTop addArrangedSubview:mkSettingsIconBadge(@"battery.75", kTintGreen, 28)];
+        UIStackView *fpsTxt = mkVStack(1);
+        [fpsTxt addArrangedSubview:mkLabel(@"Tiết kiệm pin / Giảm nóng máy (Giới hạn FPS)", 13.5, UIFontWeightRegular, kInkPrimary)];
+        [fpsTxt addArrangedSubview:mkLabel(@"Logic game vẫn chuẩn 60Hz · tự lên 60 FPS khi câu cá / minigame", 11.5, UIFontWeightRegular, kInkSecondary)];
+        [fpsTop addArrangedSubview:fpsTxt];
+        [fpsRow addArrangedSubview:fpsTop];
+        UISegmentedControl *fpsSeg = [[UISegmentedControl alloc] initWithItems:@[@"60 FPS", @"45 FPS", @"30 FPS"]];
+        NSInteger fpsIdx = (_mobileCfg.batterySaverFpsMode == 2) ? 1 : ((_mobileCfg.batterySaverFpsMode == 1) ? 2 : 0);
+        fpsSeg.selectedSegmentIndex = fpsIdx;
+        [fpsSeg addTarget:self action:@selector(batterySaverFpsChanged:) forControlEvents:UIControlEventValueChanged];
+        [fpsRow addArrangedSubview:fpsSeg];
+
         [_pane addArrangedSubview:mkGroupedRows(@[
             [self mkSettingsSwitchRow:@"Giảm hạt thời tiết thừa (giữ mượt FPS lúc mưa/bão)" icon:@"cloud.rain.fill" color:kTintTeal on:_mobileCfg.reduceWeather tag:39],
-            [self mkSettingsSwitchRow:@"Tiết kiệm pin / Giảm nóng máy (30 FPS, logic vẫn chuẩn 60Hz)" icon:@"battery.75" color:kTintGreen on:_mobileCfg.batterySaver30Fps tag:49]
+            fpsRow
         ], 48)];
 
         // Card 3: Lưu tự động, Tạm dừng & Âm thanh
@@ -1884,6 +1938,15 @@ static NSString *sdvProbeLocalNetwork(void) {
     [self enterMobileEditLayoutTapped];
 }
 
+-(void)batterySaverFpsChanged:(UISegmentedControl *)seg {
+    _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
+    NSInteger idx = seg.selectedSegmentIndex;
+    // Seg 0 = 60 FPS (0), Seg 1 = 45 FPS (2), Seg 2 = 30 FPS (1) — preserves backwards compatibility with saver30fps=1!
+    _mobileCfg.batterySaverFpsMode = (idx == 1) ? 2 : ((idx == 2) ? 1 : 0);
+    [_mobileCfg saveToDocuments:_root.path];
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+}
+
 -(void)autoSaveMinutesChanged:(UISegmentedControl *)seg {
     _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
     NSInteger map[4] = {0, 3, 5, 10};
@@ -2014,7 +2077,7 @@ static NSString *sdvProbeLocalNetwork(void) {
             case 46: _mobileCfg.fishingHaptic = sw.isOn; break;
             case 47: _mobileCfg.safeDialogueAndTooltip = sw.isOn; break;
             case 48: _mobileCfg.verticalToolbar = sw.isOn; break;
-            case 49: _mobileCfg.batterySaver30Fps = sw.isOn; break;
+            case 49: _mobileCfg.batterySaverFpsMode = sw.isOn ? 1 : 0; break;
             case 50: _mobileCfg.autoHideOnGamepad = sw.isOn; break;
             case 51: _mobileCfg.leftHandedMobile = sw.isOn; break;
             case 52: _mobileCfg.respectMuteSwitch = sw.isOn; break;
@@ -2258,6 +2321,256 @@ static NSString *sdvProbeLocalNetwork(void) {
     [_pane addArrangedSubview:mkSectionTitle(@"3. Tối ưu RAM, Cảnh báo Lưu Game 85% / 90% & Lưu ý iOS 14–27+")];
     UILabel *tipsLbl = mkLabel(@"• Cảnh báo RAM tự động 2 mức: Khi RAM đạt 85% giới hạn iOS, hệ thống tự động gom rác bộ nhớ (Auto-GC), hiện thông báo cam và nhấp nháy nút SAVE! để nhắc bạn lưu game. Khi đạt 90%+, hệ thống bật cảnh báo đỏ khẩn cấp và chớp nhanh nút SAVE! để tránh văng game do tràn RAM.\n• Mẹo giảm RAM khi dùng mod Recolor / Expansion: Các mod Recolor nạp nhiều bảng ảnh bản đồ vào bộ nhớ của Content Patcher. Bạn có thể bấm Dọn RAM ngay trong tab Hiệu năng & Nút hoặc tắt bớt tuỳ chọn recolor lễ hội trong GMCM.\n• Tương thích iOS 14 – iOS 27+: Chạy thuần Mono Interpreter (0% JIT), không cần bật JIT. Khi cập nhật IPA mới, chỉ cần cài đè cùng Bundle ID để giữ nguyên toàn bộ save và mod.", 13, UIFontWeightRegular, kInkSecondary);
     [_pane addArrangedSubview:mkGroupedCard(tipsLbl, UIEdgeInsetsMake(12, 14, 12, 14))];
+}
+
+// ============================================================
+// TAB 8: CONSOLE LOG REALTIME (SMAPI / ENGINE / BOOT)
+// ============================================================
+-(NSString *)consoleLogFilePath {
+    NSString *docs = _root.path ?: [fm() URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject.path;
+    if (!docs.length) return nil;
+    NSString *errDir = join(docs, @"ErrorLogs");
+    if (_consoleSource == 1) return join(errDir, @"engine-latest.log");
+    if (_consoleSource == 2) return join(errDir, @"launcher-boot.log");
+    return join(errDir, @"SMAPI-latest.txt");
+}
+
+-(NSString *)readTailOfFile:(NSString *)path maxBytes:(NSUInteger)maxBytes totalSize:(long long *)outTotal {
+    if (outTotal) *outTotal = 0;
+    if (!path.length) return @"";
+    int fd = open(path.fileSystemRepresentation, O_RDONLY);
+    if (fd < 0) return @"";
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size <= 0) {
+        close(fd);
+        return @"";
+    }
+    long long fsz = (long long)st.st_size;
+    if (outTotal) *outTotal = fsz;
+    off_t startOff = (fsz > (long long)maxBytes) ? (off_t)(fsz - (long long)maxBytes) : 0;
+    if (startOff > 0) lseek(fd, startOff, SEEK_SET);
+    size_t toRead = (size_t)(fsz - (long long)startOff);
+    NSMutableData *buf = [NSMutableData dataWithLength:toRead];
+    ssize_t n = read(fd, buf.mutableBytes, toRead);
+    close(fd);
+    if (n <= 0) return @"";
+    buf.length = (NSUInteger)n;
+    NSString *txt = [[NSString alloc] initWithData:buf encoding:NSUTF8StringEncoding];
+    if (!txt) txt = [[NSString alloc] initWithData:buf encoding:NSISOLatin1StringEncoding] ?: @"";
+    if (startOff > 0) {
+        NSRange nl = [txt rangeOfString:@"\n"];
+        if (nl.location != NSNotFound && nl.location + 1 < txt.length) {
+            txt = [txt substringFromIndex:nl.location + 1];
+        }
+    }
+    return txt;
+}
+
+-(void)refreshConsoleLogForce:(BOOL)force {
+    if (!_consoleTextView) return;
+    if (_consolePaused && !force) return;
+
+    NSString *path = [self consoleLogFilePath];
+    struct stat st;
+    BOOL exists = (path.length && stat(path.fileSystemRepresentation, &st) == 0);
+    if (!exists) {
+        _consoleLastSize = -1;
+        _consoleLastMtime = 0;
+        _consoleRawCache = @"";
+        _consoleMetaLbl.text = @"Chưa có tệp log — hãy đợi SMAPI khởi chạy hoặc vào game.";
+        _consoleTextView.attributedText = [[NSAttributedString alloc] initWithString:@"(Chưa có dữ liệu log)"
+            attributes:@{
+                NSFontAttributeName: [UIFont monospacedSystemFontOfSize:11.0 weight:UIFontWeightRegular],
+                NSForegroundColorAttributeName: rgb(0x94A3B8)
+            }];
+        return;
+    }
+
+    if (!force && (long long)st.st_size == _consoleLastSize && st.st_mtime == _consoleLastMtime) {
+        return;
+    }
+    _consoleLastSize = (long long)st.st_size;
+    _consoleLastMtime = st.st_mtime;
+
+    long long totalBytes = 0;
+    NSString *raw = [self readTailOfFile:path maxBytes:64 * 1024 totalSize:&totalBytes];
+    NSArray<NSString *> *lines = [raw componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet];
+
+    UIFont *monoFont = [UIFont fontWithName:@"Menlo-Regular" size:10.5]
+        ?: [UIFont monospacedSystemFontOfSize:10.5 weight:UIFontWeightRegular];
+    UIFont *monoBold = [UIFont fontWithName:@"Menlo-Bold" size:10.5]
+        ?: [UIFont monospacedSystemFontOfSize:10.5 weight:UIFontWeightSemibold];
+
+    NSMutableAttributedString *attr = [NSMutableAttributedString new];
+    NSMutableString *plainOut = [NSMutableString new];
+    NSInteger shown = 0, errCnt = 0, warnCnt = 0;
+
+    for (NSString *line in lines) {
+        if (!line.length) continue;
+        BOOL isErr = ([line containsString:@" ERROR "] || [line containsString:@"[ERROR]"] || [line containsString:@"[ERR]"] ||
+                      [line containsString:@" ALERT "] || [line containsString:@"Exception"] || [line containsString:@"FATAL"]);
+        BOOL isWarn = !isErr && ([line containsString:@" WARN "] || [line containsString:@"[WARN]"] || [line containsString:@"WARNING"]);
+        BOOL isTrace = !isErr && !isWarn && ([line containsString:@" TRACE "] || [line containsString:@" DEBUG "] || [line containsString:@"[DEBUG]"]);
+
+        if (isErr) errCnt++;
+        else if (isWarn) warnCnt++;
+
+        if (_consoleFilter == 1 && !isErr && !isWarn) continue;
+        if (_consoleFilter == 2 && isTrace) continue;
+
+        UIColor *col = rgb(0xE2E8F0);
+        UIFont *fnt = monoFont;
+        if (isErr) { col = rgb(0xFF6B6B); fnt = monoBold; }
+        else if (isWarn) { col = rgb(0xFFD166); fnt = monoBold; }
+        else if (isTrace) { col = rgb(0x8899AC); }
+        else if ([line containsString:@"Loaded "] || [line containsString:@"LIVE INTERCEPT"] || [line containsString:@"Successfully"]) {
+            col = rgb(0x6EE7B7);
+        }
+
+        NSString *ln = [line stringByAppendingString:@"\n"];
+        [plainOut appendString:ln];
+        [attr appendAttributedString:[[NSAttributedString alloc] initWithString:ln attributes:@{
+            NSFontAttributeName: fnt,
+            NSForegroundColorAttributeName: col
+        }]];
+        shown++;
+    }
+
+    _consoleRawCache = plainOut;
+    if (shown == 0) {
+        _consoleTextView.attributedText = [[NSAttributedString alloc] initWithString:@"(Không có dòng log nào khớp bộ lọc hiện tại)"
+            attributes:@{ NSFontAttributeName: monoFont, NSForegroundColorAttributeName: rgb(0x94A3B8) }];
+    } else {
+        _consoleTextView.attributedText = attr;
+    }
+
+    NSString *fname = path.lastPathComponent ?: @"log";
+    _consoleMetaLbl.text = [NSString stringWithFormat:@"%@ · %.1f KB · %ld dòng · %ld lỗi · %ld cảnh báo%@",
+        fname, (double)totalBytes / 1024.0, (long)shown, (long)errCnt, (long)warnCnt,
+        _consolePaused ? @" · ĐÃ TẠM DỪNG" : @" · LIVE 1s"];
+
+    if (_consoleAutoScroll && _consoleTextView.attributedText.length > 0) {
+        NSRange endRange = NSMakeRange(_consoleTextView.attributedText.length - 1, 1);
+        [_consoleTextView scrollRangeToVisible:endRange];
+    }
+}
+
+-(void)consoleSourceChanged:(UISegmentedControl *)seg {
+    _consoleSource = seg.selectedSegmentIndex;
+    _consoleLastSize = -1;
+    [self refreshConsoleLogForce:YES];
+}
+
+-(void)consoleFilterChanged:(UISegmentedControl *)seg {
+    _consoleFilter = seg.selectedSegmentIndex;
+    _consoleLastSize = -1;
+    [self refreshConsoleLogForce:YES];
+}
+
+-(void)consoleTogglePause {
+    _consolePaused = !_consolePaused;
+    [_consoleLiveBtn setTitle:_consolePaused ? @"Tiếp tục" : @"LIVE" forState:UIControlStateNormal];
+    _consoleLiveBtn.backgroundColor = _consolePaused ? kBgCardSubtle : [kTintGreen colorWithAlphaComponent:0.18];
+    [_consoleLiveBtn setTitleColor:_consolePaused ? kInkPrimary : kTintGreen forState:UIControlStateNormal];
+    if (!_consolePaused) {
+        _consoleLastSize = -1;
+        [self refreshConsoleLogForce:YES];
+    } else {
+        [self refreshConsoleLogForce:NO];
+    }
+}
+
+-(void)consoleToggleAutoScroll {
+    _consoleAutoScroll = !_consoleAutoScroll;
+    _consoleScrollBtn.backgroundColor = _consoleAutoScroll ? [kTintBlue colorWithAlphaComponent:0.16] : kBgCardSubtle;
+    [_consoleScrollBtn setTitleColor:_consoleAutoScroll ? kTintBlue : kInkSecondary forState:UIControlStateNormal];
+    if (_consoleAutoScroll && _consoleTextView.attributedText.length > 0) {
+        [_consoleTextView scrollRangeToVisible:NSMakeRange(_consoleTextView.attributedText.length - 1, 1)];
+    }
+}
+
+-(void)consoleRefreshNow {
+    _consoleLastSize = -1;
+    [self refreshConsoleLogForce:YES];
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+}
+
+-(void)consoleCopyTapped {
+    NSString *txt = _consoleRawCache.length ? _consoleRawCache : (_consoleTextView.text ?: @"");
+    UIPasteboard.generalPasteboard.string = txt;
+    [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];
+    _message = [NSString stringWithFormat:@"Đã sao chép %lu ký tự Console Log vào bộ nhớ tạm.", (unsigned long)txt.length];
+    _messageIsError = NO;
+    [self renderAll:NO];
+}
+
+-(void)renderConsoleLogTab {
+    UIStackView *ctrlBox = mkVStack(8);
+
+    UISegmentedControl *srcSeg = [[UISegmentedControl alloc] initWithItems:@[@"SMAPI Log", @"Engine Log", @"Boot Log"]];
+    srcSeg.selectedSegmentIndex = MAX(0, MIN(2, _consoleSource));
+    [srcSeg addTarget:self action:@selector(consoleSourceChanged:) forControlEvents:UIControlEventValueChanged];
+    [ctrlBox addArrangedSubview:srcSeg];
+
+    UISegmentedControl *fltSeg = [[UISegmentedControl alloc] initWithItems:@[@"Tất cả", @"Lỗi & Cảnh báo", @"Bỏ TRACE"]];
+    fltSeg.selectedSegmentIndex = MAX(0, MIN(2, _consoleFilter));
+    [fltSeg addTarget:self action:@selector(consoleFilterChanged:) forControlEvents:UIControlEventValueChanged];
+    [ctrlBox addArrangedSubview:fltSeg];
+
+    UIStackView *btnRow = mkHStack(8);
+    _consoleLiveBtn = mkIOSButton(_consolePaused ? @"Tiếp tục" : @"LIVE", @"dot.radiowaves.left.and.right",
+        _consolePaused ? kBgCardSubtle : [kTintGreen colorWithAlphaComponent:0.18],
+        _consolePaused ? kInkPrimary : kTintGreen, 12.0, UIEdgeInsetsMake(6, 10, 6, 10));
+    [_consoleLiveBtn addTarget:self action:@selector(consoleTogglePause) forControlEvents:UIControlEventTouchUpInside];
+
+    _consoleScrollBtn = mkIOSButton(@"Tự cuộn", @"arrow.down.to.line",
+        _consoleAutoScroll ? [kTintBlue colorWithAlphaComponent:0.16] : kBgCardSubtle,
+        _consoleAutoScroll ? kTintBlue : kInkSecondary, 12.0, UIEdgeInsetsMake(6, 10, 6, 10));
+    [_consoleScrollBtn addTarget:self action:@selector(consoleToggleAutoScroll) forControlEvents:UIControlEventTouchUpInside];
+
+    SDVAppleButton *refBtn = mkIOSButton(@"Làm mới", @"arrow.clockwise", kBgCardSubtle, kInkPrimary, 12.0, UIEdgeInsetsMake(6, 10, 6, 10));
+    [refBtn addTarget:self action:@selector(consoleRefreshNow) forControlEvents:UIControlEventTouchUpInside];
+
+    SDVAppleButton *cpBtn = mkIOSButton(@"Sao chép", @"doc.on.doc", kTintBlue, UIColor.whiteColor, 12.0, UIEdgeInsetsMake(6, 10, 6, 10));
+    [cpBtn addTarget:self action:@selector(consoleCopyTapped) forControlEvents:UIControlEventTouchUpInside];
+
+    [btnRow addArrangedSubview:_consoleLiveBtn];
+    [btnRow addArrangedSubview:_consoleScrollBtn];
+    [btnRow addArrangedSubview:refBtn];
+    [btnRow addArrangedSubview:[UIView new]];
+    [btnRow addArrangedSubview:cpBtn];
+    [ctrlBox addArrangedSubview:btnRow];
+
+    _consoleMetaLbl = mkLabel(@"Đang đọc log realtime…", 11.5, UIFontWeightMedium, kInkSecondary);
+    [ctrlBox addArrangedSubview:_consoleMetaLbl];
+
+    [_pane addArrangedSubview:mkGroupedCard(ctrlBox, UIEdgeInsetsMake(10, 12, 10, 12))];
+
+    UITextView *tv = [UITextView new];
+    tv.editable = NO;
+    tv.selectable = YES;
+    tv.backgroundColor = rgb(0x0B101A);
+    tv.layer.cornerRadius = 12;
+    tv.layer.cornerCurve = kCACornerCurveContinuous;
+    tv.layer.borderWidth = 1.0;
+    tv.layer.borderColor = rgb(0x233044).CGColor;
+    tv.textContainerInset = UIEdgeInsetsMake(10, 10, 10, 10);
+    tv.indicatorStyle = UIScrollViewIndicatorStyleWhite;
+    tv.translatesAutoresizingMaskIntoConstraints = NO;
+    CGFloat tvH = MAX(220.0, MIN(480.0, UIScreen.mainScreen.bounds.size.height * 0.56));
+    [tv.heightAnchor constraintEqualToConstant:tvH].active = YES;
+    _consoleTextView = tv;
+    [_pane addArrangedSubview:tv];
+
+    _consoleLastSize = -1;
+    _consoleLastMtime = 0;
+    [self refreshConsoleLogForce:YES];
+
+    __weak typeof(self) weakSelf = self;
+    _consoleTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
+        (void)t;
+        [weakSelf refreshConsoleLogForce:NO];
+    }];
 }
 
 // ============================================================
@@ -2728,6 +3041,31 @@ static NSArray<UTType *> *sdvAllArchivePickerTypes(void) {
 -(void)closeSheet { [self dismissViewControllerAnimated:YES completion:nil]; }
 
 #ifdef GARDEN_IN_GAME
+-(void)restartGameTapped {
+    if (_veil) return;
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Khởi động lại game?"
+        message:@"Nếu đang chơi trong nông trại, hãy lưu game (SAVE hoặc đi ngủ) trước để không mất tiến độ.\n\nỨng dụng sẽ lưu cấu hình, đóng sạch tiến trình rồi bạn chỉ cần mở lại Garden Launcher để nạp mod / cài đặt mới."
+        preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"Đóng & Khởi động lại" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *act) {
+        (void)act;
+        @try {
+            [_uiCfg saveToDocuments:_root.path];
+            [_mobileCfg saveToDocuments:_root.path];
+            [NSUserDefaults.standardUserDefaults synchronize];
+            fflush(NULL);
+        } @catch (NSException *ex) { }
+        [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
+        [UIView animateWithDuration:0.18 animations:^{
+            self.view.window.alpha = 0.0;
+        } completion:^(BOOL finished) {
+            (void)finished;
+            _exit(0);
+        }];
+    }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"Huỷ" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+
 -(void)closeManager {
     if (_veil) return;
     [_uiCfg saveToDocuments:_root.path];

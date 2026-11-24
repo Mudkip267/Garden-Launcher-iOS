@@ -19,7 +19,7 @@ jobs:
           mkdir -p work/stage
           curl -fsSL -o work/base-v1.0.1.ipa "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.1/Garden-Launcher-1.0.1-iOS26-27.ipa"
           ACTUAL_SHA=$(shasum -a 256 work/base-v1.0.1.ipa | awk '{print tolower($1)}')
-          EXPECTED_SHA="9cce16442b1ae1e8af1ff69cad2f62d8289f7c2e0880c793fcf23d32cf431073"
+          EXPECTED_SHA="d73e4aad60825853a3c0510de1fe50a550fe56c9ab028b6d47c80ddd2a41c1b9"
           if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
             echo "SHA-256 mismatch: $ACTUAL_SHA != $EXPECTED_SHA"
             exit 1

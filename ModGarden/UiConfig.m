@@ -287,7 +287,7 @@ static long long sdvNextRev(void) {
 @property(nonatomic, assign) NSInteger toolbarSide; // 0=Left, 1=Right
 @property(nonatomic, assign) float toolbarY; // 0.0..1.0 (vertical position)
 @property(nonatomic, assign) BOOL showToolHitLocation; // Default YES
-@property(nonatomic, assign) BOOL batterySaver30Fps;
+@property(nonatomic, assign) NSInteger batterySaverFpsMode; // 0=60 FPS, 1=30 FPS, 2=45 FPS
 @property(nonatomic, assign) float pixelOpacity; // 0.25..1.00
 @property(nonatomic, assign) BOOL leftHandedMobile;
 @property(nonatomic, assign) float joyDeadzone; // 0.05..0.25
@@ -338,7 +338,7 @@ static long long sdvNextRev(void) {
     c.toolbarSide = 0;
     c.toolbarY = 0.50f;
     c.showToolHitLocation = YES;
-    c.batterySaver30Fps = NO;
+    c.batterySaverFpsMode = 0;
     c.pixelOpacity = 1.00f;
     c.leftHandedMobile = NO;
     c.joyDeadzone = 0.11f;
@@ -429,7 +429,10 @@ static long long sdvNextRev(void) {
         } else if ([k isEqualToString:@"toolhitbox"]) {
             c.showToolHitLocation = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
         } else if ([k isEqualToString:@"saver30fps"]) {
-            c.batterySaver30Fps = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
+            NSString *lv = v.lowercaseString;
+            if ([lv isEqualToString:@"2"] || [lv isEqualToString:@"45"]) c.batterySaverFpsMode = 2;
+            else if ([lv isEqualToString:@"1"] || [lv isEqualToString:@"true"] || [lv isEqualToString:@"30"]) c.batterySaverFpsMode = 1;
+            else c.batterySaverFpsMode = 0;
         } else if ([k isEqualToString:@"pixelopacity"]) {
             c.pixelOpacity = sdvClampf(v.floatValue, 0.25f, 1.00f);
         } else if ([k isEqualToString:@"lefthanded"]) {
@@ -554,7 +557,7 @@ static long long sdvNextRev(void) {
         (long)(self.toolbarSide == 1 ? 1 : 0),
         sdvClampf(self.toolbarY, 0.0f, 1.0f),
         self.showToolHitLocation ? 1 : 0,
-        self.batterySaver30Fps ? 1 : 0,
+        (int)MAX(0, MIN(2, self.batterySaverFpsMode)),
         sdvClampf(self.pixelOpacity, 0.25f, 1.00f), self.leftHandedMobile ? 1 : 0,
         sdvClampf(self.joyDeadzone, 0.05f, 0.25f), self.respectMuteSwitch ? 1 : 0];
     for (NSString *ex in extraLines) {

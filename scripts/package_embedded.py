@@ -45,7 +45,9 @@ def prepare_binary(path, dependency=None, sig_capacity=128*1024):
         count += 1
     if sig is None:
         offset = (len(data)+15) & ~15
-        capacity = sig_capacity
+        # Scale code-signature capacity dynamically for large Hybrid AOT binaries (~42 MB+ needs >600 KB!)
+        min_needed = (((len(data) // 4096) + 128) * 80 + 65536 + 16383) & ~16383
+        capacity = max(sig_capacity, min_needed)
         data.extend(bytes(offset+capacity-len(data)))
         commands.extend(struct.pack("<4I",29,16,offset,capacity))
         count += 1
@@ -99,7 +101,7 @@ def validate_macho(data, label, is_dylib=False, require_chained=True):
     assert bytes.fromhex("fade0cc0") in data, f"{label}: missing SuperBlob signature"
 
 
-def build(base, library, signer, output, host_dll=None, touch_dll=None, lidgren_dll=None, launcher_only=False, use_scene=True, min_ios="14.0"):
+def build(base, library, signer, output, host_dll=None, touch_dll=None, lidgren_dll=None, launcher_only=False, use_scene=True, min_ios="14.0", smapi_from=None):
     script = Path(__file__).resolve().parent
     mod_root = script if (script / "SDVMobileControls").is_dir() else (script.parent / "ModGarden")
     with tempfile.TemporaryDirectory() as temp, zipfile.ZipFile(base) as original:
@@ -123,15 +125,35 @@ def build(base, library, signer, output, host_dll=None, touch_dll=None, lidgren_
             smapi_dir = fw / "BundledSMAPI"
             smapi_dir.mkdir(parents=True, exist_ok=True)
             smapi_dll_key = APP + "BundledCompatibility/StardewModdingAPI.dll"
-            if smapi_dll_key in original.NameToInfo:
-                (smapi_dir / "StardewModdingAPI.dll").write_bytes(original.read(smapi_dll_key))
             si_prefix = APP + "BundledGame/smapi-internal/"
-            for item in original.infolist():
-                if not item.is_dir() and item.filename.startswith(si_prefix):
-                    rel = item.filename[len(si_prefix):]
-                    dst = smapi_dir / "smapi-internal" / rel
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    dst.write_bytes(original.read(item.filename))
+            smapi_src = original
+            extra_smapi_zip = None
+            if smapi_dll_key not in original.NameToInfo and smapi_from and Path(smapi_from).is_file():
+                extra_smapi_zip = zipfile.ZipFile(smapi_from)
+                smapi_src = extra_smapi_zip
+            try:
+                if smapi_dll_key in smapi_src.NameToInfo:
+                    (smapi_dir / "StardewModdingAPI.dll").write_bytes(smapi_src.read(smapi_dll_key))
+                for item in smapi_src.infolist():
+                    if not item.is_dir() and item.filename.startswith(si_prefix):
+                        rel = item.filename[len(si_prefix):]
+                        dst = smapi_dir / "smapi-internal" / rel
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        dst.write_bytes(smapi_src.read(item.filename))
+                # Supplement non-AOT compatibility helper DLLs if missing from an upstream Hybrid AOT base IPA
+                if extra_smapi_zip is not None:
+                    for helper_dll in (
+                        "GalaxyCSharp.dll",
+                        "Steamworks.NET.dll",
+                        "Microsoft.Extensions.DependencyInjection.Abstractions.dll",
+                        "System.Data.HashFunction.Core.dll",
+                    ):
+                        hkey = APP + helper_dll
+                        if not (app / helper_dll).exists() and hkey in extra_smapi_zip.NameToInfo:
+                            (app / helper_dll).write_bytes(extra_smapi_zip.read(hkey))
+            finally:
+                if extra_smapi_zip is not None:
+                    extra_smapi_zip.close()
         (fw/FRAMEWORK).write_bytes(Path(library).read_bytes())
         prepare_binary(fw/FRAMEWORK, sig_capacity=48*1024)
         (fw/"Info.plist").write_bytes(plistlib.dumps(dict(CFBundleExecutable=FRAMEWORK,
@@ -303,8 +325,12 @@ if __name__=="__main__":
     if not use_scene:
         args.remove("--no-scene")
     min_ios = "14.0"
+    smapi_from = None
     for a in list(args):
         if a.startswith("--min-ios="):
             min_ios = a.split("=", 1)[1]
             args.remove(a)
-    build(*args, launcher_only=launcher, use_scene=use_scene, min_ios=min_ios)
+        elif a.startswith("--smapi-from="):
+            smapi_from = a.split("=", 1)[1]
+            args.remove(a)
+    build(*args, launcher_only=launcher, use_scene=use_scene, min_ios=min_ios, smapi_from=smapi_from)

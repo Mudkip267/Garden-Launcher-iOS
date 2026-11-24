@@ -211,6 +211,11 @@ namespace SDVMobileControls
         // Community Center bundle & safe 2-tap Dialogue state
         private static readonly System.Reflection.FieldInfo RenovateFreezeField =
             typeof(RenovateMenu).GetField("freeze", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+        private static readonly System.Reflection.FieldInfo ShopScrollRunnerField =
+            typeof(ShopMenu).GetField("scrollBarRunner", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+        private static readonly System.Reflection.FieldInfo LoadGameScrollRunnerField =
+            typeof(LoadGameMenu).GetField("scrollBarRunner", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+        private int _menuDragClampX = -1;
         private JunimoNoteMenu _junimoHoverMenu;
         private ClickableComponent _junimoHoveredSlot;
         private DialogueBox _dlgHoverMenu;
@@ -783,6 +788,7 @@ namespace SDVMobileControls
             _menuTapImmediateDrag = false;
             _menuTapCameraPan = false;
             _menuTapRightClicked = false;
+            _menuDragClampX = -1;
             _modTouchState = ModTouchState.None;
         }
 
@@ -1413,10 +1419,27 @@ namespace SDVMobileControls
             return true;
         }
 
-        private static bool IsTouchOnOptionsSliderOrBar(List<ClickableComponent> slots, List<OptionsElement> opts, int curIdx, int menuRightX, Point uiPt)
+        private static bool IsPointNearScrollTrack(Rectangle track, ClickableComponent thumb, Point uiPt, out int centerX)
         {
-            // Right-edge scrollbar drag strip
-            if (uiPt.X >= menuRightX - 76)
+            centerX = -1;
+            Rectangle r = track;
+            if (thumb != null && thumb.bounds.Width > 0 && thumb.bounds.Height > 0)
+                r = r.IsEmpty ? thumb.bounds : Rectangle.Union(r, thumb.bounds);
+            if (r.IsEmpty || r.Height <= 4)
+                return false;
+            Rectangle hit = new Rectangle(r.X - 28, r.Y - 12, r.Width + 56, r.Height + 24);
+            if (hit.Contains(uiPt))
+            {
+                centerX = r.Center.X;
+                return true;
+            }
+            return false;
+        }
+
+        private static bool IsTouchOnOptionsSliderOrBar(List<ClickableComponent> slots, List<OptionsElement> opts, int curIdx, int menuTopY, int menuRightX, Point uiPt)
+        {
+            // Right-edge scrollbar drag strip (skip top close-X area!)
+            if (uiPt.X >= menuRightX - 76 && uiPt.Y >= menuTopY + 64)
                 return true;
             if (slots == null || opts == null) return false;
             for (int i = 0; i < slots.Count; i++)
@@ -1432,19 +1455,20 @@ namespace SDVMobileControls
             return false;
         }
 
-        private static bool IsImmediateDragMenu(IClickableMenu menu, Point uiPt)
+        private static bool IsImmediateDragMenu(IClickableMenu menu, Point uiPt, out int clampDragX)
         {
+            clampDragX = -1;
             if (menu is GameMenu gm)
             {
                 try
                 {
                     IClickableMenu page = gm.GetCurrentPage();
                     if (page is OptionsPage op)
-                        return IsTouchOnOptionsSliderOrBar(op.optionSlots, op.options, op.currentItemIndex, op.xPositionOnScreen + op.width, uiPt);
+                        return IsTouchOnOptionsSliderOrBar(op.optionSlots, op.options, op.currentItemIndex, op.yPositionOnScreen, op.xPositionOnScreen + op.width, uiPt);
                     if (page is SocialPage sp)
-                        return (sp.scrollBar != null && sp.scrollBar.containsPoint(uiPt.X, uiPt.Y)) || sp.scrollBarRunner.Contains(uiPt);
+                        return IsPointNearScrollTrack(sp.scrollBarRunner, sp.scrollBar, uiPt, out clampDragX);
                     if (page is AnimalPage ap)
-                        return (ap.scrollBar != null && ap.scrollBar.containsPoint(uiPt.X, uiPt.Y)) || ap.scrollBarRunner.Contains(uiPt);
+                        return IsPointNearScrollTrack(ap.scrollBarRunner, ap.scrollBar, uiPt, out clampDragX);
                 }
                 catch { }
             }
@@ -1452,7 +1476,7 @@ namespace SDVMobileControls
             {
                 try
                 {
-                    return IsTouchOnOptionsSliderOrBar(ago.optionSlots, ago.options, ago.currentItemIndex, ago.xPositionOnScreen + ago.width, uiPt);
+                    return IsTouchOnOptionsSliderOrBar(ago.optionSlots, ago.options, ago.currentItemIndex, ago.yPositionOnScreen, ago.xPositionOnScreen + ago.width, uiPt);
                 }
                 catch { }
             }
@@ -1481,8 +1505,8 @@ namespace SDVMobileControls
             {
                 try
                 {
-                    if (sm.scrollBar != null && sm.scrollBar.containsPoint(uiPt.X, uiPt.Y))
-                        return true;
+                    Rectangle runner = (ShopScrollRunnerField?.GetValue(sm) is Rectangle r) ? r : Rectangle.Empty;
+                    return IsPointNearScrollTrack(runner, sm.scrollBar, uiPt, out clampDragX);
                 }
                 catch { }
             }
@@ -1490,8 +1514,8 @@ namespace SDVMobileControls
             {
                 try
                 {
-                    if (lgm.scrollBar != null && lgm.scrollBar.containsPoint(uiPt.X, uiPt.Y))
-                        return true;
+                    Rectangle runner = (LoadGameScrollRunnerField?.GetValue(lgm) is Rectangle r) ? r : Rectangle.Empty;
+                    return IsPointNearScrollTrack(runner, lgm.scrollBar, uiPt, out clampDragX);
                 }
                 catch { }
             }
@@ -1499,8 +1523,7 @@ namespace SDVMobileControls
             {
                 try
                 {
-                    if (ql.scrollBarBounds.Contains(uiPt))
-                        return true;
+                    return IsPointNearScrollTrack(ql.scrollBarBounds, ql.scrollBar, uiPt, out clampDragX);
                 }
                 catch { }
             }
@@ -1740,7 +1763,7 @@ namespace SDVMobileControls
             // If Mobile Buy/Sell/Split/Crafting Popup is open OR dragging an item, give it top priority!
             if (_invShop.IsPopupOpen || (_cfg.MobileShopAndDrag && _invShop.IsDraggingItem))
             {
-                if (_invShop.Update(topMenu, touches, MapRawToViewport, ViewportToUi, _vpW, _vpH, nowSec))
+                if (_invShop.Update(topMenu, touches, MapRawToViewport, ViewportToUi, UiToViewport, _vpW, _vpH, nowSec))
                 {
                     ResetMenuTapState();
                     ApplyToPad(pad, Vector2.Zero, false, false, false);
@@ -1785,11 +1808,32 @@ namespace SDVMobileControls
                     {
                         if (showInvCtx)
                         {
-                            if (_ctxX1Rect.Contains(pt)) { br?.ToggleSingleItemMode(pad); _ctxTouchId = tl.Id; sawCtx = true; try { Game1.playSound("smallSelect"); } catch { } continue; }
-                            if (_ctxHalfRect.Contains(pt)) { br?.ToggleHalfStackMode(pad); _ctxTouchId = tl.Id; sawCtx = true; try { Game1.playSound("smallSelect"); } catch { } continue; }
-                            if (_ctxXferRect.Contains(pt)) { br?.ToggleQuickTransferMode(pad); _ctxTouchId = tl.Id; sawCtx = true; try { Game1.playSound("smallSelect"); } catch { } continue; }
-                            if (_ctxKeyRect.Contains(pt)) { br?.TriggerVirtualKeyboard(pad); _ctxTouchId = tl.Id; sawCtx = true; continue; }
-                            if (_ctxEscRect.Contains(pt)) { _invShop.Reset(); CloseTopmostMenu(rawMenu, topMenu); _ctxTouchId = tl.Id; sawCtx = true; continue; }
+                            if (_cfg.MobileShopAndDrag)
+                            {
+                                GetMobileInvCtxRects(topMenu, out Rectangle rX1, out Rectangle rHalf, out Rectangle rGop, out Rectangle rXep, out Rectangle rKey, out Rectangle rEsc);
+                                if (!rX1.IsEmpty && rX1.Contains(pt)) { _invShop.ToggleTapMode(MobileInventoryShopHelper.ChestTapMode.SingleOne); _ctxTouchId = tl.Id; sawCtx = true; try { Game1.playSound("smallSelect"); } catch { } continue; }
+                                if (!rHalf.IsEmpty && rHalf.Contains(pt)) { _invShop.ToggleTapMode(MobileInventoryShopHelper.ChestTapMode.HalfStack); _ctxTouchId = tl.Id; sawCtx = true; try { Game1.playSound("smallSelect"); } catch { } continue; }
+                                if (!rGop.IsEmpty && rGop.Contains(pt) && topMenu is ItemGrabMenu grabGop)
+                                {
+                                    try { grabGop.FillOutStacks(); Game1.playSound("Ship"); } catch { }
+                                    _ctxTouchId = tl.Id; sawCtx = true; continue;
+                                }
+                                if (!rXep.IsEmpty && rXep.Contains(pt) && topMenu is ItemGrabMenu grabXep && grabXep.ItemsToGrabMenu?.actualInventory != null)
+                                {
+                                    try { ItemGrabMenu.organizeItemsInList(grabXep.ItemsToGrabMenu.actualInventory); Game1.playSound("Ship"); } catch { }
+                                    _ctxTouchId = tl.Id; sawCtx = true; continue;
+                                }
+                                if (!rKey.IsEmpty && rKey.Contains(pt)) { br?.TriggerVirtualKeyboard(pad); _ctxTouchId = tl.Id; sawCtx = true; continue; }
+                                if (!rEsc.IsEmpty && rEsc.Contains(pt)) { _invShop.Reset(); CloseTopmostMenu(rawMenu, topMenu); _ctxTouchId = tl.Id; sawCtx = true; continue; }
+                            }
+                            else
+                            {
+                                if (_ctxX1Rect.Contains(pt)) { br?.ToggleSingleItemMode(pad); _ctxTouchId = tl.Id; sawCtx = true; try { Game1.playSound("smallSelect"); } catch { } continue; }
+                                if (_ctxHalfRect.Contains(pt)) { br?.ToggleHalfStackMode(pad); _ctxTouchId = tl.Id; sawCtx = true; try { Game1.playSound("smallSelect"); } catch { } continue; }
+                                if (_ctxXferRect.Contains(pt)) { br?.ToggleQuickTransferMode(pad); _ctxTouchId = tl.Id; sawCtx = true; try { Game1.playSound("smallSelect"); } catch { } continue; }
+                                if (_ctxKeyRect.Contains(pt)) { br?.TriggerVirtualKeyboard(pad); _ctxTouchId = tl.Id; sawCtx = true; continue; }
+                                if (_ctxEscRect.Contains(pt)) { _invShop.Reset(); CloseTopmostMenu(rawMenu, topMenu); _ctxTouchId = tl.Id; sawCtx = true; continue; }
+                            }
                         }
                         else if (showKeyOnly)
                         {
@@ -1838,10 +1882,10 @@ namespace SDVMobileControls
             }
 
             // 2. Mobile-style Shop (Buy/Sell/Dresser) & Inventory/Chest Drag-and-Drop / Tap-to-Transfer / Long-Press Split
-            bool pcSplitActive = br != null && (br.GetSingleItemMode(pad) || br.GetHalfStackMode(pad) || br.GetQuickTransferMode(pad));
-            if (_cfg.MobileShopAndDrag && !pcSplitActive)
+            // NEVER let legacy PC split flags kill MobileShopAndDrag when Mobile mode is enabled!
+            if (_cfg.MobileShopAndDrag)
             {
-                if (_invShop.Update(topMenu, touches, MapRawToViewport, ViewportToUi, _vpW, _vpH, nowSec))
+                if (_invShop.Update(topMenu, touches, MapRawToViewport, ViewportToUi, UiToViewport, _vpW, _vpH, nowSec))
                 {
                     ResetMenuTapState();
                     ApplyToPad(pad, Vector2.Zero, false, false, false);
@@ -1879,14 +1923,15 @@ namespace SDVMobileControls
                     _menuTapDragged = false;
                     _menuTapRightClicked = false;
                     _menuTapStartSec = nowSec;
-                    _menuTapImmediateDrag = IsImmediateDragMenu(topMenu, ui);
+                    _menuTapImmediateDrag = IsImmediateDragMenu(topMenu, ui, out _menuDragClampX);
                     _menuTapCameraPan = !_menuTapImmediateDrag && IsCameraPanMenu(topMenu, ui);
 
+                    int dragUiX = (_menuTapImmediateDrag && _menuDragClampX >= 0) ? _menuDragClampX : ui.X;
                     SyncVanillaMouse(vp, _menuTapImmediateDrag);
-                    try { topMenu.performHoverAction(ui.X, ui.Y); } catch { }
+                    try { topMenu.performHoverAction(dragUiX, ui.Y); } catch { }
                     if (_menuTapImmediateDrag)
                     {
-                        try { topMenu.receiveLeftClick(ui.X, ui.Y, true); } catch { }
+                        try { topMenu.receiveLeftClick(dragUiX, ui.Y, true); } catch { }
                     }
                 }
                 else if (tl.State == TouchLocationState.Moved && tl.Id == _menuTapTouchId)
@@ -1896,8 +1941,9 @@ namespace SDVMobileControls
 
                     if (_menuTapImmediateDrag)
                     {
+                        int dragUiX = _menuDragClampX >= 0 ? _menuDragClampX : ui.X;
                         SyncVanillaMouse(vp, true);
-                        try { topMenu.leftClickHeld(ui.X, ui.Y); } catch { }
+                        try { topMenu.leftClickHeld(dragUiX, ui.Y); } catch { }
                     }
                     else if (_menuTapCameraPan)
                     {
@@ -1932,10 +1978,13 @@ namespace SDVMobileControls
                             _menuTapDragged = true;
                             _menuTapAccumY = vp.Y - _menuTapStartVp.Y;
                         }
-                        if (_menuTapDragged)
+                        else if (_menuTapDragged)
                         {
                             _menuTapAccumY += dy;
-                            float step = Math.Max(26f, _vpH * 0.045f);
+                        }
+                        if (_menuTapDragged)
+                        {
+                            float step = Math.Max(28f, _vpH * 0.052f);
                             while (Math.Abs(_menuTapAccumY) >= step)
                             {
                                 int wheel = _menuTapAccumY > 0 ? 120 : -120;
@@ -1968,7 +2017,8 @@ namespace SDVMobileControls
                     }
                     if (_menuTapImmediateDrag)
                     {
-                        try { topMenu.releaseLeftClick(ui.X, ui.Y); } catch { }
+                        int dragUiX = _menuDragClampX >= 0 ? _menuDragClampX : ui.X;
+                        try { topMenu.releaseLeftClick(dragUiX, ui.Y); } catch { }
                     }
                     else if (!_menuTapDragged)
                     {
@@ -2025,6 +2075,10 @@ namespace SDVMobileControls
                         {
                             _junimoHoverMenu = null;
                             _junimoHoveredSlot = null;
+                        }
+                        else if (topMenu is ItemGrabMenu grabBtn && TryClickExpandedChestSideButton(grabBtn, ui))
+                        {
+                            // Expanded touch target for Chest side buttons (Fill Stacks, Organize, Color Picker, Junimo, Last Shipped)!
                         }
                         else if (topMenu is MineElevatorMenu mem && mem.elevators != null && TryClickExpandedElevator(mem, ui))
                         {
@@ -2271,6 +2325,88 @@ namespace SDVMobileControls
             return true;
         }
 
+        private void GetMobileInvCtxRects(
+            IClickableMenu topMenu,
+            out Rectangle rX1,
+            out Rectangle rHalf,
+            out Rectangle rGop,
+            out Rectangle rXep,
+            out Rectangle rKey,
+            out Rectangle rEsc)
+        {
+            rX1 = rHalf = rGop = rXep = rKey = rEsc = Rectangle.Empty;
+            int x = _ctxX1Rect.X;
+            int y = _ctxX1Rect.Y;
+            int w = _ctxX1Rect.Width;
+            int h = _ctxX1Rect.Height;
+            int wWide = _ctxXferRect.Width;
+            int gap = Math.Max(4, _ctxHalfRect.X - _ctxX1Rect.Right);
+
+            if (topMenu is ItemGrabMenu grab)
+            {
+                bool hasQuickStack = grab.fillStacksButton != null && grab.reverseGrab && !grab.shippingBin;
+                bool hasOrganize = grab.organizeButton != null && grab.ItemsToGrabMenu?.actualInventory != null;
+                rX1 = new Rectangle(x, y, w, h); x += w + gap;
+                rHalf = new Rectangle(x, y, w, h); x += w + gap;
+                if (hasQuickStack) { rGop = new Rectangle(x, y, wWide, h); x += wWide + gap; }
+                if (hasOrganize) { rXep = new Rectangle(x, y, w, h); x += w + gap; }
+                rEsc = new Rectangle(x, y, w, h);
+                return;
+            }
+            if (topMenu is GameMenu gm && gm.GetCurrentPage() is InventoryPage)
+            {
+                rX1 = new Rectangle(x, y, w, h); x += w + gap;
+                rHalf = new Rectangle(x, y, w, h); x += w + gap;
+                rKey = new Rectangle(x, y, w, h); x += w + gap;
+                rEsc = new Rectangle(x, y, w, h);
+                return;
+            }
+            rEsc = new Rectangle(x, y, w, h);
+        }
+
+        private static bool TryClickExpandedChestSideButton(ItemGrabMenu grab, Point ui)
+        {
+            if (grab == null) return false;
+            // Never steal taps meant for open Chest Color Picker swatches!
+            if (grab.chestColorPicker != null && grab.chestColorPicker.visible && grab.chestColorPicker.isWithinBounds(ui.X, ui.Y))
+                return false;
+
+            const int pad = 14;
+            ClickableComponent[] btns =
+            {
+                grab.fillStacksButton,
+                grab.organizeButton,
+                grab.colorPickerToggleButton,
+                grab.specialButton,
+                grab.junimoNoteIcon,
+                grab.shippingBin ? grab.lastShippedHolder : null
+            };
+            ClickableComponent best = null;
+            float bestDistSq = float.MaxValue;
+            for (int i = 0; i < btns.Length; i++)
+            {
+                var cc = btns[i];
+                if (cc == null || !cc.visible || cc.bounds.Width <= 0 || cc.bounds.Height <= 0) continue;
+                var expanded = new Rectangle(cc.bounds.X - pad, cc.bounds.Y - pad, cc.bounds.Width + pad * 2, cc.bounds.Height + pad * 2);
+                if (expanded.Contains(ui))
+                {
+                    float dx = cc.bounds.Center.X - ui.X;
+                    float dy = cc.bounds.Center.Y - ui.Y;
+                    float dSq = dx * dx + dy * dy;
+                    if (dSq < bestDistSq)
+                    {
+                        bestDistSq = dSq;
+                        best = cc;
+                    }
+                }
+            }
+            if (best == null) return false;
+            try { grab.performHoverAction(best.bounds.Center.X, best.bounds.Center.Y); } catch { }
+            try { grab.receiveLeftClick(best.bounds.Center.X, best.bounds.Center.Y, true); } catch { }
+            try { grab.releaseLeftClick(best.bounds.Center.X, best.bounds.Center.Y); } catch { }
+            return true;
+        }
+
         private static bool TryClickExpandedElevator(MineElevatorMenu mem, Point ui)
         {
             ClickableComponent best = null;
@@ -2471,11 +2607,30 @@ namespace SDVMobileControls
 
             if (showInvCtx)
             {
-                DrawMinimalPill(sb, _ctxX1Rect, "X1", br != null && br.GetSingleItemMode(pad));
-                DrawMinimalPill(sb, _ctxHalfRect, "1/2", br != null && br.GetHalfStackMode(pad));
-                DrawMinimalPill(sb, _ctxXferRect, "XFER", br != null && br.GetQuickTransferMode(pad));
-                DrawMinimalPill(sb, _ctxKeyRect, "KEY", false);
-                PixelUi.DrawPixelPill(sb, _pixel, br, _ctxEscRect, "ESC", PixelRole.Special, false, _vpH);
+                if (_cfg.MobileShopAndDrag)
+                {
+                    GetMobileInvCtxRects(topMenu, out Rectangle rX1, out Rectangle rHalf, out Rectangle rGop, out Rectangle rXep, out Rectangle rKey, out Rectangle rEsc);
+                    if (!rX1.IsEmpty)
+                        DrawMinimalPill(sb, rX1, "X1", _invShop.TapMode == MobileInventoryShopHelper.ChestTapMode.SingleOne);
+                    if (!rHalf.IsEmpty)
+                        DrawMinimalPill(sb, rHalf, "1/2", _invShop.TapMode == MobileInventoryShopHelper.ChestTapMode.HalfStack);
+                    if (!rGop.IsEmpty)
+                        PixelUi.DrawPixelPill(sb, _pixel, br, rGop, "GOP", PixelRole.Action, false, _vpH);
+                    if (!rXep.IsEmpty)
+                        PixelUi.DrawPixelPill(sb, _pixel, br, rXep, "XEP", PixelRole.Tool, false, _vpH);
+                    if (!rKey.IsEmpty)
+                        DrawMinimalPill(sb, rKey, "KEY", false);
+                    if (!rEsc.IsEmpty)
+                        PixelUi.DrawPixelPill(sb, _pixel, br, rEsc, "ESC", PixelRole.Special, false, _vpH);
+                }
+                else
+                {
+                    DrawMinimalPill(sb, _ctxX1Rect, "X1", br != null && br.GetSingleItemMode(pad));
+                    DrawMinimalPill(sb, _ctxHalfRect, "1/2", br != null && br.GetHalfStackMode(pad));
+                    DrawMinimalPill(sb, _ctxXferRect, "XFER", br != null && br.GetQuickTransferMode(pad));
+                    DrawMinimalPill(sb, _ctxKeyRect, "KEY", false);
+                    PixelUi.DrawPixelPill(sb, _pixel, br, _ctxEscRect, "ESC", PixelRole.Special, false, _vpH);
+                }
             }
             else if (showKeyOnly)
             {

@@ -15,6 +15,7 @@ out/
 *.xgs
 *.xsb
 *.dll
+!ModGarden/SDVMobileControls/prebuilt/SDVMobileControls.dll
 *.pdb
 *.exe
 *.zip

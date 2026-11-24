@@ -173,7 +173,7 @@ static NSData *sdvReadTrimmedLogUtf8(NSString *path, NSUInteger maxBytes) {
 
 // Builds a compact, privacy-sanitized ErrorLogs.zip plus structured system metadata for online report or Share Sheet export.
 static NSDictionary *sdvBuildBugReportBundle(NSString *docsPath) {
-    NSString *appVer = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"] ?: @"1.0.1";
+    NSString *appVer = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"] ?: @"1.0.2";
     NSString *iosVer = UIDevice.currentDevice.systemVersion ?: @"?";
     NSString *hwModel = sdvHardwareModelId();
     SDVRamSnapshot ram = [SDVRamMonitor.shared sample];
@@ -1091,7 +1091,7 @@ static NSData *sdvBuildMultipartBody(
             @"category":     cat,
             @"description":  desc,
             @"contact":      contact,
-            @"appVersion":   b[@"appVersion"] ?: @"1.0.1",
+            @"appVersion":   b[@"appVersion"] ?: @"1.0.2",
             @"iosVersion":   b[@"iosVersion"] ?: @"?",
             @"device":       b[@"device"] ?: @"iPhone",
             @"ramInfo":      b[@"ramInfo"] ?: @"?",
@@ -1111,7 +1111,7 @@ static NSData *sdvBuildMultipartBody(
         [req setValue:[NSString stringWithFormat:@"multipart/form-data; boundary=%@", boundary] forHTTPHeaderField:@"Content-Type"];
         [req setValue:@"GardenLauncher-iOS" forHTTPHeaderField:@"X-Garden-App"];
         [req setValue:kSDVBugReportClientKey forHTTPHeaderField:@"X-Garden-Key"];
-        [req setValue:@"GardenLauncher-iOS/1.0.1" forHTTPHeaderField:@"User-Agent"];
+        [req setValue:@"GardenLauncher-iOS/1.0.2" forHTTPHeaderField:@"User-Agent"];
         req.HTTPBody = body;
 
         NSURLSessionDataTask *task = [NSURLSession.sharedSession dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {

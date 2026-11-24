@@ -2500,3 +2500,212 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
         @"combinedLibrary": combinedLibrary
     };
 }
+
+// ============================================================================
+// GARDEN LAUNCHER UPDATE CHECKER (version.json + GitHub Releases Fallback)
+// ============================================================================
+#define kSDVAppVersion @"1.0.2"
+#define kSDVAppBuild   10200
+static NSString *const kSDVUpdateNotification = @"SDVLauncherUpdateDidChangeNotification";
+static NSString *const kSDVDismissedUpdatePrefKey = @"sdv_dismissed_update_id";
+static NSString *const kSDVVersionJsonURL = @"https://raw.githubusercontent.com/hanprm9-dot/Garden-Launcher-iOS/main/version.json";
+static NSString *const kSDVLatestReleaseApiURL = @"https://api.github.com/repos/hanprm9-dot/Garden-Launcher-iOS/releases/latest";
+
+static NSDictionary *gSdvLatestUpdateInfo = nil;
+static NSTimeInterval gSdvLastUpdateCheckAt = 0;
+static BOOL gSdvUpdateCheckInFlight = NO;
+
+static NSString *sdvNormalizeSummaryLines(id rawSummary, NSString *fallbackBody) {
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    if ([rawSummary isKindOfClass:NSArray.class]) {
+        for (id item in (NSArray *)rawSummary) {
+            if ([item isKindOfClass:NSString.class]) {
+                NSString *t = [(NSString *)item stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+                if (t.length) {
+                    if (![t hasPrefix:@"•"] && ![t hasPrefix:@"-"]) t = [@"• " stringByAppendingString:t];
+                    else if ([t hasPrefix:@"- "]) t = [@"• " stringByAppendingString:[t substringFromIndex:2]];
+                    [lines addObject:t];
+                }
+            }
+            if (lines.count >= 6) break;
+        }
+    } else if ([rawSummary isKindOfClass:NSString.class] && [(NSString *)rawSummary length] > 0) {
+        for (NSString *ln in [(NSString *)rawSummary componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
+            NSString *t = [ln stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            if (!t.length) continue;
+            if (![t hasPrefix:@"•"] && ![t hasPrefix:@"-"]) t = [@"• " stringByAppendingString:t];
+            else if ([t hasPrefix:@"- "]) t = [@"• " stringByAppendingString:[t substringFromIndex:2]];
+            [lines addObject:t];
+            if (lines.count >= 6) break;
+        }
+    }
+    if (!lines.count && fallbackBody.length) {
+        for (NSString *ln in [fallbackBody componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
+            NSString *t = [ln stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            if ([t hasPrefix:@"- "] || [t hasPrefix:@"* "]) {
+                NSString *clean = [[t substringFromIndex:2] stringByReplacingOccurrencesOfString:@"**" withString:@""];
+                if (clean.length > 110) clean = [[clean substringToIndex:107] stringByAppendingString:@"…"];
+                [lines addObject:[@"• " stringByAppendingString:clean]];
+                if (lines.count >= 5) break;
+            }
+        }
+    }
+    if (!lines.count) {
+        [lines addObject:@"• Cải thiện hiệu năng, độ ổn định và sửa các lỗi người dùng báo cáo."];
+    }
+    return [lines componentsJoinedByString:@"\n"];
+}
+
+static NSDictionary *sdvAvailableLauncherUpdate(BOOL includeDismissed) {
+    NSDictionary *info = gSdvLatestUpdateInfo;
+    if (!info) return nil;
+    if (!includeDismissed) {
+        NSString *dismissed = [NSUserDefaults.standardUserDefaults stringForKey:kSDVDismissedUpdatePrefKey];
+        if (dismissed.length && [dismissed isEqualToString:info[@"updateId"]]) return nil;
+    }
+    return info;
+}
+
+static void sdvDismissLauncherUpdate(NSString *updateId) {
+    if (!updateId.length) return;
+    [NSUserDefaults.standardUserDefaults setObject:updateId forKey:kSDVDismissedUpdatePrefKey];
+    [NSNotificationCenter.defaultCenter postNotificationName:kSDVUpdateNotification object:nil];
+}
+
+static NSString *sdvRecommendedUpdateDownloadURL(NSDictionary *info) {
+    if (!info) return @"https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/latest";
+    NSInteger majorIOS = NSProcessInfo.processInfo.operatingSystemVersion.majorVersion;
+    NSString *pick = (majorIOS >= 19) ? info[@"ios26Url"] : info[@"ios14Url"];
+    if (!pick.length) pick = info[@"releaseUrl"];
+    return pick.length ? pick : @"https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/latest";
+}
+
+static void sdvParseAndStoreRemoteUpdateDict(NSDictionary *json, BOOL isGithubReleaseApi, void (^completion)(NSDictionary *updateInfo, NSString *statusMsg)) {
+    NSString *ver = nil;
+    NSInteger build = 0;
+    NSString *dateStr = @"";
+    NSString *summary = @"";
+    NSString *ios14Url = @"";
+    NSString *ios26Url = @"";
+    NSString *relUrl = @"https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/latest";
+
+    if (!isGithubReleaseApi) {
+        ver = [json[@"version"] isKindOfClass:NSString.class] ? json[@"version"] : @"";
+        if ([ver hasPrefix:@"v"] || [ver hasPrefix:@"V"]) ver = [ver substringFromIndex:1];
+        if ([json[@"build"] respondsToSelector:@selector(integerValue)]) build = [json[@"build"] integerValue];
+        if ([json[@"date"] isKindOfClass:NSString.class]) dateStr = json[@"date"];
+        if ([json[@"release_url"] isKindOfClass:NSString.class] && [json[@"release_url"] length]) relUrl = json[@"release_url"];
+        if ([json[@"ios14_url"] isKindOfClass:NSString.class]) ios14Url = json[@"ios14_url"];
+        if ([json[@"ios26_url"] isKindOfClass:NSString.class]) ios26Url = json[@"ios26_url"];
+        summary = sdvNormalizeSummaryLines(json[@"summary"], nil);
+    } else {
+        ver = [json[@"tag_name"] isKindOfClass:NSString.class] ? json[@"tag_name"] : @"";
+        if ([ver hasPrefix:@"v"] || [ver hasPrefix:@"V"]) ver = [ver substringFromIndex:1];
+        if ([json[@"html_url"] isKindOfClass:NSString.class] && [json[@"html_url"] length]) relUrl = json[@"html_url"];
+        if ([json[@"published_at"] isKindOfClass:NSString.class] && [json[@"published_at"] length] >= 10) {
+            dateStr = [json[@"published_at"] substringToIndex:10];
+        }
+        NSArray *assets = [json[@"assets"] isKindOfClass:NSArray.class] ? json[@"assets"] : @[];
+        for (NSDictionary *a in assets) {
+            if (![a isKindOfClass:NSDictionary.class]) continue;
+            NSString *nm = [a[@"name"] isKindOfClass:NSString.class] ? [a[@"name"] lowercaseString] : @"";
+            NSString *dl = [a[@"browser_download_url"] isKindOfClass:NSString.class] ? a[@"browser_download_url"] : @"";
+            if (!dl.length) continue;
+            if ([nm containsString:@"ios14"]) ios14Url = dl;
+            else if ([nm containsString:@"ios26"]) ios26Url = dl;
+        }
+        NSString *body = [json[@"body"] isKindOfClass:NSString.class] ? json[@"body"] : @"";
+        summary = sdvNormalizeSummaryLines(nil, body);
+    }
+
+    if (!ver.length) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (completion) completion(nil, @"Không đọc được thông tin phiên bản từ máy chủ.");
+        });
+        return;
+    }
+
+    BOOL isNewer = (build > kSDVAppBuild) || (sdvCompareSemver(ver, kSDVAppVersion) > 0);
+    if (!ios14Url.length) {
+        ios14Url = [NSString stringWithFormat:@"https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v%@/Garden-Launcher-%@-iOS14-18.ipa", ver, ver];
+    }
+    if (!ios26Url.length) {
+        ios26Url = [NSString stringWithFormat:@"https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v%@/Garden-Launcher-%@-iOS26-27.ipa", ver, ver];
+    }
+
+    NSString *updateId = [NSString stringWithFormat:@"%@#%ld", ver, (long)build];
+    NSDictionary *info = isNewer ? @{
+        @"version": ver,
+        @"build": @(build),
+        @"updateId": updateId,
+        @"date": dateStr ?: @"",
+        @"summary": summary ?: @"",
+        @"ios14Url": ios14Url,
+        @"ios26Url": ios26Url,
+        @"releaseUrl": relUrl
+    } : nil;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        gSdvLatestUpdateInfo = info;
+        if (info) {
+            [NSNotificationCenter.defaultCenter postNotificationName:kSDVUpdateNotification object:nil];
+            if (completion) completion(info, [NSString stringWithFormat:@"Đã tìm thấy bản cập nhật mới v%@!", ver]);
+        } else {
+            if (completion) completion(nil, [NSString stringWithFormat:@"Bạn đang dùng phiên bản mới nhất (v%@).", kSDVAppVersion]);
+        }
+    });
+}
+
+static void sdvCheckLauncherUpdate(BOOL force, void (^completion)(NSDictionary *updateInfo, NSString *statusMsg)) {
+    NSTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (!force && gSdvLastUpdateCheckAt > 0 && (now - gSdvLastUpdateCheckAt) < 1800.0) {
+        if (completion) completion(gSdvLatestUpdateInfo, gSdvLatestUpdateInfo ? nil : [NSString stringWithFormat:@"Bạn đang dùng phiên bản mới nhất (v%@).", kSDVAppVersion]);
+        return;
+    }
+    if (gSdvUpdateCheckInFlight) return;
+    gSdvUpdateCheckInFlight = YES;
+    gSdvLastUpdateCheckAt = now;
+
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    cfg.timeoutIntervalForRequest = 6.0;
+    cfg.timeoutIntervalForResource = 10.0;
+    cfg.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+    NSURLSession *sess = [NSURLSession sessionWithConfiguration:cfg];
+
+    NSString *primaryStr = [NSString stringWithFormat:@"%@?t=%ld", kSDVVersionJsonURL, (long)time(NULL)];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:primaryStr]];
+    [req setValue:@"GardenLauncher-iOS/" kSDVAppVersion forHTTPHeaderField:@"User-Agent"];
+
+    [[sess dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        NSHTTPURLResponse *http = [resp isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)resp : nil;
+        if (!err && http.statusCode == 200 && data.length > 8) {
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if ([json isKindOfClass:NSDictionary.class] && [json[@"version"] isKindOfClass:NSString.class]) {
+                gSdvUpdateCheckInFlight = NO;
+                sdvParseAndStoreRemoteUpdateDict(json, NO, completion);
+                [sess finishTasksAndInvalidate];
+                return;
+            }
+        }
+        // Fallback to GitHub Releases /latest API
+        NSMutableURLRequest *fbReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kSDVLatestReleaseApiURL]];
+        [fbReq setValue:@"GardenLauncher-iOS/" kSDVAppVersion forHTTPHeaderField:@"User-Agent"];
+        [fbReq setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
+        [[sess dataTaskWithRequest:fbReq completionHandler:^(NSData *fbData, NSURLResponse *fbResp, NSError *fbErr) {
+            gSdvUpdateCheckInFlight = NO;
+            NSHTTPURLResponse *fbHttp = [fbResp isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)fbResp : nil;
+            if (!fbErr && fbHttp.statusCode == 200 && fbData.length > 16) {
+                NSDictionary *fbJson = [NSJSONSerialization JSONObjectWithData:fbData options:0 error:nil];
+                if ([fbJson isKindOfClass:NSDictionary.class]) {
+                    sdvParseAndStoreRemoteUpdateDict(fbJson, YES, completion);
+                    [sess finishTasksAndInvalidate];
+                    return;
+                }
+            }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, @"Không thể kết nối kiểm tra cập nhật. Vui lòng thử lại khi có mạng.");
+            });
+            [sess finishTasksAndInvalidate];
+        }] resume];
+    }] resume];
+}

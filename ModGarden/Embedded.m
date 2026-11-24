@@ -38,7 +38,8 @@ static volatile sig_atomic_t gSdvCrashHandled = 0;
 // ---- Live Real-Time Boot Progress Telemetry (fed directly on Main Thread by SDViOS.dll & SDVMobileControls!) ----
 static os_unfair_lock gBootTelLock = OS_UNFAIR_LOCK_INIT;
 static volatile int32_t gSdvBootDone = 0;
-static double gBootLivePct = 0.05;
+static volatile int32_t gBootSmapiStarted = 0;
+static double gBootLivePct = 0.02;
 static NSInteger gBootLiveStep = 0;
 static NSString *gBootLiveStage = nil;
 static NSString *gBootLiveDetail = nil;
@@ -172,7 +173,7 @@ static void sdvInitBootAndCrashLogging(NSString *docsPath) {
         double ramGB = (double)NSProcessInfo.processInfo.physicalMemory / (1024.0 * 1024.0 * 1024.0);
         NSString *bid = NSBundle.mainBundle.bundleIdentifier ?: @"?";
         sdvBootLogFmt([NSString stringWithFormat:
-            @"[BOOT 1] Garden Launcher 1.0.1 | iOS %@ | Device=%@ | RAM=%.2f GB | Bundle=%@",
+            @"[BOOT 1] Garden Launcher 1.0.2 | iOS %@ | Device=%@ | RAM=%.2f GB | Bundle=%@",
             osVer, model, ramGB, bid]);
     } @catch (NSException *ex) { }
 }
@@ -1579,7 +1580,7 @@ static UIImage *sdvLoadBootFrameworkImage(NSString *filename) {
     SDVPixelBadgeView *verPill = [SDVPixelBadgeView new];
     verPill.translatesAutoresizingMaskIntoConstraints = NO;
     UILabel *verPillLbl = [UILabel new];
-    verPillLbl.text = @"v1.0.1 · SMAPI 4.5.2";
+    verPillLbl.text = @"v1.0.2 · SMAPI 4.5.2";
     verPillLbl.font = iosMonoDigits(10.5, UIFontWeightBold);
     verPillLbl.textColor = rgb(0xFFF0C4);
     verPillLbl.translatesAutoresizingMaskIntoConstraints = NO;
@@ -2825,11 +2826,16 @@ static void sdvExtSetGardenOpen(BOOL open);
     close(fd);
     if (n <= 0) return NO;
     buf[n] = '\0';
-    return (strstr(buf, "Frame #3:") != NULL || strstr(buf, "Frame #4:") != NULL || strstr(buf, "Frame #5:") != NULL);
+    BOOL hasFrame = (strstr(buf, "Frame #3:") != NULL || strstr(buf, "Frame #4:") != NULL || strstr(buf, "Frame #5:") != NULL);
+    if (!hasFrame) return NO;
+    // Only treat frames as genuine once GameRunner & Game1 are actually ticking (not G1.ticks=0!)
+    return (strstr(buf, "RunnerTick=True") != NULL && strstr(buf, "G1.ticks=0") == NULL);
 }
 
 -(void)detectSmapiMilestonePct:(double *)outPct stage:(NSString **)outStage detail:(NSString **)outDetail stepIdx:(NSInteger *)outStep cap:(double *)outCap {
     if (!gSdvSmapiLogPath[0]) return;
+    // Never read stale SMAPI-latest.txt from previous session before SMAPI initializes in this run!
+    if (__atomic_load_n(&gBootSmapiStarted, __ATOMIC_RELAXED) == 0) return;
     struct stat st;
     if (stat(gSdvSmapiLogPath, &st) != 0 || st.st_mtime < gSdvBootStartEpoch || st.st_size < 32) return;
     int fd = open(gSdvSmapiLogPath, O_RDONLY);
@@ -2896,8 +2902,8 @@ static void sdvExtSetGardenOpen(BOOL open);
     if (self.bootFinishing) return;
 
     double elapsed = (gSdvBootStartTime > 0) ? (CFAbsoluteTimeGetCurrent() - gSdvBootStartTime) : 0.0;
-    double milestonePct = 0.05;
-    double stageCap = 0.16;
+    double milestonePct = 0.02;
+    double stageCap = 0.14;
     NSInteger stepIdx = 0;
     NSString *stageText = @"Khởi tạo lõi .NET & hệ thống tệp…";
     NSString *detailText = nil;
@@ -2961,7 +2967,7 @@ static void sdvExtSetGardenOpen(BOOL open);
     }
 
     // 3. Smooth non-stalling progression toward real milestone (never moves backwards!)
-    if (self.bootDisplayPct < 0.04) self.bootDisplayPct = 0.04;
+    if (self.bootDisplayPct < 0.02) self.bootDisplayPct = 0.02;
     if (self.bootDisplayPct < milestonePct) {
         self.bootDisplayPct += (milestonePct - self.bootDisplayPct) * 0.55 + 0.008;
         if (self.bootDisplayPct > milestonePct) self.bootDisplayPct = milestonePct;
@@ -3061,21 +3067,46 @@ static void sdvExtSetGardenOpen(BOOL open);
 
     UIVisualEffectView *pill = mkGlassCard(UIBlurEffectStyleSystemMaterialDark, 16.0);
     pill.translatesAutoresizingMaskIntoConstraints = NO;
-    UIStackView *row = mkHStack(8);
-    UIImageView *ic = [[UIImageView alloc] initWithImage:sfIcon(@"hand.tap.fill", 15, UIImageSymbolWeightSemibold)];
-    ic.tintColor = kTintBlue;
-    UILabel *lbl = mkLabel(@"Chạm 3 ngón × 2 để mở Mod Garden", 13, UIFontWeightSemibold, UIColor.whiteColor);
-    lbl.numberOfLines = 1;
-    [row addArrangedSubview:ic];
-    [row addArrangedSubview:lbl];
-    [pill.contentView addSubview:row];
-    pinInsets(row, pill.contentView, UIEdgeInsetsMake(7, 14, 7, 14));
+    NSDictionary *updToast = sdvAvailableLauncherUpdate(NO);
+    NSTimeInterval holdSec = updToast ? 4.6 : 2.8;
+    if (updToast) {
+        UIStackView *row = mkHStack(9);
+        UIImageView *ic = [[UIImageView alloc] initWithImage:sfIcon(@"arrow.down.circle.fill", 17, UIImageSymbolWeightSemibold)];
+        ic.tintColor = kTintGreen;
+        [ic setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        UIStackView *col = mkVStack(1.5);
+        UILabel *lbl1 = mkLabel([NSString stringWithFormat:@"Đã có Garden Launcher v%@ mới! (Chạm 3 ngón × 2 để xem)", updToast[@"version"]], 12.5, UIFontWeightSemibold, UIColor.whiteColor);
+        lbl1.numberOfLines = 1;
+        [col addArrangedSubview:lbl1];
+        NSString *firstSum = [[(updToast[@"summary"] ?: @"") componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet] firstObject];
+        if (firstSum.length) {
+            UILabel *lbl2 = mkLabel(firstSum, 11.5, UIFontWeightRegular, [UIColor colorWithWhite:0.88 alpha:1.0]);
+            lbl2.numberOfLines = 1;
+            [col addArrangedSubview:lbl2];
+        }
+        [row addArrangedSubview:ic];
+        [row addArrangedSubview:col];
+        [pill.contentView addSubview:row];
+        pinInsets(row, pill.contentView, UIEdgeInsetsMake(8, 14, 8, 14));
+    } else {
+        UIStackView *row = mkHStack(8);
+        UIImageView *ic = [[UIImageView alloc] initWithImage:sfIcon(@"hand.tap.fill", 15, UIImageSymbolWeightSemibold)];
+        ic.tintColor = kTintBlue;
+        UILabel *lbl = mkLabel(@"Chạm 3 ngón × 2 để mở Mod Garden", 13, UIFontWeightSemibold, UIColor.whiteColor);
+        lbl.numberOfLines = 1;
+        [row addArrangedSubview:ic];
+        [row addArrangedSubview:lbl];
+        [pill.contentView addSubview:row];
+        pinInsets(row, pill.contentView, UIEdgeInsetsMake(7, 14, 7, 14));
+    }
 
     pill.alpha = 0.0;
     pill.transform = CGAffineTransformMakeTranslation(0, 12);
     [vc.view addSubview:pill];
     [NSLayoutConstraint activateConstraints:@[
         [pill.centerXAnchor constraintEqualToAnchor:vc.view.safeAreaLayoutGuide.centerXAnchor],
+        [pill.leadingAnchor constraintGreaterThanOrEqualToAnchor:vc.view.safeAreaLayoutGuide.leadingAnchor constant:16],
+        [pill.trailingAnchor constraintLessThanOrEqualToAnchor:vc.view.safeAreaLayoutGuide.trailingAnchor constant:-16],
         [pill.bottomAnchor constraintEqualToAnchor:vc.view.safeAreaLayoutGuide.bottomAnchor constant:-14]
     ]];
 
@@ -3086,7 +3117,7 @@ static void sdvExtSetGardenOpen(BOOL open);
         pill.alpha = 1.0;
         pill.transform = CGAffineTransformIdentity;
     } completion:^(BOOL finished) {
-        [UIView animateWithDuration:0.35 delay:2.8 options:UIViewAnimationOptionCurveEaseIn animations:^{
+        [UIView animateWithDuration:0.35 delay:holdSec options:UIViewAnimationOptionCurveEaseIn animations:^{
             pill.alpha = 0.0;
             pill.transform = CGAffineTransformMakeTranslation(0, 8);
         } completion:^(BOOL done) {
@@ -3408,18 +3439,22 @@ static void sdvBootParseSingleLine(const char *s, size_t len, BOOL *outMajor) {
     }
     // 2. SMAPI Startup Phase 1 (17%..29%)
     else if (strstr(buf, "Instantiating persistent SCore") != NULL || strstr(buf, "SMAPI 4.") != NULL) {
+        __atomic_store_n(&gBootSmapiStarted, 1, __ATOMIC_RELAXED);
         newPct = 0.19; newStep = 1;
         newStage = @"Đang khởi động lõi SMAPI 4.5.2…";
         newDetail = @"Stardew Valley 1.6.15 · iOS Native 0% JIT";
     } else if (strstr(buf, "Mods go here:") != NULL || strstr(buf, "Waiting for game") != NULL) {
+        __atomic_store_n(&gBootSmapiStarted, 1, __ATOMIC_RELAXED);
         newPct = 0.22; newStep = 1;
         newStage = @"SMAPI sẵn sàng — kiểm tra môi trường…";
         newDetail = @"Kết nối thư mục Mods & cấu hình người dùng";
     } else if (strstr(buf, "Loading mod metadata") != NULL) {
+        __atomic_store_n(&gBootSmapiStarted, 1, __ATOMIC_RELAXED);
         newPct = 0.25; newStep = 1;
         newStage = @"SMAPI đang quét danh sách & metadata Mod…";
         newDetail = @"Đọc manifest.json và kiểm tra phụ thuộc giữa các Mod";
     } else if (strstr(buf, "Loading mods...") != NULL) {
+        __atomic_store_n(&gBootSmapiStarted, 1, __ATOMIC_RELAXED);
         newPct = 0.29; newStep = 2;
         newStage = @"Đang nạp các Mod C# & Content Pack…";
         newDetail = @"Đang giải mã & tải các tệp DLL của Mod vào bộ nhớ";
@@ -3468,19 +3503,24 @@ static void sdvBootParseSingleLine(const char *s, size_t len, BOOL *outMajor) {
         newPct = 0.90; newStep = 4;
         newStage = @"Kích hoạt GameLaunched — chuẩn bị vào game…";
         newDetail = @"Hoàn tất cấu hình Mod & giao diện cảm ứng";
-    } else if (strstr(buf, "LinkGameWindowToScene") != NULL || strstr(buf, "AttachTouchOverlay") != NULL) {
-        newPct = 0.93; newStep = 4;
-        newStage = @"Đang gắn cửa sổ đồ họa & điều khiển…";
-        newDetail = @"Thiết lập màn hình toàn cảnh & bộ cảm ứng";
-    } else if (strstr(buf, "Frame #1:") != NULL) {
+    } else if (strstr(buf, "AttachTouchOverlay") != NULL) {
+        os_unfair_lock_lock(&gBootTelLock);
+        double curP = gBootLivePct;
+        os_unfair_lock_unlock(&gBootTelLock);
+        if (curP >= 0.85) {
+            newPct = 0.93; newStep = 4;
+            newStage = @"Đang gắn cửa sổ đồ họa & điều khiển…";
+            newDetail = @"Thiết lập màn hình toàn cảnh & bộ cảm ứng";
+        }
+    } else if (strstr(buf, "Frame #1:") != NULL && strstr(buf, "RunnerTick=True") != NULL && strstr(buf, "G1.ticks=0") == NULL) {
         newPct = 0.95; newStep = 4;
         newStage = @"Đang dựng khung hình đầu tiên…";
         newDetail = @"Khởi tạo GPU OpenGL ES & màn hình tiêu đề";
-    } else if (strstr(buf, "Frame #2:") != NULL) {
+    } else if (strstr(buf, "Frame #2:") != NULL && strstr(buf, "RunnerTick=True") != NULL && strstr(buf, "G1.ticks=0") == NULL) {
         newPct = 0.97; newStep = 4;
         newStage = @"Hoàn thiện hiển thị màn hình chính…";
         newDetail = @"Sắp sẵn sàng vào Thung lũng Stardew!";
-    } else if (strstr(buf, "Frame #3:") != NULL) {
+    } else if (strstr(buf, "Frame #3:") != NULL && strstr(buf, "RunnerTick=True") != NULL && strstr(buf, "G1.ticks=0") == NULL) {
         newPct = 0.99; newStep = 4;
         newStage = @"Sẵn sàng vào Stardew Valley!";
     } else {
@@ -3570,10 +3610,17 @@ static void sdvBootParseSingleLine(const char *s, size_t len, BOOL *outMajor) {
                                 os_unfair_lock_lock(&gBootTelLock);
                                 double curP = gBootLivePct;
                                 os_unfair_lock_unlock(&gBootTelLock);
-                                newPct = MIN(0.89, MAX(0.84, curP + 0.004));
-                                newStep = 3;
-                                newStage = @"Content Patcher đang nạp gói tài nguyên…";
-                                newDetail = @"Áp dụng bản vá dữ liệu, bản đồ & giao diện";
+                                if (curP >= 0.75) {
+                                    newPct = MIN(0.89, MAX(0.84, curP + 0.004));
+                                    newStep = 3;
+                                    newStage = @"Content Patcher đang nạp gói tài nguyên…";
+                                    newDetail = @"Áp dụng bản vá dữ liệu, bản đồ & giao diện";
+                                } else {
+                                    newPct = MIN(0.59, MAX(0.32, curP + 0.006));
+                                    newStep = 2;
+                                    newStage = @"Content Patcher đang đọc cấu hình gói Mod…";
+                                    newDetail = @"Chuẩn bị dữ liệu Content Pack trước khi nạp game";
+                                }
                             } else {
                                 newPct = 0.54 + MIN(0.08, em * 0.004);
                                 newStep = 2;
@@ -3816,7 +3863,27 @@ __attribute__((constructor)) static void startGardenControls(void) {
                 gSdvBootStartTime = CFAbsoluteTimeGetCurrent();
                 gSdvBootStartEpoch = time(NULL);
                 unlink(gSdvBootReadyPath);
-                const char *initStage = "5|Đang khởi động lõi .NET & SMAPI 4.5.2…";
+                unlink(gSdvPauseFlagPath);
+                // Permanently prevent SMAPI LogManager.HandleMarkerFiles() -> System.Console.ReadKey()
+                // from throwing PlatformNotSupportedException on iOS after any previous crash or update!
+                NSArray<NSString *> *markerDirs = @[
+                    [docs stringByAppendingPathComponent:@".game/smapi-internal"],
+                    [docs stringByAppendingPathComponent:@"smapi-internal"],
+                    [docs stringByAppendingPathComponent:@"ErrorLogs"]
+                ];
+                NSArray<NSString *> *markerNames = @[
+                    @"StardewModdingAPI.crash.marker",
+                    @"StardewModdingAPI.update.marker",
+                    @"SMAPI-crash.marker",
+                    @"SMAPI-update.marker"
+                ];
+                for (NSString *mdir in markerDirs) {
+                    for (NSString *mname in markerNames) {
+                        NSString *mp = [mdir stringByAppendingPathComponent:mname];
+                        unlink(mp.fileSystemRepresentation);
+                    }
+                }
+                const char *initStage = "2|Đang khởi tạo lõi .NET 8 & hệ thống tệp…";
                 int sfd = open(gSdvBootStagePath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
                 if (sfd >= 0) {
                     (void)write(sfd, initStage, strlen(initStage));
@@ -3848,6 +3915,7 @@ __attribute__((constructor)) static void startGardenControls(void) {
         @try {
             sdvBootLog("[BOOT 4] Main runloop active -> starting SDVGardenGestureHost");
             sdvExtInputStart();
+            sdvCheckLauncherUpdate(NO, nil);
             gSdvGardenHost = [SDVGardenGestureHost new];
             [gSdvGardenHost attachToGameWindows];
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{

@@ -1272,7 +1272,7 @@ namespace SDVMobileControls
                             try { Game1.playSound("cancel"); } catch { }
                             return true;
                         }
-                        if (ownerMenu is ItemGrabMenu grabDrop && srcInv == playerInv && dstInv == chestInv && !grabDrop.reverseGrab && !grabDrop.shippingBin)
+                        if (ownerMenu is ItemGrabMenu grabDrop && srcInv == playerInv && dstInv == chestInv && !CanDepositIntoGrabMenu(grabDrop))
                         {
                             try { Game1.playSound("cancel"); } catch { }
                             return true;
@@ -1287,17 +1287,17 @@ namespace SDVMobileControls
                     {
                         if (srcInv == playerInv && chestInv != null && IsPointInInventoryPanel(chestInv, uiPt, 26))
                         {
-                            if (!grabArea.reverseGrab && !grabArea.shippingBin)
+                            if (!CanDepositIntoGrabMenu(grabArea))
                             {
                                 try { Game1.playSound("cancel"); } catch { }
                                 return true;
                             }
-                            TransferQuantityBetweenInventories(grabArea, srcInv, srcSlot, chestInv, item.Stack);
+                            TransferQuantityBetweenInventories(grabArea, srcInv, srcSlot, chestInv, Math.Max(1, item.Stack));
                             return true;
                         }
                         if (srcInv == chestInv && playerInv != null && IsPointInInventoryPanel(playerInv, uiPt, 26))
                         {
-                            TransferQuantityBetweenInventories(grabArea, srcInv, srcSlot, playerInv, item.Stack);
+                            TransferQuantityBetweenInventories(grabArea, srcInv, srcSlot, playerInv, Math.Max(1, item.Stack));
                             return true;
                         }
                     }
@@ -1467,6 +1467,7 @@ namespace SDVMobileControls
 
         private void OpenSplitPopup(IClickableMenu owner, InventoryMenu srcInv, int srcSlot, InventoryMenu dstInv, Item item, bool isChest)
         {
+            int curStack = Math.Max(1, item?.Stack ?? 1);
             _popupKind = isChest ? PopupKind.ChestSplit : PopupKind.BagSplit;
             _popupOwnerMenu = owner;
             _popupItem = item;
@@ -1475,11 +1476,19 @@ namespace SDVMobileControls
             _popupSrcSlot = srcSlot;
             _popupDstInv = dstInv;
             _popupMinQty = 1;
-            _popupMaxQty = isChest ? item.Stack : Math.Max(1, item.Stack - 1);
-            _popupQty = Math.Clamp(item.Stack / 2, _popupMinQty, _popupMaxQty);
+            _popupMaxQty = isChest ? curStack : Math.Max(1, curStack - 1);
+            _popupQty = Math.Clamp(curStack / 2, _popupMinQty, _popupMaxQty);
             _popupUnitPrice = 0;
             _popupCanAfford = true;
             try { Game1.playSound("smallSelect"); } catch { }
+        }
+
+        private static bool CanDepositIntoGrabMenu(ItemGrabMenu grab)
+        {
+            // Matches vanilla ItemGrabMenu.receiveLeftClick (IL_049a..IL_04a8):
+            // Normal Chests, Fridges, Junimo Chests, Enrichers, Mills, Special Order DropBoxes all have reverseGrab==false
+            // and behaviorFunction != null; ONLY read-only reward chests (Fishing Treasure / Mine Reward) have behaviorFunction == null!
+            return grab != null && (grab.reverseGrab || grab.shippingBin || grab.behaviorFunction != null);
         }
 
         private void MoveOrSwapSlots(ItemGrabMenu grab, InventoryMenu srcInv, int srcSlot, InventoryMenu dstInv, int dstSlot)
@@ -1505,6 +1514,14 @@ namespace SDVMobileControls
                 return;
             }
 
+            // Enforce source inventory filter when depositing from backpack into filtered containers (Enricher / Special Order)
+            if (grab != null && srcInv == grab.inventory && dstInv == grab.ItemsToGrabMenu &&
+                srcInv.highlightMethod != null && !srcInv.highlightMethod(srcItem))
+            {
+                try { Game1.playSound("cancel"); } catch { }
+                return;
+            }
+
             if (dstInv.highlightMethod != null && !dstInv.highlightMethod(srcItem))
             {
                 try { Game1.playSound("cancel"); } catch { }
@@ -1514,8 +1531,10 @@ namespace SDVMobileControls
             Item dstItem = GetItemAt(dstInv, dstSlot);
             if (dstItem == null)
             {
-                SetItemAt(dstInv, dstSlot, srcItem);
+                // Detach from source FIRST so NetFields.Parent stays bound to dstInv!
                 SetItemAt(srcInv, srcSlot, null);
+                try { srcItem.onDetachedFromParent(); } catch { }
+                SetItemAt(dstInv, dstSlot, srcItem);
                 try { Game1.playSound("stoneStep"); } catch { }
             }
             else if (dstItem is Tool dstTool && dstTool.AttachmentSlotsCount > 0 && srcItem is StardewValley.Object srcObj && dstTool.canThisBeAttached(srcObj))
@@ -1562,6 +1581,11 @@ namespace SDVMobileControls
                     try { Game1.playSound("cancel"); } catch { }
                     return;
                 }
+                if (dstItem.Stack <= 0) dstItem.Stack = 1;
+                SetItemAt(srcInv, srcSlot, null);
+                SetItemAt(dstInv, dstSlot, null);
+                try { srcItem.onDetachedFromParent(); } catch { }
+                try { dstItem.onDetachedFromParent(); } catch { }
                 SetItemAt(dstInv, dstSlot, srcItem);
                 SetItemAt(srcInv, srcSlot, dstItem);
                 try { Game1.playSound("stoneStep"); } catch { }
@@ -1574,7 +1598,7 @@ namespace SDVMobileControls
                 return;
             if (item.Stack <= 0)
                 item.Stack = 1;
-            if (srcInv == playerInv && !grab.reverseGrab && !grab.shippingBin)
+            if (srcInv == playerInv && !CanDepositIntoGrabMenu(grab))
             {
                 // Read-only Fishing Treasure Chest / Mine Reward Chest: never push player items into treasure chest!
                 try { Game1.playSound("cancel"); } catch { }

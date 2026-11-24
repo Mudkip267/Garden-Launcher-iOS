@@ -322,9 +322,11 @@ static NSString *sdvProbeLocalNetwork(void) {
     long long _consoleLastSize;
     time_t _consoleLastMtime;
     NSString *_consoleRawCache;
+    UILabel *_verPillLabel;
 }
 
 -(void)dealloc {
+    [NSNotificationCenter.defaultCenter removeObserver:self];
     [_ramUiTimer invalidate];
     _ramUiTimer = nil;
     [_consoleTimer invalidate];
@@ -399,6 +401,8 @@ static NSString *sdvProbeLocalNetwork(void) {
     _consolePaused = NO;
 
     [self buildShell];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onLauncherUpdateNotification:) name:kSDVUpdateNotification object:nil];
+    sdvCheckLauncherUpdate(NO, nil);
     [self renderAll:NO];
 #ifdef GARDEN_IN_GAME
     if (_root && [gameDataStatus(_root.path)[@"ready"] boolValue]) [self refresh];
@@ -438,8 +442,8 @@ static NSString *sdvProbeLocalNetwork(void) {
     _navTitleLabel.numberOfLines = 1;
     [topBarRow addArrangedSubview:_navTitleLabel];
     [topBarRow addArrangedSubview:[UIView new]];
-    UILabel *verPill = mkBadgePill(@"v1.0.1 · Native", [kTintBlue colorWithAlphaComponent:0.12], kTintBlue, 11);
-    [topBarRow addArrangedSubview:verPill];
+    _verPillLabel = mkBadgePill(@"v1.0.2 · Native", [kTintBlue colorWithAlphaComponent:0.12], kTintBlue, 11);
+    [topBarRow addArrangedSubview:_verPillLabel];
     [topBar.contentView addSubview:topBarRow];
     pinInsets(topBarRow, topBar.contentView, UIEdgeInsetsMake(0, 16, 0, 16));
 
@@ -622,6 +626,18 @@ static NSString *sdvProbeLocalNetwork(void) {
     if (_tab >= 0 && _tab < (NSInteger)navTitles.count) {
         _navTitleLabel.text = navTitles[_tab];
     }
+    NSDictionary *updBadge = sdvAvailableLauncherUpdate(NO);
+    if (_verPillLabel) {
+        if (updBadge) {
+            _verPillLabel.text = [NSString stringWithFormat:@"  🔔 Có bản v%@  ", updBadge[@"version"]];
+            _verPillLabel.backgroundColor = [kTintGreen colorWithAlphaComponent:0.16];
+            _verPillLabel.textColor = kTintGreen;
+        } else {
+            _verPillLabel.text = @"  v1.0.2 · Native  ";
+            _verPillLabel.backgroundColor = [kTintBlue colorWithAlphaComponent:0.12];
+            _verPillLabel.textColor = kTintBlue;
+        }
+    }
 
     for (NSInteger i = 0; i < (NSInteger)_tabButtons.count; i++) {
         SDVAppleButton *b = _tabButtons[i];
@@ -694,6 +710,12 @@ static NSString *sdvProbeLocalNetwork(void) {
         UIView *banner = mkGroupedCard(row, UIEdgeInsetsMake(10, 12, 10, 10));
         banner.backgroundColor = [tint colorWithAlphaComponent:0.12];
         [_pane addArrangedSubview:banner];
+    }
+
+    // Show Launcher Update Card (with concise summary of what the update fixes!) at top of Mod Garden / Launcher Setup
+    NSDictionary *updInfo = sdvAvailableLauncherUpdate(_tab == 7);
+    if (updInfo && _tab != 6) {
+        [_pane addArrangedSubview:[self buildLauncherUpdateCard:updInfo]];
     }
 
     if (_tab == 6) {
@@ -2233,7 +2255,7 @@ static NSString *sdvProbeLocalNetwork(void) {
 }
 
 // ============================================================
-// TAB 4: HƯỚNG DẪN SỬ DỤNG (CẬP NHẬT v1.0.1)
+// TAB 4: HƯỚNG DẪN SỬ DỤNG (CẬP NHẬT v1.0.2)
 // ============================================================
 -(UIView *)mkGuideStep:(NSString *)num title:(NSString *)title body:(NSString *)body color:(UIColor *)col {
     UIStackView *row = mkHStack(11);
@@ -2279,7 +2301,7 @@ static NSString *sdvProbeLocalNetwork(void) {
     UIStackView *topRow = mkHStack(10);
     [topRow addArrangedSubview:mkSettingsIconBadge(@"book.fill", kTintOrange, 34)];
     UIStackView *topTxt = mkVStack(1);
-    [topTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"%@ v1.0.1 — Hướng dẫn toàn diện", appNm], 15.5, UIFontWeightSemibold, kInkPrimary)];
+    [topTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"%@ v1.0.2 — Hướng dẫn toàn diện", appNm], 15.5, UIFontWeightSemibold, kInkPrimary)];
     [topTxt addArrangedSubview:mkLabel(@"Đồ họa Native · SMAPI 4.5.2 · Mobile Controls · Shader GLSL ES (iOS 14–27+)", 12, UIFontWeightRegular, kInkSecondary)];
     SDVAppleButton *jumpBtn = mkIOSButton(@"Xem Credit", @"heart.fill", [kTintPink colorWithAlphaComponent:0.13], kTintPink, 12.5, UIEdgeInsetsMake(7, 11, 7, 11));
     [jumpBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
@@ -2582,9 +2604,13 @@ static NSString *sdvProbeLocalNetwork(void) {
     UIStackView *topRow = mkHStack(10);
     [topRow addArrangedSubview:mkSettingsIconBadge(@"heart.fill", kTintPink, 34)];
     UIStackView *topTxt = mkVStack(1);
-    [topTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"%@ v1.0.1 — Credit & Cộng đồng", appNm], 15.5, UIFontWeightSemibold, kInkPrimary)];
+    [topTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"%@ v1.0.2 — Credit & Cộng đồng", appNm], 15.5, UIFontWeightSemibold, kInkPrimary)];
     [topTxt addArrangedSubview:mkLabel(@"Tri ân nhà phát triển game gốc, cộng đồng mã nguồn mở & Stardew Valley Việt Nam", 12, UIFontWeightRegular, kInkSecondary)];
+    SDVAppleButton *chkUpdBtn = mkIOSButton(@"Kiểm tra cập nhật", @"arrow.triangle.2.circlepath", [kTintBlue colorWithAlphaComponent:0.13], kTintBlue, 12.5, UIEdgeInsetsMake(7, 11, 7, 11));
+    [chkUpdBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [chkUpdBtn addTarget:self action:@selector(manualCheckUpdateTapped) forControlEvents:UIControlEventTouchUpInside];
     [topRow addArrangedSubview:topTxt];
+    [topRow addArrangedSubview:chkUpdBtn];
     [_pane addArrangedSubview:mkGroupedCard(topRow, UIEdgeInsetsMake(12, 14, 12, 14))];
 
     [_pane addArrangedSubview:mkSectionTitle(@"Cộng đồng Stardew Valley Việt Nam (Facebook Groups & Pages)")];
@@ -2601,7 +2627,7 @@ static NSString *sdvProbeLocalNetwork(void) {
         [self mkCreditRow:@"NỀN TẢNG iOS PORT (MIT)" name:@"DeadAKJ — SDViosport" detail:@"Mã nguồn host .NET 8 iOS, MonoGame, tích hợp SMAPI và tay cầm cảm ứng SDViOSTouchControls." url:@"https://github.com/DeadAKJ/SDViosport" urlLabel:@"GitHub"],
         [self mkCreditRow:@"NỀN TẢNG MODDING" name:@"SMAPI — Pathoschild & Cộng đồng" detail:@"Stardew Modding API cùng các tác giả mod trên NexusMods và nhóm Việt hóa cộng đồng." url:@"https://smapi.io" urlLabel:@"smapi.io"],
         [self mkCreditRow:@"ĐÓNG GÓP MÃ NGUỒN — TAY CẦM & MOBILE UX" name:@"Nguyễn Ngọc Nguyên (Mudkip267)" detail:@"Tối ưu thanh cuộn Shop & thao tác rương kiểu Stardew Mobile, sửa lỗi tay cầm rời (animation chạy & con trỏ R-Stick Xbox) và khôi phục âm thanh SoundBank v1.0.1." url:@"https://github.com/Mudkip267/Garden-Launcher-iOS" urlLabel:@"GitHub"],
-        [self mkCreditRow:@"TRÌNH QUẢN LÝ & LAUNCHER iOS" name:@"Garden Launcher iOS (v1.0.1 Native Edition)" detail:@"Giao diện iOS chuẩn Apple, giải nén mọi định dạng (.ZIP/.RAR/.7Z/.TAR.GZ), âm thanh OpenAL chuẩn iOS, điều khiển Mobile (Edit Layout + PC Keys + Save Menu 20 mốc), tương thích Shader MGFX v9/v10 GLSL ES, cảnh báo RAM 85%/90% và hỗ trợ iOS 14–27+." url:@"https://github.com/hanprm9-dot/Garden-Launcher-iOS" urlLabel:@"GitHub"]
+        [self mkCreditRow:@"TRÌNH QUẢN LÝ & LAUNCHER iOS" name:@"Garden Launcher iOS (v1.0.2 Native Edition)" detail:@"Giao diện iOS chuẩn Apple, tự kiểm tra bản cập nhật mới kèm tóm tắt bản vá, giải nén mọi định dạng (.ZIP/.RAR/.7Z/.TAR.GZ), âm thanh OpenAL chuẩn iOS, điều khiển Mobile & ngoại vi, tương thích Shader GLSL ES, cảnh báo RAM 85%/90% và hỗ trợ iOS 14–27+." url:@"https://github.com/hanprm9-dot/Garden-Launcher-iOS" urlLabel:@"GitHub"]
     ], 14);
     [_pane addArrangedSubview:_creditCard];
 
@@ -2632,6 +2658,98 @@ static NSString *sdvProbeLocalNetwork(void) {
     [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
     [self renderAll:YES];
     [_scroll setContentOffset:CGPointZero animated:NO];
+}
+
+-(void)onLauncherUpdateNotification:(NSNotification *)n {
+    (void)n;
+    if (!self.isViewLoaded || !_pane) return;
+    [self updateSidebarChrome];
+    if (_tab != 6 && _tab != 8) {
+        [self renderAll:NO];
+    }
+}
+
+-(UIView *)buildLauncherUpdateCard:(NSDictionary *)info {
+    NSString *ver = info[@"version"] ?: @"?";
+    NSString *dateStr = info[@"date"] ?: @"";
+    NSString *summary = info[@"summary"] ?: @"";
+    NSString *updateId = info[@"updateId"] ?: @"";
+    NSInteger majorIOS = NSProcessInfo.processInfo.operatingSystemVersion.majorVersion;
+    NSString *ipaLabel = (majorIOS >= 19) ? @"Tải IPA (iOS 26–27+)" : @"Tải IPA (iOS 14–18)";
+    NSString *dlUrl = sdvRecommendedUpdateDownloadURL(info);
+    NSString *relUrl = info[@"releaseUrl"] ?: @"https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/latest";
+
+    UIStackView *box = mkVStack(8);
+
+    UIStackView *hdr = mkHStack(10);
+    [hdr addArrangedSubview:mkSettingsIconBadge(@"arrow.down.circle.fill", kTintGreen, 32)];
+    UIStackView *hdrTxt = mkVStack(1.5);
+    NSString *titleText = dateStr.length
+        ? [NSString stringWithFormat:@"Đã có bản cập nhật mới — Garden Launcher v%@ (%@)", ver, dateStr]
+        : [NSString stringWithFormat:@"Đã có bản cập nhật mới — Garden Launcher v%@", ver];
+    [hdrTxt addArrangedSubview:mkLabel(titleText, 14, UIFontWeightSemibold, kInkPrimary)];
+    [hdrTxt addArrangedSubview:mkLabel(@"Cài đè IPA cùng Bundle ID sẽ giữ nguyên 100% File Save & Mod đã cài", 11.5, UIFontWeightRegular, kInkSecondary)];
+    [hdr addArrangedSubview:hdrTxt];
+    [box addArrangedSubview:hdr];
+
+    if (summary.length) {
+        UIStackView *sumBox = mkVStack(4);
+        [sumBox addArrangedSubview:mkLabel(@"Bản cập nhật này sửa những gì:", 12, UIFontWeightSemibold, kTintBlue)];
+        UILabel *sumLbl = mkLabel(summary, 12.5, UIFontWeightRegular, kInkPrimary);
+        sumLbl.numberOfLines = 0;
+        [sumBox addArrangedSubview:sumLbl];
+        UIView *sumWrap = mkGroupedCard(sumBox, UIEdgeInsetsMake(9, 11, 9, 11));
+        sumWrap.backgroundColor = kBgCardSubtle;
+        [box addArrangedSubview:sumWrap];
+    }
+
+    UIStackView *btnRow = mkHStack(8);
+    SDVAppleButton *dlBtn = mkIOSButton(ipaLabel, @"arrow.down.to.line.compact", kTintGreen, UIColor.whiteColor, 13, UIEdgeInsetsMake(9, 12, 9, 12));
+    dlBtn.accessibilityValue = dlUrl;
+    [dlBtn addTarget:self action:@selector(openExternalLink:) forControlEvents:UIControlEventTouchUpInside];
+
+    SDVAppleButton *ghBtn = mkIOSButton(@"GitHub", @"arrow.up.right.square", [kTintBlue colorWithAlphaComponent:0.13], kTintBlue, 12.5, UIEdgeInsetsMake(9, 11, 9, 11));
+    ghBtn.accessibilityValue = relUrl;
+    [ghBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [ghBtn addTarget:self action:@selector(openExternalLink:) forControlEvents:UIControlEventTouchUpInside];
+
+    SDVAppleButton *skipBtn = mkIOSButton(@"Để sau", @"xmark", kBgCardSubtle, kInkSecondary, 12.5, UIEdgeInsetsMake(9, 10, 9, 10));
+    skipBtn.accessibilityValue = updateId;
+    [skipBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [skipBtn addTarget:self action:@selector(dismissLauncherUpdateTapped:) forControlEvents:UIControlEventTouchUpInside];
+
+    [btnRow addArrangedSubview:dlBtn];
+    [btnRow addArrangedSubview:ghBtn];
+    if (_tab != 7) [btnRow addArrangedSubview:skipBtn];
+    [box addArrangedSubview:btnRow];
+
+    UIView *card = mkGroupedCard(box, UIEdgeInsetsMake(12, 13, 12, 13));
+    card.layer.borderWidth = 1.0;
+    card.layer.borderColor = [kTintGreen colorWithAlphaComponent:0.45].CGColor;
+    return card;
+}
+
+-(void)dismissLauncherUpdateTapped:(UIButton *)sender {
+    NSString *updId = sender.accessibilityValue;
+    if (updId.length) {
+        sdvDismissLauncherUpdate(updId);
+        [self renderAll:YES];
+    }
+}
+
+-(void)manualCheckUpdateTapped {
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+    _message = @"Đang kiểm tra bản cập nhật mới từ GitHub…";
+    _messageIsError = NO;
+    [self renderAll:NO];
+    __weak typeof(self) weakSelf = self;
+    sdvCheckLauncherUpdate(YES, ^(NSDictionary *updateInfo, NSString *statusMsg) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        strongSelf->_message = statusMsg ?: @"Đã hoàn tất kiểm tra cập nhật.";
+        strongSelf->_messageIsError = NO;
+        [strongSelf renderAll:YES];
+    });
 }
 
 -(void)openBugReportModal {

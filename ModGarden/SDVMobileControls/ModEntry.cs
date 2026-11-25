@@ -242,6 +242,7 @@ namespace SDVMobileControls
             _bootGameLaunched = true;
             WriteBootStage("90|Kích hoạt GameLaunched — chuẩn bị vào game…");
             ReportNativeBoot(90, "Kích hoạt GameLaunched — chuẩn bị vào game…", "Hoàn tất đồng bộ Content Patcher & cảm ứng", 4);
+            try { if (Game1.options != null) Game1.options.rumble = true; } catch { }
             BindAllLoadedTouchVirtualPads("GameLaunched");
             EnsureGardenModHooksInstalled("GameLaunched");
             InstallMobileHarmonyPatches("GameLaunched");
@@ -256,8 +257,10 @@ namespace SDVMobileControls
 
         private void OnSaveLoaded(object sender, SaveLoadedEventArgs e)
         {
+            try { if (Game1.options != null) Game1.options.rumble = true; } catch { }
             try { RamOptimizer?.OnSaveLoaded(); } catch { }
-            SchedulePortraitSync(reloadAll: true, delayTicks: 4, reason: "SaveLoaded");
+            // Stagger portrait sync past bed wake-up fade so the player can walk immediately without hitching!
+            SchedulePortraitSync(reloadAll: true, delayTicks: 35, reason: "SaveLoaded");
             // Automatically recover any missed Level 5 / Level 10 profession choices (#GL-LTQ82M)
             try
             {
@@ -266,23 +269,19 @@ namespace SDVMobileControls
             }
             catch { }
             ResetMailboxWatchdogSnapshot();
-            LogMailDiagnostic("SaveLoaded");
-            if (!_audioDiagRanWorld)
-            {
-                _audioDiagRanWorld = true;
-                RunAudioDiagnosticAndRepair("SaveLoaded");
-            }
-            _shaderDiagWaitingSave = true;
-            _shaderDiagSaveTicks = 0;
-            _shaderDiagRanOutdoor = false;
+            // Lightweight in-memory master-volume guard (no blocking disk I/O or heavy OpenGL/Assembly scans on wake-up!)
+            try { if (SoundEffect.MasterVolume < 0.01f) SoundEffect.MasterVolume = 1.0f; } catch { }
+            if (!_audioDiagRanWorld) _audioDiagRanWorld = true;
+            _shaderDiagWaitingSave = false;
+            _shaderDiagRanOutdoor = true;
         }
 
         private void OnDayStarted(object sender, DayStartedEventArgs e)
         {
+            try { if (Game1.options != null) Game1.options.rumble = true; } catch { }
             try { RamOptimizer?.OnDayStarted(); } catch { }
-            SchedulePortraitSync(reloadAll: true, delayTicks: 4, reason: "DayStarted");
+            SchedulePortraitSync(reloadAll: true, delayTicks: 35, reason: "DayStarted");
             ResetMailboxWatchdogSnapshot();
-            LogMailDiagnostic("DayStarted");
         }
 
         private void LogMailDiagnostic(string phase)

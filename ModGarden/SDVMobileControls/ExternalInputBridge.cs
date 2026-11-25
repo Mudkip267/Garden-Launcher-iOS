@@ -442,6 +442,9 @@ namespace SDVMobileControls
                         Game1.options.gamepadMode = Options.GamepadModes.ForceOn;
                     if (!Game1.options.gamepadControls)
                         Game1.options.gamepadControls = true;
+                    // Auto-enable controller rumble in launcher so bombs, fishing, combat & tools always vibrate Xbox/PS/MFi controllers!
+                    if (!Game1.options.rumble)
+                        Game1.options.rumble = true;
                     // CRITICAL for StardewValley.Rumble.update(): if playerOneIndex == -1, Rumble returns early before SetVibration!
                     if ((int)Game1.playerOneIndex < 0)
                         Game1.playerOneIndex = PlayerIndex.One;
@@ -801,11 +804,13 @@ namespace SDVMobileControls
         /// </summary>
         public void SetRumbleDirect(float leftMotor, float rightMotor)
         {
-            if (!IsPhysicalGamepadActive || IsSuppressed || Game1.options == null || !Game1.options.rumble || Game1.paused)
+            if ((!IsPhysicalGamepadActive && !_gpConnected) || IsSuppressed || Game1.options == null || Game1.paused)
             {
                 PushRumbleToNative(0f, 0f);
                 return;
             }
+            if (!Game1.options.rumble)
+                Game1.options.rumble = true;
             ShapeAndPushConsoleRumble(leftMotor, rightMotor);
         }
 
@@ -819,11 +824,13 @@ namespace SDVMobileControls
             if (_nativeSetRumble == null)
                 return;
 
-            if (!IsPhysicalGamepadActive || IsSuppressed || Game1.options == null || !Game1.options.rumble || Game1.paused)
+            if ((!IsPhysicalGamepadActive && !_gpConnected) || IsSuppressed || Game1.options == null || Game1.paused)
             {
                 PushRumbleToNative(0f, 0f);
                 return;
             }
+            if (!Game1.options.rumble)
+                Game1.options.rumble = true;
 
             EnsureRumbleFieldsResolved();
             if (_fRumbleIsRumbling == null)
@@ -840,9 +847,17 @@ namespace SDVMobileControls
                     if (tCur <= tMax)
                     {
                         bool fading = _fRumbleFade != null && (bool)_fRumbleFade.GetValue(null);
-                        strength = fading
-                            ? (_fRumbleDuringFade != null ? (float)_fRumbleDuringFade.GetValue(null) : 0f)
-                            : (_fRumbleStrength != null ? (float)_fRumbleStrength.GetValue(null) : 0f);
+                        if (fading)
+                        {
+                            float rawFade = _fRumbleDuringFade != null ? (float)_fRumbleDuringFade.GetValue(null) : 0f;
+                            // Vanilla Stardew's 500ms bomb rumbleAndFade starts at ~0.48 due to (500-1000)/1000 lerp;
+                            // boost fade curve cleanly so explosions feel unmistakably strong on Xbox/PS motors!
+                            strength = Math.Clamp(rawFade * 1.45f, 0f, 1f);
+                        }
+                        else
+                        {
+                            strength = _fRumbleStrength != null ? (float)_fRumbleStrength.GetValue(null) : 0f;
+                        }
                     }
                 }
                 strength = Math.Clamp(strength, 0f, 1f);

@@ -83,7 +83,7 @@ jobs:
           cp -f "ModGarden/SDVMobileControls/manifest.json" "$DST/manifest.json"
           shasum -a 256 "$DST/SDVMobileControls.dll"
 
-      - name: Verify MonoGame SoundBank Audio IL
+      - name: Patch MonoGame CueDefinition (UI Info Suite 2 Compat) & Verify SoundBank Audio IL
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -91,16 +91,119 @@ jobs:
           $mgDll = Join-Path $appDir "MonoGame.Framework.dll"
           $cecilDll = Join-Path $appDir "Mono.Cecil.dll"
           Add-Type -Path $cecilDll
-          $asm = [Mono.Cecil.AssemblyDefinition]::ReadAssembly($mgDll)
+
+          $resolver = New-Object Mono.Cecil.DefaultAssemblyResolver
+          $resolver.AddSearchDirectory($appDir)
+          $resolver.AddSearchDirectory([System.IO.Path]::GetDirectoryName([object].Assembly.Location))
+          $rp = New-Object Mono.Cecil.ReaderParameters
+          $rp.AssemblyResolver = $resolver
+          $rp.ReadWrite = $false
+
+          $tmpOut = "$mgDll.patched.tmp"
+          $asm = [Mono.Cecil.AssemblyDefinition]::ReadAssembly($mgDll, $rp)
           try {
-              $sb = $asm.MainModule.GetType("Microsoft.Xna.Framework.Audio.SoundBank")
+              $mod = $asm.MainModule
+              $sb = $mod.GetType("Microsoft.Xna.Framework.Audio.SoundBank")
               $ex = $sb.Methods | Where-Object { $_.Name -eq "Exists" -and $_.Parameters.Count -eq 1 } | Select-Object -First 1
               if ($ex.Body.Instructions.Count -lt 10) {
                   throw "MonoGame SoundBank.Exists is broken (ops=$($ex.Body.Instructions.Count))"
               }
-              Write-Host "[AUDIO OK] SoundBank.Exists has $($ex.Body.Instructions.Count) IL ops"
+
+              # Add missing PC Stardew CueDefinition members required by UI Info Suite 2 (SoundHelper.RegisterSound)
+              $cd = $mod.GetType("Microsoft.Xna.Framework.Audio.CueDefinition")
+              if (-not $cd) { throw "CueDefinition not found" }
+
+              $tInt32 = $mod.TypeSystem.Int32
+              $tBool = $mod.TypeSystem.Boolean
+              $tVoid = $mod.TypeSystem.Void
+              $tString = $mod.TypeSystem.String
+              $tEnum = ($mod.Types | Where-Object { $_.IsEnum } | Select-Object -First 1).BaseType
+              $tSoundEffect = $mod.GetType("Microsoft.Xna.Framework.Audio.SoundEffect")
+              $tSoundEffectArr = New-Object Mono.Cecil.ArrayType($tSoundEffect)
+
+              $lb = $cd.NestedTypes | Where-Object { $_.Name -eq "LimitBehavior" } | Select-Object -First 1
+              if (-not $lb) {
+                  $enumAttrs = [Mono.Cecil.TypeAttributes]([int][Mono.Cecil.TypeAttributes]::NestedPublic -bor [int][Mono.Cecil.TypeAttributes]::Sealed)
+                  $lb = New-Object Mono.Cecil.TypeDefinition("", "LimitBehavior", $enumAttrs, $tEnum)
+                  $valAttrs = [Mono.Cecil.FieldAttributes]([int][Mono.Cecil.FieldAttributes]::Public -bor [int][Mono.Cecil.FieldAttributes]::SpecialName -bor [int][Mono.Cecil.FieldAttributes]::RTSpecialName)
+                  $lb.Fields.Add((New-Object Mono.Cecil.FieldDefinition("value__", $valAttrs, $tInt32)))
+                  $constAttrs = [Mono.Cecil.FieldAttributes]([int][Mono.Cecil.FieldAttributes]::Public -bor [int][Mono.Cecil.FieldAttributes]::Static -bor [int][Mono.Cecil.FieldAttributes]::Literal -bor [int][Mono.Cecil.FieldAttributes]::HasDefault)
+                  $fFail = New-Object Mono.Cecil.FieldDefinition("FailToPlay", $constAttrs, $lb); $fFail.Constant = [int]0; $lb.Fields.Add($fFail)
+                  $fRepl = New-Object Mono.Cecil.FieldDefinition("ReplaceOldest", $constAttrs, $lb); $fRepl.Constant = [int]2; $lb.Fields.Add($fRepl)
+                  $cd.NestedTypes.Add($lb)
+              }
+
+              if (-not ($cd.Fields | Where-Object { $_.Name -eq "instanceLimit" })) {
+                  $cd.Fields.Add((New-Object Mono.Cecil.FieldDefinition("instanceLimit", [Mono.Cecil.FieldAttributes]::Public, $tInt32)))
+              }
+              if (-not ($cd.Fields | Where-Object { $_.Name -eq "limitBehavior" })) {
+                  $cd.Fields.Add((New-Object Mono.Cecil.FieldDefinition("limitBehavior", [Mono.Cecil.FieldAttributes]::Public, $lb)))
+              }
+
+              $optParam = [Mono.Cecil.ParameterAttributes]([int][Mono.Cecil.ParameterAttributes]::Optional -bor [int][Mono.Cecil.ParameterAttributes]::HasDefault)
+              $hasSingleSetSound = $cd.Methods | Where-Object {
+                  $_.Name -eq "SetSound" -and $_.Parameters.Count -eq 4 -and $_.Parameters[0].ParameterType.FullName -eq "Microsoft.Xna.Framework.Audio.SoundEffect"
+              }
+              if (-not $hasSingleSetSound) {
+                  $mAttrs = [Mono.Cecil.MethodAttributes]([int][Mono.Cecil.MethodAttributes]::Public -bor [int][Mono.Cecil.MethodAttributes]::HideBySig)
+                  $mSet = New-Object Mono.Cecil.MethodDefinition("SetSound", $mAttrs, $tVoid)
+                  $mSet.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition("sound_effect", [Mono.Cecil.ParameterAttributes]::None, $tSoundEffect)))
+                  $mSet.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition("category_id", [Mono.Cecil.ParameterAttributes]::None, $tInt32)))
+                  $pLoop = New-Object Mono.Cecil.ParameterDefinition("loop", $optParam, $tBool); $pLoop.Constant = $false; $mSet.Parameters.Add($pLoop)
+                  $pRev = New-Object Mono.Cecil.ParameterDefinition("use_reverb", $optParam, $tBool); $pRev.Constant = $false; $mSet.Parameters.Add($pRev)
+                  $il = $mSet.Body.GetILProcessor()
+                  $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ret))
+                  $cd.Methods.Add($mSet)
+              }
+
+              $defCtor = $cd.Methods | Where-Object { $_.Name -eq ".ctor" -and $_.Parameters.Count -eq 0 } | Select-Object -First 1
+              $objCtor = ($defCtor.Body.Instructions | Where-Object { $_.OpCode -eq [Mono.Cecil.Cil.OpCodes]::Call } | Select-Object -First 1).Operand
+              $fName = $cd.Fields | Where-Object { $_.Name -eq "name" } | Select-Object -First 1
+              foreach ($sndType in @($tSoundEffect, $tSoundEffectArr)) {
+                  $exists = $cd.Methods | Where-Object {
+                      $_.Name -eq ".ctor" -and $_.Parameters.Count -eq 5 -and $_.Parameters[1].ParameterType.FullName -eq $sndType.FullName
+                  }
+                  if (-not $exists) {
+                      $cAttrs = [Mono.Cecil.MethodAttributes]([int][Mono.Cecil.MethodAttributes]::Public -bor [int][Mono.Cecil.MethodAttributes]::HideBySig -bor [int][Mono.Cecil.MethodAttributes]::SpecialName -bor [int][Mono.Cecil.MethodAttributes]::RTSpecialName)
+                      $ctor = New-Object Mono.Cecil.MethodDefinition(".ctor", $cAttrs, $tVoid)
+                      $ctor.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition("new_name", [Mono.Cecil.ParameterAttributes]::None, $tString)))
+                      $ctor.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition("sound_effect", [Mono.Cecil.ParameterAttributes]::None, $sndType)))
+                      $ctor.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition("category_id", [Mono.Cecil.ParameterAttributes]::None, $tInt32)))
+                      $pL = New-Object Mono.Cecil.ParameterDefinition("loop", $optParam, $tBool); $pL.Constant = $false; $ctor.Parameters.Add($pL)
+                      $pR = New-Object Mono.Cecil.ParameterDefinition("use_reverb", $optParam, $tBool); $pR.Constant = $false; $ctor.Parameters.Add($pR)
+                      $cil = $ctor.Body.GetILProcessor()
+                      $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+                      $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Call, [Mono.Cecil.MethodReference]$objCtor))
+                      $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+                      $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
+                      $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Stfld, $fName))
+                      $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ret))
+                      $cd.Methods.Add($ctor)
+                  }
+              }
+
+              $asm.Write($tmpOut)
           } finally {
               $asm.Dispose()
+          }
+          Move-Item -Force $tmpOut $mgDll
+
+          # Strictly verify readback!
+          $vAsm = [Mono.Cecil.AssemblyDefinition]::ReadAssembly($mgDll, $rp)
+          try {
+              $vsb = $vAsm.MainModule.GetType("Microsoft.Xna.Framework.Audio.SoundBank")
+              $vex = $vsb.Methods | Where-Object { $_.Name -eq "Exists" -and $_.Parameters.Count -eq 1 } | Select-Object -First 1
+              $vcd = $vAsm.MainModule.GetType("Microsoft.Xna.Framework.Audio.CueDefinition")
+              $vlb = $vcd.NestedTypes | Where-Object { $_.Name -eq "LimitBehavior" }
+              $vil = $vcd.Fields | Where-Object { $_.Name -eq "instanceLimit" }
+              $vlbf = $vcd.Fields | Where-Object { $_.Name -eq "limitBehavior" }
+              $vss = $vcd.Methods | Where-Object { $_.Name -eq "SetSound" -and $_.Parameters.Count -eq 4 -and $_.Parameters[0].ParameterType.FullName -eq "Microsoft.Xna.Framework.Audio.SoundEffect" }
+              if (-not $vlb -or -not $vil -or -not $vlbf -or -not $vss -or $vex.Body.Instructions.Count -lt 10) {
+                  throw "MonoGame readback verification failed!"
+              }
+              Write-Host "[AUDIO + UIIS2 COMPAT OK] SoundBank.Exists=$($vex.Body.Instructions.Count) ops, CueDefinition(LimitBehavior, instanceLimit, limitBehavior, SetSound) verified!"
+          } finally {
+              $vAsm.Dispose()
           }
 
       - name: Sign & Strictly Verify Entire App Bundle with Apple codesign

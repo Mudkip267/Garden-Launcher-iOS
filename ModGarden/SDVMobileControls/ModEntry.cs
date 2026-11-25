@@ -1225,8 +1225,9 @@ namespace SDVMobileControls
                 return true;
 
             ext.ApplyStardewGamepadMode();
+            ext.SyncDirectZeroHarmonyInputStates();
 
-            if (ext.ShouldOverrideMouse)
+            if (ext.ShouldPushMouseStateNow)
                 mouseState = ext.CurrentMouseState;
 
             if (ext.IsPhysicalGamepadActive)
@@ -1336,8 +1337,9 @@ namespace SDVMobileControls
         internal static void ApplyExternalControlInputStates(ExternalInputBridge ext, ref KeyboardState keyboardState, ref MouseState mouseState, ref GamePadState gamePadState)
         {
             ext.ApplyStardewGamepadMode();
+            ext.SyncDirectZeroHarmonyInputStates();
 
-            if (ext.ShouldOverrideMouse)
+            if (ext.ShouldPushMouseStateNow)
                 mouseState = ext.CurrentMouseState;
 
             if (ext.IsPhysicalGamepadActive)

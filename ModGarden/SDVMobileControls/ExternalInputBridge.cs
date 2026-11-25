@@ -161,6 +161,13 @@ namespace SDVMobileControls
         public bool IsExternalMouseActive => ActiveMode == ExternalInputMode.KeyboardMouse && _mouseConnected && _mouseEverUsed && !IsSuppressed;
         public bool IsExternalDeviceActive => ActiveMode != ExternalInputMode.Touch && !IsSuppressed;
         public bool ShouldOverrideMouse => IsExternalMouseActive || IsPhysicalGamepadActive;
+        // Only push/overwrite Game1.input._currentMouseState & Mouse.PrimaryWindow when external mouse is active,
+        // during free gameplay (no menu), or while actively steering the R-stick cursor inside InventoryPage.
+        // Inside menus (TitleMenu, GameMenu, ShopMenu, Chest, Options, etc.), let Stardew's native SnappyMenus +
+        // Game1.setMousePositionRaw() own the cursor so D-Pad / Left Stick / A work 100% like Console/Switch!
+        public bool ShouldPushMouseStateNow =>
+            IsExternalMouseActive ||
+            (IsPhysicalGamepadActive && (Game1.activeClickableMenu == null || IsRightStickMenuCursorActive || _menuSyntheticLeftClickFrames > 0));
         public bool HasPhysicalKeysPressed => !IsSuppressed && _physicalKeys.Count > 0;
         public IReadOnlyList<Keys> PhysicalKeys => _physicalKeys;
 
@@ -566,6 +573,25 @@ namespace SDVMobileControls
             return new Point((int)((long)rawX * uiW / bw), (int)((long)rawY * uiH / bh));
         }
 
+        private bool TryReadLiveGameMousePosition(int bw, int bh, out int lx, out int ly)
+        {
+            lx = 0;
+            ly = 0;
+            try
+            {
+                if (Game1.input != null && InputCurrentMouseField != null &&
+                    InputCurrentMouseField.GetValue(Game1.input) is MouseState liveMs &&
+                    liveMs.X >= 0 && liveMs.X < bw && liveMs.Y >= 0 && liveMs.Y < bh)
+                {
+                    lx = liveMs.X;
+                    ly = liveMs.Y;
+                    return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
         private void StepGamepadRightStickCursor(float rx, float ry, int bw, int bh)
         {
             EnsureValidLocalMultiplayerWindow(bw, bh);
@@ -580,6 +606,7 @@ namespace SDVMobileControls
 
             SuppressGamepadAButtonThisFrame = false;
 
+            bool inMenu = Game1.activeClickableMenu != null;
             GameMenu gmInv = Game1.activeClickableMenu as GameMenu;
             bool isInventoryPage = false;
             if (gmInv != null)
@@ -594,17 +621,39 @@ namespace SDVMobileControls
             }
             else
             {
-                // If user navigates inventory with Left Stick or D-Pad, hand back to SnappyMenus cleanly
+                // If user navigates inventory with Left Stick, D-Pad, bumpers, or B/X/Y/Start,
+                // immediately hand cursor control right back to Stardew's native SnappyMenus!
                 Vector2 ls = CurrentGamePadState.ThumbSticks.Left;
+                var btns = CurrentGamePadState.Buttons;
                 bool navUsed = (ls.X * ls.X + ls.Y * ls.Y > 0.09f) ||
                     CurrentGamePadState.DPad.Up == ButtonState.Pressed ||
                     CurrentGamePadState.DPad.Down == ButtonState.Pressed ||
                     CurrentGamePadState.DPad.Left == ButtonState.Pressed ||
-                    CurrentGamePadState.DPad.Right == ButtonState.Pressed;
+                    CurrentGamePadState.DPad.Right == ButtonState.Pressed ||
+                    btns.LeftShoulder == ButtonState.Pressed ||
+                    btns.RightShoulder == ButtonState.Pressed ||
+                    btns.B == ButtonState.Pressed ||
+                    btns.X == ButtonState.Pressed ||
+                    btns.Y == ButtonState.Pressed ||
+                    btns.Start == ButtonState.Pressed;
                 if (navUsed)
                 {
                     IsRightStickMenuCursorActive = false;
                     _menuSyntheticLeftClickFrames = 0;
+                }
+            }
+
+            // CRITICAL for 0% JIT iOS SnappyMenus: whenever ANY menu is open and R-stick free-cursor
+            // is not actively steering, always adopt Stardew's live snapped cursor from Game1.input._currentMouseState
+            // so we NEVER fight or reset SnappyMenus back to (640, 360)!
+            if (inMenu && !IsRightStickMenuCursorActive && _menuSyntheticLeftClickFrames == 0)
+            {
+                if (TryReadLiveGameMousePosition(bw, bh, out int liveX, out int liveY))
+                {
+                    _gamepadCursorX = liveX;
+                    _gamepadCursorY = liveY;
+                    _gamepadCursorXf = liveX;
+                    _gamepadCursorYf = liveY;
                 }
             }
 
@@ -881,9 +930,10 @@ namespace SDVMobileControls
             if (tick == _lastPollTick && nowMs - _lastPollMs < 6)
             {
                 if (directTouchCount > 0) NotifyDirectTouch(directTouchCount);
-                // Always restore Game1.options.gamepadControls even on fast frames because
-                // SDViOSTouchControls.ModEntry.OnUpdateTicking forces it false every tick!
+                // Always restore Game1.options.gamepadControls & push live gamepad state even on fast frames
+                // because Game1.input.UpdateStates() & SDViOSTouchControls run between ticks!
                 ApplyStardewGamepadMode();
+                SyncDirectZeroHarmonyInputStates();
                 return;
             }
             _lastPollTick = tick;
@@ -1054,7 +1104,7 @@ namespace SDVMobileControls
         {
             try
             {
-                if (ShouldOverrideMouse)
+                if (ShouldPushMouseStateNow)
                 {
                     MouseState ms = CurrentMouseState;
                     if (Game1.input != null && InputCurrentMouseField != null)

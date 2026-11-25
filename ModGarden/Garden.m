@@ -2,6 +2,8 @@
 #import <CommonCrypto/CommonDigest.h>
 #import <ctype.h>
 #import <dlfcn.h>
+#import <sys/stat.h>
+#import <unistd.h>
 #import <wchar.h>
 #import "vendor/miniz.h"
 
@@ -11,13 +13,26 @@ static void check(BOOL ok, NSError *error) { if (!ok) fail(error.localizedDescri
 static NSString *join(NSString *a, NSString *b) { return [a stringByAppendingPathComponent:b]; }
 static BOOL dir(NSString *p) { BOOL d=NO; return [fm() fileExistsAtPath:p isDirectory:&d] && d; }
 static void mkdirs(NSString *p) { NSError *e=nil; BOOL ok=[fm() createDirectoryAtPath:p withIntermediateDirectories:YES attributes:nil error:&e]; check(ok,e); }
-static void removeItem(NSString *p) { if ([fm() fileExistsAtPath:p]) { NSError *e=nil; BOOL ok=[fm() removeItemAtPath:p error:&e]; check(ok,e); } }
+static void removeItem(NSString *p) {
+    if ([fm() fileExistsAtPath:p]) {
+        chmod(p.fileSystemRepresentation, 0644);
+        NSError *e=nil;
+        BOOL ok=[fm() removeItemAtPath:p error:&e];
+        check(ok,e);
+    }
+}
 static NSString *hashData(NSData *data) {
     unsigned char bytes[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(data.bytes,(CC_LONG)data.length,bytes);
     NSMutableString *s=[NSMutableString string]; for (int i=0;i<CC_SHA256_DIGEST_LENGTH;i++) [s appendFormat:@"%02x",bytes[i]]; return s;
 }
 static NSData *readFile(NSString *p) { NSError *e=nil; NSData *d=[NSData dataWithContentsOfFile:p options:NSDataReadingMappedIfSafe error:&e]; check(d!=nil,e); return d; }
-static void writeFile(NSData *d, NSString *p) { mkdirs(p.stringByDeletingLastPathComponent); NSError *e=nil; BOOL ok=[d writeToFile:p options:NSDataWritingAtomic error:&e]; check(ok,e); }
+static void writeFile(NSData *d, NSString *p) {
+    mkdirs(p.stringByDeletingLastPathComponent);
+    if ([fm() fileExistsAtPath:p]) chmod(p.fileSystemRepresentation, 0644);
+    NSError *e=nil;
+    BOOL ok=[d writeToFile:p options:NSDataWritingAtomic error:&e];
+    check(ok,e);
+}
 
 static NSData *stripJson5ForIOS14(NSData *raw) {
     if (!raw.length) return raw;
@@ -89,12 +104,11 @@ static id jsonAt(NSString *p) {
     return j;
 }
 
+// Visible game directory Documents/StardewValley/ so users can freely access & edit Content/*.xnb in Apple's Files (Tệp) app!
 static NSString *sdvHiddenGameDir(NSString *docsPath) {
     if (!docsPath.length) return @"";
-    NSString *d = join(docsPath, @".game");
+    NSString *d = join(docsPath, @"StardewValley");
     [fm() createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
-    NSURL *u = [NSURL fileURLWithPath:d isDirectory:YES];
-    [u setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
     return d;
 }
 
@@ -151,20 +165,36 @@ static void sdvMoveMergeDir(NSString *srcDir, NSString *dstDir) {
         if (dir(sp)) {
             sdvMoveMergeDir(sp, dp);
         } else {
-            if ([fm() fileExistsAtPath:dp]) [fm() removeItemAtPath:dp error:nil];
+            if ([fm() fileExistsAtPath:dp]) {
+                chmod(dp.fileSystemRepresentation, 0644);
+                [fm() removeItemAtPath:dp error:nil];
+            }
             [fm() moveItemAtPath:sp toPath:dp error:nil];
         }
     }
     [fm() removeItemAtPath:srcDir error:nil];
 }
 
-// Automatically hides all non-user game/runtime/config files inside Documents/.game/ and Documents/.garden/
-// so Apple's Files app (Tệp -> Trên iPhone -> Garden Launcher) stays super clean with only Mods, Saves, ErrorLogs!
+// Organizes Documents/ cleanly for Apple's Files (Tệp) app:
+// - Restores visible Documents/StardewValley/ (auto-migrating v1.0.1/v1.0.2 hidden .game/ -> StardewValley/) so users can view/edit Content/*.xnb!
+// - Keeps internal launcher/controller config & IPC flag files tucked inside hidden Documents/.garden/.
 static void sdvMigrateDocumentsToHiddenLayout(NSString *docsPath) {
     if (!docsPath.length) return;
     @try {
+        // Fast O(1) rename if migrating from v1.0.1/v1.0.2 hidden Documents/.game/ -> Documents/StardewValley/
+        NSString *legacyHidden = join(docsPath, @".game");
+        NSString *visibleGame = join(docsPath, @"StardewValley");
+        if (dir(legacyHidden) && ![fm() fileExistsAtPath:visibleGame]) {
+            [fm() moveItemAtPath:legacyHidden toPath:visibleGame error:nil];
+        }
+
         NSString *gameDir = sdvHiddenGameDir(docsPath);
         NSString *gardenDir = sdvHiddenGardenDir(docsPath);
+        if (dir(legacyHidden)) {
+            sdvMoveMergeDir(legacyHidden, gameDir);
+        }
+        NSURL *gu = [NSURL fileURLWithPath:gameDir isDirectory:YES];
+        [gu setResourceValue:@NO forKey:NSURLIsExcludedFromBackupKey error:nil];
 
         // 1. Move internal launcher/controller config & IPC flag files -> Documents/.garden/
         NSArray<NSString *> *gardenFiles = @[
@@ -172,7 +202,7 @@ static void sdvMigrateDocumentsToHiddenLayout(NSString *docsPath) {
             @"sdv_mobile_edit.flag", @"sdv_ram_alert.txt", @"sdv_pause_now.flag",
             @"sdv_haptic_bite.flag", @"sdv_safe_area.cfg", @"sdv_boot_stage.txt",
             @"sdv_boot_ready.flag", @"sdv_gc_now.flag", @"sdv_prune_now.flag",
-            @"touch_overlay_config.json"
+            @"sdv_gamepad_only.flag", @"touch_overlay_config.json"
         ];
         for (NSString *gf in gardenFiles) {
             NSString *src = join(docsPath, gf);
@@ -190,20 +220,12 @@ static void sdvMigrateDocumentsToHiddenLayout(NSString *docsPath) {
             sdvMoveMergeDir(oldDisabled, join(gardenDir, @"DisabledMods"));
         }
 
-        // 2. Migrate any legacy Documents/StardewValley/ subfolder into Documents/.game/
-        NSString *legacySub = join(docsPath, @"StardewValley");
-        if (dir(legacySub)) {
-            if ([fm() fileExistsAtPath:join(legacySub, @"Stardew Valley.dll")] || dir(join(legacySub, @"Content"))) {
-                sdvMoveMergeDir(legacySub, gameDir);
-            }
-        }
-
-        // 3. Move loose PC game files & folders from Documents/ -> Documents/.game/, and delete unused PC doc/license junk
+        // 2. Move loose PC game files & folders from Documents/ -> Documents/StardewValley/, and delete unused PC doc/license junk
         NSArray<NSString *> *rootItems = [fm() contentsOfDirectoryAtPath:docsPath error:nil] ?: @[];
         for (NSString *item in rootItems) {
             if ([item hasPrefix:@"."]) continue;
             NSString *low = item.lowercaseString;
-            if ([low isEqualToString:@"mods"] || [low isEqualToString:@"saves"] || [low isEqualToString:@"errorlogs"]) continue;
+            if ([low isEqualToString:@"stardewvalley"] || [low isEqualToString:@"mods"] || [low isEqualToString:@"saves"] || [low isEqualToString:@"errorlogs"]) continue;
             NSString *src = join(docsPath, item);
             if (dir(src)) {
                 if ([low isEqualToString:@"content"]) {
@@ -243,7 +265,7 @@ static void sdvMigrateDocumentsToHiddenLayout(NSString *docsPath) {
             }
         }
 
-        // 4. Also prune unused desktop doc/license junk inside .game/ root
+        // 3. Also prune unused desktop doc/license junk inside StardewValley/ root
         for (NSString *gitem in ([fm() contentsOfDirectoryAtPath:gameDir error:nil] ?: @[])) {
             NSString *gp = join(gameDir, gitem);
             if (dir(gp)) continue;
@@ -584,28 +606,31 @@ static NSDictionary *gameDataStatus(NSString *docsPath) {
     if (!docsPath.length) {
         return @{@"hasSdvDll": @NO, @"hasContent": @NO, @"hasSmapi": @NO, @"hasSmapiInternal": @NO, @"ready": @NO, @"gameDir": @""};
     }
-    NSString *hiddenGame = join(docsPath, @".game");
     NSString *sub = join(docsPath, @"StardewValley");
-    NSString *gameDir = hiddenGame;
-    if ([fm() fileExistsAtPath:join(hiddenGame, @"Stardew Valley.dll")] || dir(join(hiddenGame, @"Content"))) {
+    NSString *hiddenGame = join(docsPath, @".game");
+    NSString *gameDir = sub;
+    if ([fm() fileExistsAtPath:join(sub, @"Stardew Valley.dll")] || dir(join(sub, @"Content"))) {
+        gameDir = sub;
+    } else if ([fm() fileExistsAtPath:join(hiddenGame, @"Stardew Valley.dll")] || dir(join(hiddenGame, @"Content"))) {
         gameDir = hiddenGame;
     } else if ([fm() fileExistsAtPath:join(docsPath, @"Stardew Valley.dll")] || dir(join(docsPath, @"Content"))) {
         gameDir = docsPath;
-    } else if ([fm() fileExistsAtPath:join(sub, @"Stardew Valley.dll")] || dir(join(sub, @"Content"))) {
-        gameDir = sub;
     }
     BOOL hasSdv = [fm() fileExistsAtPath:join(gameDir, @"Stardew Valley.dll")];
     NSString *contentDir = join(gameDir, @"Content");
     BOOL hasContent = dir(contentDir) && ([fm() contentsOfDirectoryAtPath:contentDir error:nil].count > 0);
     BOOL hasSmapi = [fm() fileExistsAtPath:join(gameDir, @"StardewModdingAPI.dll")] ||
+                    [fm() fileExistsAtPath:join(sub, @"StardewModdingAPI.dll")] ||
                     [fm() fileExistsAtPath:join(hiddenGame, @"StardewModdingAPI.dll")] ||
                     [fm() fileExistsAtPath:join(docsPath, @"StardewModdingAPI.dll")];
-    NSString *si0 = join(hiddenGame, @"smapi-internal");
+    NSString *si0 = join(sub, @"smapi-internal");
     NSString *si1 = join(gameDir, @"smapi-internal");
-    NSString *si2 = join(docsPath, @"smapi-internal");
+    NSString *si2 = join(hiddenGame, @"smapi-internal");
+    NSString *si3 = join(docsPath, @"smapi-internal");
     BOOL hasSi = (dir(si0) && [fm() contentsOfDirectoryAtPath:si0 error:nil].count > 0) ||
                  (dir(si1) && [fm() contentsOfDirectoryAtPath:si1 error:nil].count > 0) ||
-                 (dir(si2) && [fm() contentsOfDirectoryAtPath:si2 error:nil].count > 0);
+                 (dir(si2) && [fm() contentsOfDirectoryAtPath:si2 error:nil].count > 0) ||
+                 (dir(si3) && [fm() contentsOfDirectoryAtPath:si3 error:nil].count > 0);
     return @{
         @"hasSdvDll": @(hasSdv),
         @"hasContent": @(hasContent),
@@ -1083,13 +1108,119 @@ static NSString *unpack(NSURL *url, NSString *tmp) {
     return tmp;
 }
 
+static BOOL sdvIsKnownContentSubfolder(NSString *segLow) {
+    if (!segLow.length) return NO;
+    static NSSet<NSString *> *sDirs = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        sDirs = [NSSet setWithArray:@[
+            @"animals", @"buildings", @"characters", @"data", @"effects", @"fonts",
+            @"loosesprites", @"maps", @"minigames", @"portraits", @"strings",
+            @"terrainfeatures", @"tilesheets", @"volcanodungeon", @"xact"
+        ]];
+    });
+    return [sDirs containsObject:segLow];
+}
+
+static BOOL sdvIsKnownContentAssetExt(NSString *extLow) {
+    return [extLow isEqualToString:@"xnb"] || [extLow isEqualToString:@"xwb"] ||
+           [extLow isEqualToString:@"xsb"] || [extLow isEqualToString:@"xgs"];
+}
+
+static NSUInteger importGameDataFromDirectory(NSURL *dirUrl, NSString *docsPath) {
+    NSString *srcRoot = dirUrl.path;
+    if (!dir(srcRoot)) fail(@"Không đọc được thư mục dữ liệu đã chọn.");
+    BOOL hasExistingSdv = [gameDataStatus(docsPath)[@"hasSdvDll"] boolValue];
+
+    // Detect whether user picked Stardew Valley root folder, Content/ folder, or a Content subfolder (e.g. Portraits/)
+    NSString *srcGameRoot = nil;
+    NSString *contentOnlyPrefix = nil;
+    if ([fm() fileExistsAtPath:join(srcRoot, @"Stardew Valley.dll")] || dir(join(srcRoot, @"Content"))) {
+        srcGameRoot = srcRoot;
+    } else if ([srcRoot.lastPathComponent.lowercaseString isEqualToString:@"content"]) {
+        contentOnlyPrefix = @"Content";
+    } else if (hasExistingSdv && sdvIsKnownContentSubfolder(srcRoot.lastPathComponent.lowercaseString)) {
+        contentOnlyPrefix = join(@"Content", srcRoot.lastPathComponent);
+    } else {
+        // Check 1 level deeper wrapper folder
+        for (NSString *sub in ([fm() contentsOfDirectoryAtPath:srcRoot error:nil] ?: @[])) {
+            if ([sub hasPrefix:@"."]) continue;
+            NSString *sp = join(srcRoot, sub);
+            if (!dir(sp)) continue;
+            if ([fm() fileExistsAtPath:join(sp, @"Stardew Valley.dll")] || dir(join(sp, @"Content"))) {
+                srcGameRoot = sp;
+                break;
+            }
+            if (hasExistingSdv && sdvIsKnownContentSubfolder(sub.lowercaseString)) {
+                contentOnlyPrefix = @"Content";
+                break;
+            }
+        }
+    }
+    if (!srcGameRoot && !contentOnlyPrefix) {
+        fail(@"Thư mục này không chứa dữ liệu game PC (Stardew Valley.dll hoặc Content/).");
+    }
+
+    mkdirs(docsPath);
+    NSString *gameRoot = sdvHiddenGameDir(docsPath);
+    mkdirs(join(docsPath, @"Mods"));
+    mkdirs(join(docsPath, @"Saves"));
+    mkdirs(join(docsPath, @"ErrorLogs"));
+
+    NSMutableSet<NSString *> *bundleRuntimeFiles = [NSMutableSet set];
+    for (NSString *bf in ([fm() contentsOfDirectoryAtPath:NSBundle.mainBundle.bundlePath error:nil] ?: @[])) {
+        if ([bf.pathExtension.lowercaseString isEqualToString:@"dll"]) [bundleRuntimeFiles addObject:bf.lowercaseString];
+    }
+
+    NSString *enumBase = srcGameRoot ?: srcRoot;
+    NSDirectoryEnumerator *en = [fm() enumeratorAtPath:enumBase];
+    NSUInteger written = 0;
+    for (NSString *rawRel in en) { @autoreleasepool {
+        if (![en.fileAttributes.fileType isEqualToString:NSFileTypeRegular]) continue;
+        if (isJunkArchiveEntry(rawRel)) continue;
+        NSString *rel = contentOnlyPrefix ? join(contentOnlyPrefix, rawRel) : rawRel;
+        rel = clean(rel);
+        NSArray<NSString *> *relParts = rel.pathComponents;
+        NSString *topLow = relParts.firstObject.lowercaseString;
+        NSString *fileLow = rel.lastPathComponent.lowercaseString;
+        NSString *extLow = rel.pathExtension.lowercaseString;
+        if ([topLow isEqualToString:@"saves"] || [topLow isEqualToString:@"smapi-internal"]) continue;
+        if ([topLow isEqualToString:@"mods"] && relParts.count >= 2 &&
+            ([relParts[1] caseInsensitiveCompare:@"SDViOSTouchControls"] == NSOrderedSame ||
+             [relParts[1] caseInsensitiveCompare:@"SDVMobileControls"] == NSOrderedSame)) continue;
+        if (relParts.count == 1 && ([fileLow hasPrefix:@"stardewmoddingapi"] || sdvIsUnusedGameRootJunk(fileLow, extLow) || [bundleRuntimeFiles containsObject:fileLow])) continue;
+
+        NSString *srcFile = join(enumBase, rawRel);
+        NSString *targetBase = [topLow isEqualToString:@"mods"] ? docsPath : gameRoot;
+        NSString *dst = inside(targetBase, rel);
+        mkdirs(dst.stringByDeletingLastPathComponent);
+        if ([fm() fileExistsAtPath:dst]) {
+            chmod(dst.fileSystemRepresentation, 0644);
+            [fm() removeItemAtPath:dst error:nil];
+        }
+        NSError *ce = nil;
+        if ([fm() copyItemAtPath:srcFile toPath:dst error:&ce]) {
+            chmod(dst.fileSystemRepresentation, 0644);
+            written++;
+        }
+    }}
+    if (written == 0) fail(@"Không chép được tệp dữ liệu nào từ thư mục đã chọn.");
+    sdvMigrateDocumentsToHiddenLayout(docsPath);
+    syncBundledLidgren(docsPath);
+    syncBundledSmapi(docsPath);
+    syncBundledMobileControls(docsPath);
+    return written;
+}
+
 static NSUInteger importGameDataWithLibArchive(NSURL *url, NSString *docsPath) {
     const SDVLibArchiveAPI *api = sdvLibArchive();
     if (!api->ready) fail(@"Không tải được bộ giải nén hệ thống iOS (libarchive).");
+    BOOL hasExistingSdv = [gameDataStatus(docsPath)[@"hasSdvDll"] boolValue];
 
-    // Pass 1: Detect wrapper folder prefix containing Stardew Valley.dll / Content/ / StardewModdingAPI.dll
+    // Pass 1: Detect wrapper folder prefix containing Stardew Valley.dll / Content/ / Content subfolders / StardewModdingAPI.dll
     NSString *bestPrefix = nil;
     NSInteger bestScore = -1;
+    BOOL wrapIntoContent = NO;
     {
         void *a = api->read_new();
         api->support_filter_all(a);
@@ -1106,8 +1237,12 @@ static NSUInteger importGameDataWithLibArchive(NSURL *url, NSString *docsPath) {
             int rc = api->next_header(a, &entry);
             if (rc == 1) break;
             if (rc < 0 && rc != -20) break;
-            if (++count > 40000) { api->read_free(a); fail(@"Gói vượt quá 40.000 mục."); }
+            if (++count > 80000) { api->read_free(a); fail(@"Gói vượt quá 80.000 mục."); }
             @autoreleasepool {
+                if (api->entry_is_encrypted && api->entry_is_encrypted(entry)) {
+                    api->read_free(a);
+                    fail(@"Gói dữ liệu có đặt mật khẩu bảo vệ. Hãy giải nén bằng mật khẩu trước rồi chọn lại!");
+                }
                 NSString *raw = decodeLibArchiveEntryName(api, entry);
                 if (api->data_skip) api->data_skip(a);
                 if (!raw.length) continue;
@@ -1115,19 +1250,25 @@ static NSUInteger importGameDataWithLibArchive(NSURL *url, NSString *docsPath) {
                 if (isJunkArchiveEntry(raw) || [raw hasSuffix:@"/"]) continue;
                 NSArray<NSString *> *parts = raw.pathComponents;
                 NSString *lastLow = raw.lastPathComponent.lowercaseString;
+                NSString *extLow = raw.pathExtension.lowercaseString;
                 if ([lastLow isEqualToString:@"stardew valley.dll"]) {
                     NSString *pref = (parts.count > 1) ? [[NSString pathWithComponents:[parts subarrayWithRange:NSMakeRange(0, parts.count - 1)]] stringByAppendingString:@"/"] : @"";
-                    if (bestScore < 100 || (bestScore == 100 && pref.length < bestPrefix.length)) { bestScore = 100; bestPrefix = pref; }
+                    if (bestScore < 100 || (bestScore == 100 && pref.length < bestPrefix.length)) { bestScore = 100; bestPrefix = pref; wrapIntoContent = NO; }
                 } else if ([lastLow isEqualToString:@"stardewmoddingapi.dll"]) {
                     NSString *pref = (parts.count > 1) ? [[NSString pathWithComponents:[parts subarrayWithRange:NSMakeRange(0, parts.count - 1)]] stringByAppendingString:@"/"] : @"";
-                    if (bestScore < 80) { bestScore = 80; bestPrefix = pref; }
+                    if (bestScore < 80) { bestScore = 80; bestPrefix = pref; wrapIntoContent = NO; }
                 } else {
                     for (NSUInteger k = 0; k + 1 < parts.count; k++) {
                         NSString *seg = parts[k].lowercaseString;
                         if ([seg isEqualToString:@"content"] || [seg isEqualToString:@"smapi-internal"]) {
                             NSInteger sc = [seg isEqualToString:@"content"] ? 90 : 70;
                             NSString *pref = (k > 0) ? [[NSString pathWithComponents:[parts subarrayWithRange:NSMakeRange(0, k)]] stringByAppendingString:@"/"] : @"";
-                            if (bestScore < sc || (bestScore == sc && pref.length < bestPrefix.length)) { bestScore = sc; bestPrefix = pref; }
+                            if (bestScore < sc || (bestScore == sc && pref.length < bestPrefix.length)) { bestScore = sc; bestPrefix = pref; wrapIntoContent = NO; }
+                            break;
+                        }
+                        if (hasExistingSdv && sdvIsKnownContentSubfolder(seg) && sdvIsKnownContentAssetExt(extLow)) {
+                            NSString *pref = (k > 0) ? [[NSString pathWithComponents:[parts subarrayWithRange:NSMakeRange(0, k)]] stringByAppendingString:@"/"] : @"";
+                            if (bestScore < 85 || (bestScore == 85 && pref.length < bestPrefix.length)) { bestScore = 85; bestPrefix = pref; wrapIntoContent = YES; }
                             break;
                         }
                     }
@@ -1140,11 +1281,11 @@ static NSUInteger importGameDataWithLibArchive(NSURL *url, NSString *docsPath) {
     if (bestScore < 0 || bestPrefix == nil) {
         fail(@"Gói nén này không chứa dữ liệu game PC (Stardew Valley.dll hoặc Content/). Nếu đây là file mod, hãy dùng nút Chọn tệp Mod!");
     }
-    if (bestScore < 90) {
+    if (bestScore < 85) {
         fail(@"SMAPI 4.5.2 bản iOS đã tích hợp sẵn trong Garden Launcher — bạn không cần nhập gói SMAPI từ PC! Hãy chọn gói dữ liệu game PC chứa Stardew Valley.dll và thư mục Content/.");
     }
 
-    // Pass 2: Stream-extract into hidden Documents/.game/ (and visible Mods/ if included), skipping unused PC files!
+    // Pass 2: Stream-extract into visible Documents/StardewValley/ (and Mods/ if included), safely overwriting read-only XNB files!
     mkdirs(docsPath);
     NSString *gameRoot = sdvHiddenGameDir(docsPath);
     mkdirs(join(docsPath, @"Mods"));
@@ -1197,6 +1338,7 @@ static NSUInteger importGameDataWithLibArchive(NSURL *url, NSString *docsPath) {
                     if (api->data_skip) api->data_skip(a);
                     continue;
                 }
+                if (wrapIntoContent) rel = [@"Content/" stringByAppendingString:rel];
                 rel = clean(rel);
                 NSArray<NSString *> *relParts = rel.pathComponents;
                 NSString *topLow = relParts.firstObject.lowercaseString;
@@ -1216,16 +1358,24 @@ static NSUInteger importGameDataWithLibArchive(NSURL *url, NSString *docsPath) {
                 NSString *targetBase = [topLow isEqualToString:@"mods"] ? docsPath : gameRoot;
                 NSString *dst = inside(targetBase, rel);
                 mkdirs(dst.stringByDeletingLastPathComponent);
+                chmod(dst.fileSystemRepresentation, 0644);
+                unlink(dst.fileSystemRepresentation);
                 FILE *fp = fopen(dst.fileSystemRepresentation, "wb");
-                if (!fp) fail(@"Không tạo được tệp dữ liệu game.");
+                if (!fp) fail([NSString stringWithFormat:@"Không tạo được tệp dữ liệu game (%@).", rel.lastPathComponent]);
                 for (;;) {
                     ssize_t rd = api->read_data(a, buf, 65536);
                     if (rd == 0) break;
-                    if (rd < 0) { fclose(fp); fail(@"Giải nén dữ liệu game thất bại."); }
+                    if (rd < 0) {
+                        const char *es = api->error_string ? api->error_string(a) : NULL;
+                        fclose(fp);
+                        unlink(dst.fileSystemRepresentation);
+                        fail([NSString stringWithFormat:@"Giải nén tệp '%@' thất bại (%s).", rel.lastPathComponent, es ?: "chuẩn nén không hỗ trợ"]);
+                    }
                     if ((totalBytes += (uint64_t)rd) > 8ULL * 1024 * 1024 * 1024) { fclose(fp); fail(@"Vượt giới hạn dung lượng 8 GB."); }
                     if (fwrite(buf, 1, (size_t)rd, fp) != (size_t)rd) { fclose(fp); fail(@"Không ghi được dữ liệu game (kiểm tra bộ nhớ trống)."); }
                 }
                 fclose(fp);
+                chmod(dst.fileSystemRepresentation, 0644);
                 written++;
             }
         }
@@ -1243,6 +1393,10 @@ static NSUInteger importGameDataWithLibArchive(NSURL *url, NSString *docsPath) {
 
 static NSUInteger importGameDataZip(NSURL *url, NSString *docsPath) {
     if (!docsPath.length) fail(@"Không tìm thấy thư mục Documents của game.");
+    BOOL isDirPick = NO;
+    if ([fm() fileExistsAtPath:url.path isDirectory:&isDirPick] && isDirPick) {
+        return importGameDataFromDirectory(url, docsPath);
+    }
     NSString *ext = url.pathExtension.lowercaseString;
     if (![ext isEqualToString:@"zip"]) {
         return importGameDataWithLibArchive(url, docsPath);
@@ -1251,54 +1405,75 @@ static NSUInteger importGameDataZip(NSURL *url, NSString *docsPath) {
     if (!mz_zip_reader_init_file(&z, url.fileSystemRepresentation, 0)) {
         return importGameDataWithLibArchive(url, docsPath);
     }
+    BOOL hasExistingSdv = [gameDataStatus(docsPath)[@"hasSdvDll"] boolValue];
+    BOOL fallbackToLibArchive = NO;
     NSUInteger written = 0;
     @try {
         unsigned count = mz_zip_reader_get_num_files(&z);
-        if (count == 0 || count > 40000) fail(@"Gói ZIP trống hoặc vượt quá 40.000 mục.");
+        if (count == 0 || count > 80000) fail(@"Gói ZIP trống hoặc vượt quá 80.000 mục.");
 
-        // Pass 1: Detect wrapper folder prefix containing Stardew Valley.dll / Content/ / StardewModdingAPI.dll / smapi-internal/
+        // Pass 1: Detect wrapper folder prefix AND check if ANY entry uses Deflate64/LZMA/BZip2/Zstd (!st.m_is_supported)
+        // Windows Explorer "Compress to ZIP" uses Deflate64 on Wave Bank.xwb (~440 MB) — falling back to libarchive prevents silent missing audio/XNB (#GL-FKRBMM)!
         NSString *bestPrefix = nil;
         NSInteger bestScore = -1;
+        BOOL wrapIntoContent = NO;
         for (unsigned i = 0; i < count; i++) { @autoreleasepool {
             mz_zip_archive_file_stat st;
-            if (!mz_zip_reader_file_stat(&z, i, &st) || st.m_is_directory) continue;
+            if (!mz_zip_reader_file_stat(&z, i, &st)) { fallbackToLibArchive = YES; break; }
+            if (st.m_is_directory) continue;
+            if (st.m_is_encrypted) {
+                fail(@"Gói ZIP có đặt mật khẩu bảo vệ. Hãy giải nén bằng mật khẩu trước rồi chọn lại!");
+            }
             unsigned n = mz_zip_reader_get_filename(&z, i, NULL, 0);
             if (n < 2 || n > 4096) continue;
             char buf[4096]; mz_zip_reader_get_filename(&z, i, buf, n);
-            NSString *raw = [[NSString alloc] initWithBytes:buf length:n - 1 encoding:NSUTF8StringEncoding];
+            NSString *raw = decodeZipEntryName(buf, n - 1);
             if (!raw.length) continue;
             raw = [raw stringByReplacingOccurrencesOfString:@"\\" withString:@"/"];
-            if ([raw.pathComponents containsObject:@"__MACOSX"] || [raw.lastPathComponent isEqualToString:@".DS_Store"]) continue;
+            if (isJunkArchiveEntry(raw)) continue;
+            if (!st.m_is_supported) {
+                fallbackToLibArchive = YES;
+                break;
+            }
 
             NSArray<NSString *> *parts = raw.pathComponents;
             NSString *lastLow = raw.lastPathComponent.lowercaseString;
+            NSString *extLow = raw.pathExtension.lowercaseString;
             if ([lastLow isEqualToString:@"stardew valley.dll"]) {
                 NSString *pref = (parts.count > 1) ? [[NSString pathWithComponents:[parts subarrayWithRange:NSMakeRange(0, parts.count - 1)]] stringByAppendingString:@"/"] : @"";
-                if (bestScore < 100 || (bestScore == 100 && pref.length < bestPrefix.length)) { bestScore = 100; bestPrefix = pref; }
+                if (bestScore < 100 || (bestScore == 100 && pref.length < bestPrefix.length)) { bestScore = 100; bestPrefix = pref; wrapIntoContent = NO; }
             } else if ([lastLow isEqualToString:@"stardewmoddingapi.dll"]) {
                 NSString *pref = (parts.count > 1) ? [[NSString pathWithComponents:[parts subarrayWithRange:NSMakeRange(0, parts.count - 1)]] stringByAppendingString:@"/"] : @"";
-                if (bestScore < 80) { bestScore = 80; bestPrefix = pref; }
+                if (bestScore < 80) { bestScore = 80; bestPrefix = pref; wrapIntoContent = NO; }
             } else {
                 for (NSUInteger k = 0; k + 1 < parts.count; k++) {
                     NSString *seg = parts[k].lowercaseString;
                     if ([seg isEqualToString:@"content"] || [seg isEqualToString:@"smapi-internal"]) {
                         NSInteger sc = [seg isEqualToString:@"content"] ? 90 : 70;
                         NSString *pref = (k > 0) ? [[NSString pathWithComponents:[parts subarrayWithRange:NSMakeRange(0, k)]] stringByAppendingString:@"/"] : @"";
-                        if (bestScore < sc || (bestScore == sc && pref.length < bestPrefix.length)) { bestScore = sc; bestPrefix = pref; }
+                        if (bestScore < sc || (bestScore == sc && pref.length < bestPrefix.length)) { bestScore = sc; bestPrefix = pref; wrapIntoContent = NO; }
+                        break;
+                    }
+                    if (hasExistingSdv && sdvIsKnownContentSubfolder(seg) && sdvIsKnownContentAssetExt(extLow)) {
+                        NSString *pref = (k > 0) ? [[NSString pathWithComponents:[parts subarrayWithRange:NSMakeRange(0, k)]] stringByAppendingString:@"/"] : @"";
+                        if (bestScore < 85 || (bestScore == 85 && pref.length < bestPrefix.length)) { bestScore = 85; bestPrefix = pref; wrapIntoContent = YES; }
                         break;
                     }
                 }
             }
         }}
 
-        if (bestScore < 0 || bestPrefix == nil) {
-            fail(@"Gói ZIP này không chứa dữ liệu game PC (Stardew Valley.dll hoặc Content/). Nếu đây là file mod, hãy dùng nút Chọn file Mod!");
+        if (fallbackToLibArchive) {
+            return 0; // Handled right after @finally
         }
-        if (bestScore < 90) {
+        if (bestScore < 0 || bestPrefix == nil) {
+            fail(@"Gói ZIP này không chứa dữ liệu game PC (Stardew Valley.dll hoặc Content/). Nếu đây là file mod, hãy dùng nút Chọn tệp Mod!");
+        }
+        if (bestScore < 85) {
             fail(@"SMAPI 4.5.2 bản iOS đã tích hợp sẵn trong Garden Launcher — bạn không cần nhập gói SMAPI từ PC! Hãy chọn gói dữ liệu game PC chứa Stardew Valley.dll và thư mục Content/.");
         }
 
-        // Pass 2: Extract cleanly into hidden Documents/.game/ (visible Mods/ only, skip unused PC doc/license/runtime files!)
+        // Pass 2: Extract cleanly into visible Documents/StardewValley/ (and Mods/ if included, skipping unused PC doc/license/runtime files!)
         uint64_t totalBytes = 0;
         mkdirs(docsPath);
         NSString *gameRoot = sdvHiddenGameDir(docsPath);
@@ -1317,14 +1492,14 @@ static NSUInteger importGameDataZip(NSURL *url, NSString *docsPath) {
         for (unsigned i = 0; i < count; i++) { @autoreleasepool {
             mz_zip_archive_file_stat st;
             if (!mz_zip_reader_file_stat(&z, i, &st) || st.m_is_directory) continue;
-            if (st.m_is_encrypted || !st.m_is_supported || ((st.m_external_attr >> 16) & 0170000) == 0120000) continue;
+            if (((st.m_external_attr >> 16) & 0170000) == 0120000) continue;
             unsigned n = mz_zip_reader_get_filename(&z, i, NULL, 0);
             if (n < 2 || n > 4096) continue;
             char buf[4096]; mz_zip_reader_get_filename(&z, i, buf, n);
-            NSString *raw = [[NSString alloc] initWithBytes:buf length:n - 1 encoding:NSUTF8StringEncoding];
+            NSString *raw = decodeZipEntryName(buf, n - 1);
             if (!raw.length) continue;
             raw = [raw stringByReplacingOccurrencesOfString:@"\\" withString:@"/"];
-            if ([raw.pathComponents containsObject:@"__MACOSX"] || [raw.lastPathComponent isEqualToString:@".DS_Store"]) continue;
+            if (isJunkArchiveEntry(raw)) continue;
 
             NSString *rel = raw;
             if (bestPrefix.length) {
@@ -1333,6 +1508,7 @@ static NSUInteger importGameDataZip(NSURL *url, NSString *docsPath) {
             }
             while ([rel hasPrefix:@"/"]) rel = [rel substringFromIndex:1];
             if (!rel.length) continue;
+            if (wrapIntoContent) rel = [@"Content/" stringByAppendingString:rel];
             rel = clean(rel);
 
             NSArray<NSString *> *relParts = rel.pathComponents;
@@ -1360,13 +1536,20 @@ static NSUInteger importGameDataZip(NSURL *url, NSString *docsPath) {
             NSString *targetBase = [topLow isEqualToString:@"mods"] ? docsPath : gameRoot;
             NSString *dst = inside(targetBase, rel);
             mkdirs(dst.stringByDeletingLastPathComponent);
+            chmod(dst.fileSystemRepresentation, 0644);
+            unlink(dst.fileSystemRepresentation);
             if (!mz_zip_reader_extract_to_file(&z, i, dst.fileSystemRepresentation, 0)) {
-                fail(@"Giải nén dữ liệu game thất bại. Kiểm tra dung lượng trống trên iPhone.");
+                fallbackToLibArchive = YES;
+                break;
             }
+            chmod(dst.fileSystemRepresentation, 0644);
             written++;
         }}
     } @finally {
         mz_zip_reader_end(&z);
+    }
+    if (fallbackToLibArchive) {
+        return importGameDataWithLibArchive(url, docsPath);
     }
     if (written == 0) fail(@"Không giải nén được tệp nào từ gói ZIP.");
     sdvMigrateDocumentsToHiddenLayout(docsPath);
@@ -1418,9 +1601,13 @@ static BOOL childScope(NSString *root) {
 static NSString *gamePath(NSString *root, NSString *relative) {
     if (!childScope(root)) {
         NSString *cr = clean(relative);
-        if (([cr isEqualToString:@"Content"] || [cr hasPrefix:@"Content/"]) &&
-            dir(join(join(root, @".game"), @"Content")) && !dir(join(root, @"Content"))) {
-            return inside(join(root, @".game"), cr);
+        if ([cr isEqualToString:@"Content"] || [cr hasPrefix:@"Content/"]) {
+            if (dir(join(join(root, @"StardewValley"), @"Content")) && !dir(join(root, @"Content"))) {
+                return inside(join(root, @"StardewValley"), cr);
+            }
+            if (dir(join(join(root, @".game"), @"Content")) && !dir(join(root, @"Content"))) {
+                return inside(join(root, @".game"), cr);
+            }
         }
         return inside(root, cr);
     }
@@ -2504,8 +2691,8 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
 // ============================================================================
 // GARDEN LAUNCHER UPDATE CHECKER (version.json + GitHub Releases Fallback)
 // ============================================================================
-#define kSDVAppVersion @"1.0.2"
-#define kSDVAppBuild   10200
+#define kSDVAppVersion @"1.0.3"
+#define kSDVAppBuild   10300
 static NSString *const kSDVUpdateNotification = @"SDVLauncherUpdateDidChangeNotification";
 static NSString *const kSDVDismissedUpdatePrefKey = @"sdv_dismissed_update_id";
 static NSString *const kSDVVersionJsonURL = @"https://raw.githubusercontent.com/hanprm9-dot/Garden-Launcher-iOS/main/version.json";

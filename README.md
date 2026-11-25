@@ -1,10 +1,10 @@
 <div align="center">
-  <img src="assets/Garden-Launcher-Icon.png" alt="Garden Launcher" width="104" />
+  <img src="assets/Garden-Launcher-Icon.png" alt="Garden Launcher" width="108" />
   <h1>Garden Launcher</h1>
   <p><b>Launcher &amp; Mod Manager cho Stardew Valley PC 1.6.15 trên iOS &amp; iPadOS</b></p>
 
   <p>
-    <a href="https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/tag/v1.0.2"><img src="https://img.shields.io/badge/Version-v1.0.2-2ea44f?style=flat-square" alt="Version v1.0.2" /></a>
+    <a href="https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/tag/v1.0.3"><img src="https://img.shields.io/badge/Version-v1.0.3-2ea44f?style=flat-square" alt="Version v1.0.3" /></a>
     <img src="https://img.shields.io/badge/iOS%20%2F%20iPadOS-14%20–%2027+-007aff?style=flat-square&logo=apple&logoColor=white" alt="iOS & iPadOS 14-27+" />
     <img src="https://img.shields.io/badge/SMAPI-4.5.2-6f42c1?style=flat-square" alt="SMAPI 4.5.2" />
     <img src="https://img.shields.io/badge/JIT-Không%20cần%20(0%25)-f59e0b?style=flat-square" alt="0% JIT" />
@@ -17,34 +17,40 @@
 
 ---
 
-## 📥 Tải xuống (`v1.0.2`)
+## 📥 Tải xuống (`v1.0.3`)
 
 | Thiết bị | Phiên bản IPA | Tải về |
 | :--- | :--- | :---: |
-| **iOS / iPadOS 14 – 18** | `Garden-Launcher-1.0.2-iOS14-18.ipa` | [**⬇️ Tải ngay**](https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.2/Garden-Launcher-1.0.2-iOS14-18.ipa) |
-| **iOS / iPadOS 26 – 27+** | `Garden-Launcher-1.0.2-iOS26-27.ipa` | [**⬇️ Tải ngay**](https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.2/Garden-Launcher-1.0.2-iOS26-27.ipa) |
+| **iOS / iPadOS 14 – 18** | `Garden-Launcher-1.0.3-iOS14-18.ipa` | [**⬇️ Tải ngay**](https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.3/Garden-Launcher-1.0.3-iOS14-18.ipa) |
+| **iOS / iPadOS 26 – 27+** | `Garden-Launcher-1.0.3-iOS26-27.ipa` | [**⬇️ Tải ngay**](https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.3/Garden-Launcher-1.0.3-iOS26-27.ipa) |
 
 ---
 
-## ✨ Tính năng nổi bật trong `v1.0.2`
+## ✨ Điểm mới nổi bật trong `v1.0.3`
 
-- **Màn hình Loading Pixel Art 16-bit chuẩn `0% → 100%` & Tự dọn Crash Marker** — Thanh tiến độ RPG chuyển sắc có **Junimo pixel nhảy theo mép thanh**, dải **5 mốc giai đoạn** (`.NET · SMAPI · Mods · Nội dung · Vào Game`), bầu trời sao + ánh nắng + mây/chim pixel, bảng **RAM live** và hiển thị trực tiếp **từng Mod, Content Pack & nhóm tài nguyên XNB** đang nạp trên Thread 0 (hết hẳn lỗi nhảy vọt `94%` lúc mới vào hoặc kẹt `98%` do `StardewModdingAPI.crash.marker` sau khi văng game), tự giải phóng `100%` RAM ngay khi vào màn hình Tiêu đề.
-- **Tự động Kiểm tra Cập nhật Launcher kèm Tóm tắt Bản vá** — Kiểm tra ngầm bản mới qua `version.json` / GitHub Releases ngay khi mở app, hiện thông báo gọn + thẻ cập nhật liệt kê chi tiết bản mới sửa những gì và tự nhận diện đúng bản IPA cho máy đang dùng (**iOS 14–18** hoặc **iOS 26–27+**).
-- **Hỗ trợ Full Ngoại vi (iOS / iPadOS 14–27+)** — Hoạt động nguyên bản qua `GameController.framework` & cầu nối Zero-Harmony: **Tay cầm rời** (Xbox / PlayStation / Switch Pro / Backbone / MFi đầy đủ analog, trigger, L3/R3, lái trực tiếp con trỏ mượt bằng **R-Stick** để soi thông tin mod UI Info Suite 2, hết lỗi giật/đứng animation chạy), **Bàn phím vật lý** (`WASD`, `Esc`, `F1–F12`, mọi phím tắt mod SMAPI + gõ chữ trực tiếp vào Chat/Đặt tên), **Chuột & Trackpad** (di trỏ chuột PC, trái/phải/giữa, cuộn con lăn, lọc `UITouchTypeIndirectPointer` chống double-click trên iPadOS) và **Apple Pencil**; chạm tay lên màn hình tự chuyển về cảm ứng tức thì.
-- **Đại tu chế độ Chạm đi (Tap-to-Move A\*), Shop/Rương chuẩn Mobile & Tiết kiệm pin `60 / 45 / 30 FPS`** — 4 chế độ điều khiển chuẩn Mobile (*Vô hình*, *2 Nút Pixel*, *Chạm đi*, *Kết hợp*, tối ưu riêng cho **iPad 4:3**). Kéo thanh cuộn Shop 1:1 kèm quán tính kiểu iOS + thanh trượt số lượng `1..999` mượt, thả/bỏ mọi vật phẩm & dụng cụ vào rương dễ thao tác (`X1 · 1/2 · GOP · XEP · ESC`), bấm `OK` & chọn nghề Level 5/10 trên `LevelUpMenu` + xem đầy đủ thông tin / chọn bù nghề ngay trên trang **Kỹ năng**, bảo vệ hòm thư `Data/mail` 1.6 & `MailFrameworkMod` chống tự nhận / trống thư, khôi phục trọn vẹn âm thanh & nhạc nền `SoundBank`, và tùy chọn **Tiết kiệm pin 45 FPS**.
-- **Mod Garden 9 Tab: Console Log Realtime, Nút Khởi động lại & Chẩn đoán Xung đột Mod** — Chạm **3 ngón tay × 2** để mở Mod Garden (gồm tab mới **Console Log** đọc trực tiếp `SMAPI-latest.txt` / `engine-latest.log` / `launcher-boot.log` theo thời gian thực với bộ lọc màu + sao chép, nút **Khởi động lại** game ngay trên thanh bên, cài `.ZIP/.RAR/.7Z/.TAR.GZ/.XNB`, tự ưu tiên thư mục `Portraits/` cho gói chân dung XNB, tự phát hiện xung đột mod **Chân dung/Anime** như `Seasonal Cute Characters` đè `OhoDavi` & cảnh báo `Portraiture`/`HD Portraits` cần Harmony). Toàn bộ tệp hệ thống tự động ẩn gọn vào `.game/` và `.garden/` — trong **ứng dụng Tệp (Files)** chỉ còn đúng 3 thư mục sạch sẽ: **`Mods`**, **`Saves`**, **`ErrorLogs`**.
-- **Tab Báo lỗi Online kèm Ảnh/Video & Log tự động** — Chọn tối đa 3 ảnh chụp màn hình hoặc video (`PHPickerViewController` xoay ngang an toàn, tự nén video MP4 & tự đóng gói `ErrorLogs.zip` đã che thông tin nhạy cảm, gồm cả `native-crash.log`), gửi trực tiếp tới Admin qua Cloudflare Worker (`BugReportWorker/worker.js`).
-- **Tương thích trọn vẹn Mod UI, Shader & Tiếng Việt** — Cài đặt đầy đủ `Texture2D.CopyFromTexture` trên iOS MonoGame + fallback ngôn ngữ Tiếng Việt (`*.en.* → *.vi.*` bằng APFS CoW clone 0 byte) + hỗ trợ Shader MGFX v8–v10 GLSL ES (`SDV-Radiance`, `DynamicShader`, `DynamicReflections`...) với FBO-safe `PlatformGetData`, `posFixup` RT sync & GLES 3.0 NPOT.
-- **Tự phục hồi SMAPI iOS `4.5.2` · Save 20 mốc · Tối ưu RAM 4 lớp · Co-op LAN / IP** — Tự phục hồi SMAPI iOS khi gói game kẹp bản Windows, nhập/xuất Save đa nền tảng PC/Android/iOS, cảnh báo RAM `85%/90%`, tự xả cache bản đồ/chân dung an toàn GC không gây ô đen, và hỗ trợ Co-op qua Wi-Fi LAN / ZeroTier / Tailscale.
+- **Logo Slime Khung Đá Rêu Pixel 16-bit & Mở Quyền Truy Cập `StardewValley/Content` trong Tệp** — Thay bộ biểu tượng ứng dụng Slime xanh lá trong khung đá rêu cổ điển; khôi phục thư mục hiển thị **`Tệp → Trên iPhone → Garden Launcher → StardewValley/Content`** (tự chuyển `.game/` cũ sang `StardewValley/` tức thì) và bổ sung thẻ **Nạp lại Game / Content (`.ZIP/.RAR/.7Z` hoặc Thư mục)** ngay trong tab **Cài Mod** kèm tự động chuyển `libarchive` cho gói nén Deflate64 Windows (`#GL-FKRBMM`).
+- **Đại Tu Toàn Diện Tay Cầm Console & Rung `CoreHaptics`** — Đồng bộ trực tiếp `SInputState` + `SnappyMenus` cùng khung hình trên nền `0% JIT`: tự bám ô đầu tiên ngay khi mở Menu, chuyển tab & nhảy qua lại giữa các khung **Balô ↔ Rương ↔ Trang bị/Thùng rác ↔ Hàng hóa Shop** bằng **`LB` / `RB` / `LT` / `RT`**, hỗ trợ đủ **Thay đồ (Swap)**, **Vứt đồ ra ngoài (Drop)** (sửa kẹp biên màn hình iPhone với vùng thả `-99998`), **Giữ `A` + Di chuyển + Nhả `A` để Kéo-Thả (Drag & Drop)** song song với nhấn `A` 2 lần kiểu Console, lái con trỏ tự do bằng **R-Stick** trong mọi Menu (kể cả thanh trượt GMCM & icon **UI Info Suite 2 v2.3.7**) và rung phản hồi **`CoreHaptics`** 2 mô-tơ (tích hợp cùng đóng góp của `@Mudkip267`).
+- **Chế Độ Tay Cầm Thuần (`Pure Gamepad Mode`) kèm Khởi Động Lại 1 Chạm** — Công tắc mới ngay đầu tab **Điều khiển**: tắt hoàn toàn HUD ảo & lớp chặn cảm ứng ngay từ lúc khởi động để chơi thuần như máy Console cầm tay (Backbone / Razer Kishi / Xbox / DualSense / Switch Pro) mà **không xung đột** với các bản vá tay cầm hay bàn phím đặt tên iOS.
+- **Sửa Dứt Điểm Lỗi Không Di Chuyển Được Trong Event & Lễ Hội** — Mở khóa hoàn toàn di chuyển, tìm đường A* và tương tác nói chuyện / quầy hàng / câu cá trong mọi sự kiện & lễ hội có điều khiển nhân vật (`Event.playerControlSequence`, vd: Lễ hội Trứng, Vũ điệu Hoa, Hội chợ, Đêm Linh Hồn...), đồng thời hiển thị nút **SKIP** chuẩn sprite gốc cho các đoạn cắt cảnh thường (tự nhận giao diện Cat Valley UI).
+- **Đồng Bộ Chân Dung Anime Theo Mùa, Tương Thích `UI Info Suite 2` & Tối Ưu Hầm Mỏ** — Tự động tải lại chân dung NPC khi Content Patcher đổi mùa/trang phục (`AssetsInvalidated` không gây mất ảnh hội thoại), bổ sung `CueDefinition` trong `MonoGame.Framework.dll` cho **UI Info Suite 2 v2.3.7+**, dời số tầng Hầm mỏ / Hang Sọ / Núi lửa thoát khỏi góc bo tròn iPhone, và đưa bộ dọn RAM 2 mức (`85%` nhẹ / `91%` khẩn cấp) sang hàng đợi nền chống khựng (đóng góp bởi `@Mudkip267`).
+
+---
+
+## 🌟 Hệ thống tính năng cốt lõi
+
+- **Màn hình Loading Pixel Art 16-bit chuẩn `0% → 100%` & Tự dọn Crash Marker** — Thanh tiến độ RPG có Junimo pixel nhảy theo mép thanh, 5 mốc giai đoạn (`.NET · SMAPI · Mods · Nội dung · Vào Game`), bảng RAM live và tự dọn `StardewModdingAPI.crash.marker` chống kẹt màn hình tải.
+- **4 Chế Độ Cảm Ứng Mobile + Ngoại Vi Đầy Đủ** — *Vô hình*, *2 Nút Pixel*, *Chạm đi A\**, *Kết hợp* (tối ưu riêng cho iPad 4:3), kéo cuộn Shop 1:1 + thanh trượt `1..999`, bàn phím vật lý (`WASD`, `F1–F12`, phím tắt mod SMAPI), chuột/trackpad PC và tiết kiệm pin `60 / 45 / 30 FPS`.
+- **Mod Garden 9 Tab & Kiểm Tra Cập Nhật Tự Động** — Chạm **3 ngón tay × 2** để mở Mod Garden ngay trong game: cài Mod & `.XNB`, **Console Log** thời gian thực, 20 mốc **Lưu nhanh**, **Báo lỗi Online** kèm ảnh/video & `ErrorLogs.zip`, chẩn đoán xung đột mod và tự kiểm tra phiên bản mới qua `version.json`.
+- **Tương Thích Mod UI, Shader MGFX v8–v10, Tiếng Việt & Co-op LAN / IP** — Hỗ trợ `Texture2D.CopyFromTexture`, GLSL ES `highp` (`DynamicShader`, `DynamicReflections`, `SDV-Radiance`), tự phục hồi SMAPI iOS `4.5.2`, bảo vệ hòm thư `Data/mail` 1.6 và chơi chung qua Wi-Fi LAN / ZeroTier / Tailscale.
 
 ---
 
 ## 🚀 Cài đặt nhanh
 
 1. **Cài IPA** bằng KSign / ESign / TrollStore / SideStore / Sideloadly *(cài đè cùng Bundle ID giữ nguyên Save & Mod)*.
-2. **Nạp game PC `1.6.15`** *(chỉ 1 lần)*: Nén thư mục game PC (`.ZIP`/`.RAR`/`.7Z`) → mở app → bấm **Nhập gói dữ liệu game** → chờ đủ 4 mục xanh → vuốt tắt và mở lại app.
-3. **Cài Mod**: Chạm **3 ngón tay × 2** → tab **Cài Mod** → chọn tệp hoặc thư mục mod → mở lại game để SMAPI nạp mod mới.
-4. **Thanh tiện ích trong game**: `BAG` (Túi) · `MAP` (Bản đồ) · `QST` (Nhiệm vụ) · `SAVE` (20 mốc lưu) · `KEY` (Bàn phím) · `HIDE` (Ẩn HUD) · `EDIT` (Chỉnh nút & `+PHIM`).
+2. **Nạp game PC `1.6.15`**: Nén thư mục game PC (`.ZIP`/`.RAR`/`.7Z`) → mở app → bấm **Nhập gói dữ liệu game** *(hoặc chép thẳng vào `Tệp → Trên iPhone → Garden Launcher → StardewValley`)* → chờ đủ 4 mục xanh → mở lại app.
+3. **Cài Mod / Thay `.XNB`**: Chạm **3 ngón tay × 2** → tab **Cài Mod** → chọn gói Mod/XNB (hoặc sửa trực tiếp trong `StardewValley/Content` rồi nạp lại) → bấm **Khởi động lại**.
+4. **Dùng Tay cầm**: Cắm/kết nối tay cầm để game tự nhận ngay, hoặc vào **Mod Garden → Điều khiển → Chế độ Tay cầm thuần** rồi bấm **Khởi động lại ngay** nếu chỉ chơi bằng tay cầm.
 
 ---
 
@@ -61,8 +67,8 @@ dotnet build ModGarden\SDVMobileControls\SDVMobileControls.csproj -c Release
 powershell -ExecutionPolicy Bypass -File scripts\patch_perf_v7.ps1
 
 # 3. Đóng gói 2 bản IPA sạch (iOS / iPadOS 26–27+ & iOS / iPadOS 14–18)
-python scripts\package_embedded.py base-sdvios.ipa build\SDVModGarden_ios26 zsign.exe dist\Garden-Launcher-1.0.2-iOS26-27.ipa "$WorkDir\v7-host.dll" "$WorkDir\v7-touch.dll" "$WorkDir\Lidgren.Network.dll" --launcher --min-ios=16.0
-python scripts\package_embedded.py base-sdvios.ipa build\SDVModGarden_ios14 zsign.exe dist\Garden-Launcher-1.0.2-iOS14-18.ipa "$WorkDir\v7-host.dll" "$WorkDir\v7-touch.dll" "$WorkDir\Lidgren.Network.dll" --launcher --no-scene --min-ios=14.0
+python scripts\package_embedded.py base-sdvios.ipa build\SDVModGarden_ios26 zsign.exe dist\Garden-Launcher-1.0.3-iOS26-27.ipa "$WorkDir\v7-host.dll" "$WorkDir\v7-touch.dll" "$WorkDir\Lidgren.Network.dll" --launcher --min-ios=16.0
+python scripts\package_embedded.py base-sdvios.ipa build\SDVModGarden_ios14 zsign.exe dist\Garden-Launcher-1.0.3-iOS14-18.ipa "$WorkDir\v7-host.dll" "$WorkDir\v7-touch.dll" "$WorkDir\Lidgren.Network.dll" --launcher --no-scene --min-ios=14.0
 ```
 
 </details>

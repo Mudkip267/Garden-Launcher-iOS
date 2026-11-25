@@ -4,6 +4,7 @@
 //   2. Physical Hardware Keyboards (Bluetooth / Smart Keyboard / USB-C) via GCKeyboard + typed-character ring buffer
 //   3. Physical Mice & Trackpads (Bluetooth / USB-C / Magic Trackpad) via GCMouse + UIHoverGestureRecognizer + IndirectPointer touch filter
 #import <GameController/GameController.h>
+#import <CoreHaptics/CoreHaptics.h>
 #import <os/lock.h>
 #import <stdint.h>
 #import <math.h>
@@ -436,6 +437,304 @@ static void sdvInstallIndirectTouchFilterOnView(UIView *v) {
     }
 }
 
+// ---- Native iOS 14–27+ CoreHaptics Controller Rumble Engine (Xbox / DualSense / Switch / MFi) ----
+static dispatch_queue_t gRumbleQueue = nil;
+static os_unfair_lock gRumbleLock = OS_UNFAIR_LOCK_INIT;
+static float gRumbleTargetL = 0.0f;
+static float gRumbleTargetR = 0.0f;
+static BOOL gRumbleDirty = NO;
+
+static __weak GCController *gRumbleController = nil;
+static CHHapticEngine *gRumbleEngineL = nil;
+static CHHapticEngine *gRumbleEngineR = nil;
+static id<CHHapticPatternPlayer> gRumblePlayerL = nil;
+static id<CHHapticPatternPlayer> gRumblePlayerR = nil;
+static BOOL gRumbleDualMotor = NO;
+static BOOL gRumbleRunningL = NO;
+static BOOL gRumbleRunningR = NO;
+static BOOL gRumbleNeedsRestartL = NO;
+static BOOL gRumbleNeedsRestartR = NO;
+static float gRumbleAppliedL = 0.0f;
+static float gRumbleAppliedR = 0.0f;
+static BOOL gRumbleErrLogged = NO;
+
+static void sdvRumbleEnsureQueue(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        gRumbleQueue = dispatch_queue_create("dev.stardewmobile.garden.rumble", DISPATCH_QUEUE_SERIAL);
+    });
+}
+
+static void sdvRumbleTeardownOnQueue(void) {
+    if (@available(iOS 14.0, *)) {
+        @try {
+            if (gRumblePlayerL) { [gRumblePlayerL stopAtTime:CHHapticTimeImmediate error:nil]; }
+            if (gRumblePlayerR) { [gRumblePlayerR stopAtTime:CHHapticTimeImmediate error:nil]; }
+            if (gRumbleEngineL) { [gRumbleEngineL stopWithCompletionHandler:nil]; }
+            if (gRumbleEngineR) { [gRumbleEngineR stopWithCompletionHandler:nil]; }
+        } @catch (NSException *ignored) { }
+    }
+    gRumblePlayerL = nil;
+    gRumblePlayerR = nil;
+    gRumbleEngineL = nil;
+    gRumbleEngineR = nil;
+    gRumbleController = nil;
+    gRumbleDualMotor = NO;
+    gRumbleRunningL = NO;
+    gRumbleRunningR = NO;
+    gRumbleNeedsRestartL = NO;
+    gRumbleNeedsRestartR = NO;
+    gRumbleAppliedL = 0.0f;
+    gRumbleAppliedR = 0.0f;
+    gRumbleErrLogged = NO;
+}
+
+static BOOL sdvRumbleCreateEngineOnQueue(GCController *ctrl, GCHapticsLocality locality,
+                                         CHHapticEngine * __strong *outEngine,
+                                         BOOL isLeft, NSError **outErr) API_AVAILABLE(ios(14.0)) {
+    if (!ctrl || !ctrl.haptics || !locality) return NO;
+    @try {
+        CHHapticEngine *eng = [ctrl.haptics createEngineWithLocality:locality];
+        if (!eng) return NO;
+        eng.playsHapticsOnly = YES;
+        eng.resetHandler = ^{
+            if (gRumbleQueue) {
+                dispatch_async(gRumbleQueue, ^{
+                    if (isLeft) { gRumbleNeedsRestartL = YES; gRumbleRunningL = NO; gRumblePlayerL = nil; gRumbleAppliedL = 0.0f; }
+                    else        { gRumbleNeedsRestartR = YES; gRumbleRunningR = NO; gRumblePlayerR = nil; gRumbleAppliedR = 0.0f; }
+                });
+            }
+        };
+        eng.stoppedHandler = ^(CHHapticEngineStoppedReason reason) {
+            (void)reason;
+            if (gRumbleQueue) {
+                dispatch_async(gRumbleQueue, ^{
+                    if (isLeft) { gRumbleNeedsRestartL = YES; gRumbleRunningL = NO; gRumblePlayerL = nil; gRumbleAppliedL = 0.0f; }
+                    else        { gRumbleNeedsRestartR = YES; gRumbleRunningR = NO; gRumblePlayerR = nil; gRumbleAppliedR = 0.0f; }
+                });
+            }
+        };
+        NSError *err = nil;
+        if (![eng startAndReturnError:&err]) {
+            if (outErr) *outErr = err;
+            return NO;
+        }
+        *outEngine = eng;
+        return YES;
+    } @catch (NSException *ignored) {
+        return NO;
+    }
+}
+
+static void sdvRumbleEnsureControllerOnQueue(GCController *ctrl) API_AVAILABLE(ios(14.0)) {
+    if (!ctrl || !ctrl.haptics) {
+        if (gRumbleEngineL || gRumbleEngineR) sdvRumbleTeardownOnQueue();
+        return;
+    }
+    if (gRumbleController == ctrl && (gRumbleEngineL != nil || gRumbleEngineR != nil)) {
+        return;
+    }
+    sdvRumbleTeardownOnQueue();
+
+    NSSet<GCHapticsLocality> *locs = ctrl.haptics.supportedLocalities;
+    NSError *errL = nil, *errR = nil;
+    BOOL hasBoth = [locs containsObject:GCHapticsLocalityLeftHandle] && [locs containsObject:GCHapticsLocalityRightHandle];
+    if (hasBoth) {
+        BOOL okL = sdvRumbleCreateEngineOnQueue(ctrl, GCHapticsLocalityLeftHandle, &gRumbleEngineL, YES, &errL);
+        BOOL okR = sdvRumbleCreateEngineOnQueue(ctrl, GCHapticsLocalityRightHandle, &gRumbleEngineR, NO, &errR);
+        if (okL || okR) {
+            gRumbleController = ctrl;
+            gRumbleDualMotor = (okL && okR);
+            sdvBootLogFmt([NSString stringWithFormat:@"[EXT-RUMBLE] Bound '%@' dual=%d (okL=%d okR=%d, locs=%lu)",
+                ctrl.vendorName ?: @"Controller", gRumbleDualMotor, okL, okR, (unsigned long)locs.count]);
+            return;
+        }
+    }
+    GCHapticsLocality fallbackLoc = nil;
+    if ([locs containsObject:GCHapticsLocalityHandles]) fallbackLoc = GCHapticsLocalityHandles;
+    else if ([locs containsObject:GCHapticsLocalityDefault]) fallbackLoc = GCHapticsLocalityDefault;
+    else fallbackLoc = locs.anyObject;
+
+    NSError *errF = nil;
+    if (fallbackLoc && sdvRumbleCreateEngineOnQueue(ctrl, fallbackLoc, &gRumbleEngineL, YES, &errF)) {
+        gRumbleController = ctrl;
+        gRumbleDualMotor = NO;
+        sdvBootLogFmt([NSString stringWithFormat:@"[EXT-RUMBLE] Bound '%@' fallback locality='%@'",
+            ctrl.vendorName ?: @"Controller", fallbackLoc]);
+    } else {
+        sdvBootLogFmt([NSString stringWithFormat:@"[EXT-RUMBLE] Failed to bind '%@' (locs=%lu, errL=%@, errR=%@, errF=%@)",
+            ctrl.vendorName ?: @"Controller", (unsigned long)locs.count,
+            errL.localizedDescription ?: @"none", errR.localizedDescription ?: @"none", errF.localizedDescription ?: @"none"]);
+    }
+}
+
+// SDL2-proven iOS Xbox/PS/MFi rumble driver:
+// Uses standard CHHapticPatternPlayer + GCHapticDurationInfinite + direct CHHapticEventParameterIDHapticIntensity
+// (Xbox Bluetooth controllers ignore CHHapticDynamicParameter & CHHapticAdvancedPatternPlayer loopEnabled on iOS!).
+static void sdvRumbleApplyMotorOnQueue(CHHapticEngine *eng, id<CHHapticPatternPlayer> __strong *playerPtr,
+                                       float intensity, float sharpness,
+                                       BOOL *runningFlag, BOOL *needsRestartFlag, float *appliedPtr) API_AVAILABLE(ios(14.0)) {
+    if (!eng || !playerPtr) return;
+    @try {
+        if (intensity <= 0.005f) {
+            if (*playerPtr) {
+                [*playerPtr stopAtTime:CHHapticTimeImmediate error:nil];
+                *playerPtr = nil;
+            }
+            *runningFlag = NO;
+            *appliedPtr = 0.0f;
+            return;
+        }
+        if (*runningFlag && *playerPtr != nil && fabsf(intensity - *appliedPtr) < 0.055f) {
+            return;
+        }
+        if (*needsRestartFlag) {
+            NSError *reErr = nil;
+            if (![eng startAndReturnError:&reErr]) return;
+            *needsRestartFlag = NO;
+            *runningFlag = NO;
+            *playerPtr = nil;
+        }
+
+        NSError *err = nil;
+        CHHapticEventParameter *pInt = [[CHHapticEventParameter alloc]
+            initWithParameterID:CHHapticEventParameterIDHapticIntensity value:intensity];
+        CHHapticEventParameter *pShp = [[CHHapticEventParameter alloc]
+            initWithParameterID:CHHapticEventParameterIDHapticSharpness value:sharpness];
+        CHHapticEvent *ev = [[CHHapticEvent alloc]
+            initWithEventType:CHHapticEventTypeHapticContinuous
+                   parameters:@[pInt, pShp]
+                 relativeTime:0.0
+                     duration:(NSTimeInterval)GCHapticDurationInfinite];
+        CHHapticPattern *pat = [[CHHapticPattern alloc] initWithEvents:@[ev] parameters:@[] error:&err];
+        if (!pat) {
+            if (!gRumbleErrLogged) {
+                gRumbleErrLogged = YES;
+                sdvBootLogFmt([NSString stringWithFormat:@"[EXT-RUMBLE] Pattern create error: %@", err.localizedDescription]);
+            }
+            return;
+        }
+
+        id<CHHapticPatternPlayer> newPlayer = [eng createPlayerWithPattern:pat error:&err];
+        if (!newPlayer) {
+            if ([eng startAndReturnError:&err]) {
+                newPlayer = [eng createPlayerWithPattern:pat error:&err];
+            }
+            if (!newPlayer) return;
+        }
+
+        if (*playerPtr) {
+            [*playerPtr stopAtTime:CHHapticTimeImmediate error:nil];
+        }
+        *playerPtr = newPlayer;
+
+        if (![newPlayer startAtTime:CHHapticTimeImmediate error:&err]) {
+            if ([eng startAndReturnError:&err] && [newPlayer startAtTime:CHHapticTimeImmediate error:&err]) {
+                *runningFlag = YES;
+                *appliedPtr = intensity;
+            } else {
+                *runningFlag = NO;
+                *appliedPtr = 0.0f;
+                if (!gRumbleErrLogged) {
+                    gRumbleErrLogged = YES;
+                    sdvBootLogFmt([NSString stringWithFormat:@"[EXT-RUMBLE] Player start error: %@", err.localizedDescription]);
+                }
+            }
+        } else {
+            *runningFlag = YES;
+            *appliedPtr = intensity;
+        }
+    } @catch (NSException *ignored) {
+        *needsRestartFlag = YES;
+        *runningFlag = NO;
+        *playerPtr = nil;
+        *appliedPtr = 0.0f;
+    }
+}
+
+static void sdvRumbleStopImmediate(BOOL teardown) {
+    os_unfair_lock_lock(&gRumbleLock);
+    gRumbleTargetL = 0.0f;
+    gRumbleTargetR = 0.0f;
+    gRumbleDirty = NO;
+    os_unfair_lock_unlock(&gRumbleLock);
+
+    if (!gRumbleQueue) return;
+    dispatch_async(gRumbleQueue, ^{
+        @autoreleasepool {
+            if (teardown) {
+                sdvRumbleTeardownOnQueue();
+            } else if (@available(iOS 14.0, *)) {
+                sdvRumbleApplyMotorOnQueue(gRumbleEngineL, &gRumblePlayerL, 0.0f, 0.15f, &gRumbleRunningL, &gRumbleNeedsRestartL, &gRumbleAppliedL);
+                sdvRumbleApplyMotorOnQueue(gRumbleEngineR, &gRumblePlayerR, 0.0f, 0.65f, &gRumbleRunningR, &gRumbleNeedsRestartR, &gRumbleAppliedR);
+            }
+        }
+    });
+}
+
+__attribute__((visibility("default")))
+void sdv_ext_set_rumble(float leftMotor, float rightMotor) {
+    if (isnan(leftMotor) || leftMotor < 0.0f) leftMotor = 0.0f;
+    else if (leftMotor > 1.0f) leftMotor = 1.0f;
+    if (isnan(rightMotor) || rightMotor < 0.0f) rightMotor = 0.0f;
+    else if (rightMotor > 1.0f) rightMotor = 1.0f;
+
+    if (gGardenOpenCached || gNativeTextEditingCount > 0) {
+        leftMotor = 0.0f;
+        rightMotor = 0.0f;
+    }
+
+    os_unfair_lock_lock(&gRumbleLock);
+    BOOL activeNowL = (leftMotor > 0.005f);
+    BOOL activeOldL = (gRumbleTargetL > 0.005f);
+    BOOL activeNowR = (rightMotor > 0.005f);
+    BOOL activeOldR = (gRumbleTargetR > 0.005f);
+    if (activeNowL == activeOldL && activeNowR == activeOldR &&
+        fabsf(leftMotor - gRumbleTargetL) < 0.015f &&
+        fabsf(rightMotor - gRumbleTargetR) < 0.015f) {
+        os_unfair_lock_unlock(&gRumbleLock);
+        return;
+    }
+    gRumbleTargetL = leftMotor;
+    gRumbleTargetR = rightMotor;
+    BOOL shouldSchedule = !gRumbleDirty;
+    gRumbleDirty = YES;
+    os_unfair_lock_unlock(&gRumbleLock);
+
+    if (!shouldSchedule) return;
+
+    sdvRumbleEnsureQueue();
+    dispatch_async(gRumbleQueue, ^{
+        @autoreleasepool {
+            if (@available(iOS 14.0, *)) {
+                if (NSClassFromString(@"CHHapticEngine") == nil) return;
+                os_unfair_lock_lock(&gRumbleLock);
+                float l = gRumbleTargetL;
+                float r = gRumbleTargetR;
+                gRumbleDirty = NO;
+                os_unfair_lock_unlock(&gRumbleLock);
+
+                GCController *ctrl = GCController.current ?: GCController.controllers.firstObject;
+                if (!ctrl || !ctrl.haptics) {
+                    if (gRumbleEngineL || gRumbleEngineR) sdvRumbleTeardownOnQueue();
+                    return;
+                }
+                if (l <= 0.005f && r <= 0.005f && !gRumbleRunningL && !gRumbleRunningR) {
+                    return;
+                }
+                sdvRumbleEnsureControllerOnQueue(ctrl);
+                if (gRumbleDualMotor) {
+                    sdvRumbleApplyMotorOnQueue(gRumbleEngineL, &gRumblePlayerL, l, 0.15f, &gRumbleRunningL, &gRumbleNeedsRestartL, &gRumbleAppliedL);
+                    sdvRumbleApplyMotorOnQueue(gRumbleEngineR, &gRumblePlayerR, r, 0.65f, &gRumbleRunningR, &gRumbleNeedsRestartR, &gRumbleAppliedR);
+                } else {
+                    float combined = fmaxf(l, r);
+                    sdvRumbleApplyMotorOnQueue(gRumbleEngineL, &gRumblePlayerL, combined, 0.35f, &gRumbleRunningL, &gRumbleNeedsRestartL, &gRumbleAppliedL);
+                }
+            }
+        }
+    });
+}
+
 @interface SDVExternalInputHost : NSObject
 +(instancetype)shared;
 -(void)start;
@@ -467,6 +766,7 @@ static void sdvInstallIndirectTouchFilterOnView(UIView *v) {
     sdvInitKeyMapOnce();
 
     NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
+    [nc addObserver:self selector:@selector(onControllerDisconnected:) name:GCControllerDidDisconnectNotification object:nil];
     [nc addObserver:self selector:@selector(onKeyboardConnected:) name:GCKeyboardDidConnectNotification object:nil];
     [nc addObserver:self selector:@selector(onKeyboardDisconnected:) name:GCKeyboardDidDisconnectNotification object:nil];
     [nc addObserver:self selector:@selector(onMouseConnected:) name:GCMouseDidConnectNotification object:nil];
@@ -537,6 +837,12 @@ static void sdvInstallIndirectTouchFilterOnView(UIView *v) {
     }
 }
 
+-(void)onControllerDisconnected:(NSNotification *)n {
+    (void)n;
+    sdvRumbleStopImmediate(YES);
+    sdvBootLog("[EXT-INPUT] Physical Gamepad disconnected -> stopped CoreHaptics rumble");
+}
+
 -(void)onKeyboardConnected:(NSNotification *)n {
     GCKeyboard *kb = [n.object isKindOfClass:GCKeyboard.class] ? (GCKeyboard *)n.object : GCKeyboard.coalescedKeyboard;
     sdvAttachKeyboardHandlers(kb);
@@ -582,6 +888,7 @@ static void sdvInstallIndirectTouchFilterOnView(UIView *v) {
 }
 
 -(void)onAppResignActive {
+    sdvRumbleStopImmediate(NO);
     os_unfair_lock_lock(&gExtLock);
     gActiveDirectTouchCount = 0;
     gMouseButtonsMask = 0;
@@ -594,6 +901,7 @@ static void sdvInstallIndirectTouchFilterOnView(UIView *v) {
 static void sdvExtSetGardenOpen(BOOL open) {
     gGardenOpenCached = open ? 1 : 0;
     if (open) {
+        sdvRumbleStopImmediate(NO);
         os_unfair_lock_lock(&gExtLock);
         gActiveDirectTouchCount = 0;
         gMouseButtonsLatchedMask = 0;

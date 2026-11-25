@@ -452,7 +452,7 @@ namespace SDVMobileControls
             _setButtonRT?.Invoke(pad, _argBoolFalse);
             _setButtonMenu?.Invoke(pad, _argBoolFalse);
             var ext = ModEntry.ExternalInput;
-            if (ext != null && ext.ShouldOverrideMouse)
+            if (ext != null && ext.ShouldPushMouseStateNow)
             {
                 var ms = ext.CurrentMouseState;
                 _arg1[0] = new Point(ms.X, ms.Y);
@@ -462,6 +462,8 @@ namespace SDVMobileControls
             }
             else
             {
+                // CRITICAL: In menus driven by native SnappyMenus, keep TouchVirtualPad.IsMouseOverridden=false
+                // so SDViOSTouchControls.PrefixSetMousePositionRaw & PrefixMouseGetState never block cursor snaps!
                 _resetSimulatedMouse?.Invoke(pad, null);
             }
 

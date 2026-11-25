@@ -830,6 +830,120 @@ if ($mOnUt -and $mOnUt.HasBody) {
     Write-Host "  Startup NRE Fix (TouchControls): Guarded OnUpdateTicking against null Instance / currentGameTime!"
 }
 
+# 1.10 Pure Gamepad Mode (Documents/.garden/sdv_gamepad_only.flag) in SDViOSTouchControls:
+#   - TouchVirtualPad.IsPureGamepadMode(): checks flag file once at boot and caches result in _pureGamepadState (1=ON, 2=OFF).
+#   - SDViOSTouchControls.ModEntry.OnUpdateTicking: when ON, skips forcing Game1.options.gamepadMode=ForceOff / gamepadControls=false!
+#   - SDViOSTouchControls.TouchDelegatingModHooks.OnGame1_UpdateControlInput: when ON, delegates straight to base DelegatingModHooks!
+#   - SDViOSTouchControls.ModEntry.ApplyHarmonyPatches: when ON, skips touch input Harmony overrides (after PatchClientBounds)!
+$fPureGpState = New-Object Mono.Cecil.FieldDefinition("_pureGamepadState", [Mono.Cecil.FieldAttributes]"Public, Static", $tMod.TypeSystem.Int32)
+$padType.Fields.Add($fPureGpState)
+
+$mIsPureGp = New-Object Mono.Cecil.MethodDefinition("IsPureGamepadMode", [Mono.Cecil.MethodAttributes]"Public, Static", $tMod.TypeSystem.Boolean)
+$mIsPureGp.Body.InitLocals = $true
+$vGpState = New-Object Mono.Cecil.Cil.VariableDefinition($tMod.TypeSystem.Int32)
+$mIsPureGp.Body.Variables.Add($vGpState)
+$pgIL = $mIsPureGp.Body.GetILProcessor()
+$lPgCheckDisk = $pgIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_2)
+$lPgDone      = $pgIL.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fPureGpState)
+$lPgLeave     = $pgIL.Create([Mono.Cecil.Cil.OpCodes]::Leave, $lPgDone)
+$lPgCatch     = $pgIL.Create([Mono.Cecil.Cil.OpCodes]::Pop)
+$lPgTry       = $pgIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_5)
+
+$pgIL.Append($pgIL.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fPureGpState))
+$pgIL.Append($pgIL.Create([Mono.Cecil.Cil.OpCodes]::Stloc, $vGpState))
+$pgIL.Append($pgIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vGpState))
+$pgIL.Append($pgIL.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $lPgCheckDisk))
+$pgIL.Append($pgIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vGpState))
+$pgIL.Append($pgIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_1))
+$pgIL.Append($pgIL.Create([Mono.Cecil.Cil.OpCodes]::Ceq))
+$pgIL.Append($pgIL.Create([Mono.Cecil.Cil.OpCodes]::Ret))
+
+$pgIL.Append($lPgCheckDisk)
+$pgIL.Append($pgIL.Create([Mono.Cecil.Cil.OpCodes]::Stsfld, $fPureGpState))
+$pgIL.Append($lPgTry)
+$pgIL.Append($pgIL.Create([Mono.Cecil.Cil.OpCodes]::Call, $mGetFolderPath))
+$pgIL.Append($pgIL.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, ".garden/sdv_gamepad_only.flag"))
+$pgIL.Append($pgIL.Create([Mono.Cecil.Cil.OpCodes]::Call, $mPathCombine))
+$pgIL.Append($pgIL.Create([Mono.Cecil.Cil.OpCodes]::Call, $mFileExists))
+$pgIL.Append($pgIL.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $lPgLeave))
+$pgIL.Append($pgIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_1))
+$pgIL.Append($pgIL.Create([Mono.Cecil.Cil.OpCodes]::Stsfld, $fPureGpState))
+$pgIL.Append($lPgLeave)
+$pgIL.Append($lPgCatch)
+$pgIL.Append($pgIL.Create([Mono.Cecil.Cil.OpCodes]::Leave, $lPgDone))
+$pgIL.Append($lPgDone)
+$pgIL.Append($pgIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_1))
+$pgIL.Append($pgIL.Create([Mono.Cecil.Cil.OpCodes]::Ceq))
+$pgIL.Append($pgIL.Create([Mono.Cecil.Cil.OpCodes]::Ret))
+
+$ehPg = New-Object Mono.Cecil.Cil.ExceptionHandler([Mono.Cecil.Cil.ExceptionHandlerType]::Catch)
+$ehPg.CatchType = $tMod.TypeSystem.Object
+$ehPg.TryStart = $lPgTry
+$ehPg.TryEnd = $lPgCatch
+$ehPg.HandlerStart = $lPgCatch
+$ehPg.HandlerEnd = $lPgDone
+$mIsPureGp.Body.ExceptionHandlers.Add($ehPg)
+$padType.Methods.Add($mIsPureGp)
+
+# 1.10a Skip ForceOff / gamepadControls=false in SDViOSTouchControls.ModEntry.OnUpdateTicking when IsPureGamepadMode()
+Expand-ShortBranches $mOnUt
+$utIns2 = $mOnUt.Body.Instructions
+$pgUtPatched = $false
+for ($i = 0; $i -lt ($utIns2.Count - 8); $i++) {
+    if ($utIns2[$i].OpCode.Name -eq "call" -and "$($utIns2[$i].Operand)" -like "*Game1::get_options*" -and
+        $utIns2[$i+1].OpCode.Name -eq "brfalse" -and "$($utIns2[$i+1].Operand.Operand)" -like "*Game1::hudMessages*") {
+        $optsStart = $utIns2[$i]
+        $afterOpts = $utIns2[$i+1].Operand
+        $utIL2 = $mOnUt.Body.GetILProcessor()
+        $chk0 = $utIL2.Create([Mono.Cecil.Cil.OpCodes]::Call, $mIsPureGp)
+        $chk1 = $utIL2.Create([Mono.Cecil.Cil.OpCodes]::Brtrue, $afterOpts)
+        $utIL2.InsertBefore($optsStart, $chk0)
+        $utIL2.InsertBefore($optsStart, $chk1)
+        Retarget-Branches $mOnUt $optsStart $chk0
+        $pgUtPatched = $true
+        break
+    }
+}
+if (-not $pgUtPatched) { throw "Failed to patch Pure Gamepad Mode bypass in SDViOSTouchControls.ModEntry.OnUpdateTicking!" }
+
+# 1.10b Bypass TouchDelegatingModHooks.OnGame1_UpdateControlInput when IsPureGamepadMode()
+$tDelHooks = $tMod.GetType("SDViOSTouchControls.TouchDelegatingModHooks")
+$mHookCtrl = if ($tDelHooks) { $tDelHooks.Methods | Where-Object { $_.Name -eq "OnGame1_UpdateControlInput" } | Select-Object -First 1 } else { $null }
+if (-not $mHookCtrl) { throw "Missing TouchDelegatingModHooks.OnGame1_UpdateControlInput!" }
+Expand-ShortBranches $mHookCtrl
+$mBaseCtrl = New-Object Mono.Cecil.MethodReference("OnGame1_UpdateControlInput", $tMod.TypeSystem.Void, $tDelHooks.BaseType)
+$mBaseCtrl.HasThis = $true
+foreach ($p in $mHookCtrl.Parameters) {
+    $mBaseCtrl.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition($p.Name, $p.Attributes, $p.ParameterType)))
+}
+$hcIL = $mHookCtrl.Body.GetILProcessor()
+$hcOrig0 = $mHookCtrl.Body.Instructions[0]
+$hcSeq = @(
+    $hcIL.Create([Mono.Cecil.Cil.OpCodes]::Call, $mIsPureGp),
+    $hcIL.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $hcOrig0),
+    $hcIL.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0),
+    $hcIL.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1),
+    $hcIL.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_2),
+    $hcIL.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_3),
+    $hcIL.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_S, $mHookCtrl.Parameters[3]),
+    $hcIL.Create([Mono.Cecil.Cil.OpCodes]::Call, $mBaseCtrl),
+    $hcIL.Create([Mono.Cecil.Cil.OpCodes]::Ret)
+)
+foreach ($ins in $hcSeq) { $hcIL.InsertBefore($hcOrig0, $ins) }
+
+# 1.10c Also skip TouchControls input Harmony patches (after PatchClientBounds) when IsPureGamepadMode()
+$ahpIL2 = $ahpM.Body.GetILProcessor()
+for ($i = 0; $i -lt $ahpM.Body.Instructions.Count; $i++) {
+    if ($ahpM.Body.Instructions[$i].OpCode.Name -eq "call" -and $ahpM.Body.Instructions[$i].Operand -eq $mPatchCB) {
+        $afterPatchCB = $ahpM.Body.Instructions[$i + 1]
+        $ahpIL2.InsertBefore($afterPatchCB, $ahpIL2.Create([Mono.Cecil.Cil.OpCodes]::Call, $mIsPureGp))
+        $ahpIL2.InsertBefore($afterPatchCB, $ahpIL2.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $afterPatchCB))
+        $ahpIL2.InsertBefore($afterPatchCB, $ahpIL2.Create([Mono.Cecil.Cil.OpCodes]::Ret))
+        break
+    }
+}
+Write-Host "  Pure Gamepad Mode (TouchControls): Injected TouchVirtualPad.IsPureGamepadMode() bypass in OnUpdateTicking + TouchDelegatingModHooks + ApplyHarmonyPatches!"
+
 Write-Host "  v7 TouchControls: Native 3x/2x + Direct MobileHooks + PrefixClientBounds + MenuLag(stackSkip, GC 140MB x$gmLowered) + Poll 45f + Watchdog $bumped"
 $tAsm.Write($outTouch)
 $tAsm.Dispose()
@@ -1171,11 +1285,11 @@ foreach ($ins in $logM.Body.Instructions) {
     }
 }
 
-# 2.5 Hidden .game/ & .garden/ Layout in SDViOS.dll (keeps iOS Files app clean with only Mods, Saves, ErrorLogs!)
+# 2.5 Visible StardewValley/ + Hidden .garden/ Layout in SDViOS.dll (restores direct user Content/*.xnb access in iOS Files app!)
 $tGameHostType = $hMod.GetType("SDViOS.Loader.GameHost")
 $mGetGameRoot = $tGameHostType.Methods | Where-Object { $_.Name -eq "get_GameRootDir" } | Select-Object -First 1
 if (-not $mGetGameRoot) { throw "Missing GameHost.get_GameRootDir!" }
-$hostHiddenGame = 0
+$hostVisibleGame = 0
 $hostHiddenGarden = 0
 $hostSmapiInternalSwap = 0
 foreach ($ht in $hMod.Types) {
@@ -1186,7 +1300,8 @@ foreach ($ht in $hMod.Types) {
             $ins = $insList[$i]
             if ($ins.OpCode.Name -eq "ldstr") {
                 if (($hm.Name -eq "InitializeFileSystem" -or $hm.Name -eq "TryFindGameBinary") -and $ins.Operand -eq "StardewValley") {
-                    $ins.Operand = ".game"; $hostHiddenGame++
+                    # Keep "StardewValley" visible in Documents/ so users can view & edit Content/*.xnb in Tệp!
+                    $hostVisibleGame++
                 } elseif ($hm.Name -eq "RelocateDisabledMods" -and $ins.Operand -eq "DisabledMods") {
                     $ins.Operand = ".garden/DisabledMods"; $hostHiddenGarden++
                 } elseif ($hm.Name -eq "GetConfigPath" -and $ins.Operand -eq "touch_overlay_config.json") {
@@ -1204,10 +1319,10 @@ foreach ($ht in $hMod.Types) {
         }
     }
 }
-if ($hostHiddenGame -ne 3 -or $hostHiddenGarden -lt 3 -or $hostSmapiInternalSwap -ne 4) {
-    throw "Unexpected hidden layout patch counts in SDViOS.dll: game=$hostHiddenGame (want 3), garden=$hostHiddenGarden (want >=3), smapiInternal=$hostSmapiInternalSwap (want 4)!"
+if ($hostVisibleGame -ne 3 -or $hostHiddenGarden -lt 3 -or $hostSmapiInternalSwap -ne 4) {
+    throw "Unexpected layout patch counts in SDViOS.dll: visibleGame=$hostVisibleGame (want 3), garden=$hostHiddenGarden (want >=3), smapiInternal=$hostSmapiInternalSwap (want 4)!"
 }
-Write-Host "  Hidden Documents Layout (Host): .game x$hostHiddenGame, .garden x$hostHiddenGarden, smapi-internal->GameRootDir x$hostSmapiInternalSwap!"
+Write-Host "  Visible StardewValley Layout (Host): StardewValley x$hostVisibleGame, .garden x$hostHiddenGarden, smapi-internal->GameRootDir x$hostSmapiInternalSwap!"
 
 # 2.11 Prevent RuntimeHarmonyPatcher.EnsureHarmonyPatched from trying to overwrite read-only .app bundle 0Harmony.dll
 # (eliminates spurious UnauthorizedAccessException stack trace on every launch!)
@@ -1987,6 +2102,112 @@ if ($tSoundBank) {
         }
     }
 }
+
+# 3.11 Add missing PC Stardew CueDefinition members required by UI Info Suite 2 v2.3.7+ (SoundHelper.RegisterSound):
+#      CueDefinition.LimitBehavior, instanceLimit, limitBehavior, SetSound(SoundEffect, int, bool, bool), and 5-arg .ctors!
+$cd = $mgMod.GetType("Microsoft.Xna.Framework.Audio.CueDefinition")
+if (-not $cd) { throw "CueDefinition not found in MonoGame.Framework.dll!" }
+$tInt32 = $mgMod.TypeSystem.Int32
+$tBool  = $mgMod.TypeSystem.Boolean
+$tVoid  = $mgMod.TypeSystem.Void
+$tStr   = $mgMod.TypeSystem.String
+$tEnum  = ($mgMod.Types | Where-Object { $_.IsEnum } | Select-Object -First 1).BaseType
+$tSoundEffect = $mgMod.GetType("Microsoft.Xna.Framework.Audio.SoundEffect")
+$tSoundEffectArr = New-Object Mono.Cecil.ArrayType($tSoundEffect)
+
+$lb = $cd.NestedTypes | Where-Object { $_.Name -eq "LimitBehavior" } | Select-Object -First 1
+if (-not $lb) {
+    $enumAttrs = [Mono.Cecil.TypeAttributes]([int][Mono.Cecil.TypeAttributes]::NestedPublic -bor [int][Mono.Cecil.TypeAttributes]::Sealed)
+    $lb = New-Object Mono.Cecil.TypeDefinition("", "LimitBehavior", $enumAttrs, $tEnum)
+    $valAttrs = [Mono.Cecil.FieldAttributes]([int][Mono.Cecil.FieldAttributes]::Public -bor [int][Mono.Cecil.FieldAttributes]::SpecialName -bor [int][Mono.Cecil.FieldAttributes]::RTSpecialName)
+    $lb.Fields.Add((New-Object Mono.Cecil.FieldDefinition("value__", $valAttrs, $tInt32)))
+    $constAttrs = [Mono.Cecil.FieldAttributes]([int][Mono.Cecil.FieldAttributes]::Public -bor [int][Mono.Cecil.FieldAttributes]::Static -bor [int][Mono.Cecil.FieldAttributes]::Literal -bor [int][Mono.Cecil.FieldAttributes]::HasDefault)
+    foreach ($kv in @(
+        @("FailToPlay", 0),
+        @("Queue", 1),
+        @("ReplaceOldest", 2),
+        @("ReplaceLowestPriority", 3),
+        @("ReplaceQuiet", 4)
+    )) {
+        $ef = New-Object Mono.Cecil.FieldDefinition($kv[0], $constAttrs, $lb)
+        $ef.Constant = [int]$kv[1]
+        $lb.Fields.Add($ef)
+    }
+    $cd.NestedTypes.Add($lb)
+}
+if (-not ($cd.Fields | Where-Object { $_.Name -eq "instanceLimit" })) {
+    $cd.Fields.Add((New-Object Mono.Cecil.FieldDefinition("instanceLimit", [Mono.Cecil.FieldAttributes]::Public, $tInt32)))
+}
+if (-not ($cd.Fields | Where-Object { $_.Name -eq "limitBehavior" })) {
+    $cd.Fields.Add((New-Object Mono.Cecil.FieldDefinition("limitBehavior", [Mono.Cecil.FieldAttributes]::Public, $lb)))
+}
+$optParam = [Mono.Cecil.ParameterAttributes]([int][Mono.Cecil.ParameterAttributes]::Optional -bor [int][Mono.Cecil.ParameterAttributes]::HasDefault)
+$arrSetSound = $cd.Methods | Where-Object {
+    $_.Name -eq "SetSound" -and $_.Parameters.Count -eq 4 -and $_.Parameters[0].ParameterType.FullName -eq "Microsoft.Xna.Framework.Audio.SoundEffect[]"
+} | Select-Object -First 1
+$singleSetSound = $cd.Methods | Where-Object {
+    $_.Name -eq "SetSound" -and $_.Parameters.Count -eq 4 -and $_.Parameters[0].ParameterType.FullName -eq "Microsoft.Xna.Framework.Audio.SoundEffect"
+} | Select-Object -First 1
+if (-not $singleSetSound) {
+    $mAttrs = [Mono.Cecil.MethodAttributes]([int][Mono.Cecil.MethodAttributes]::Public -bor [int][Mono.Cecil.MethodAttributes]::HideBySig)
+    $mSet = New-Object Mono.Cecil.MethodDefinition("SetSound", $mAttrs, $tVoid)
+    $mSet.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition("sound_effect", [Mono.Cecil.ParameterAttributes]::None, $tSoundEffect)))
+    $mSet.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition("category_id", [Mono.Cecil.ParameterAttributes]::None, $tInt32)))
+    $pLoop = New-Object Mono.Cecil.ParameterDefinition("loop", $optParam, $tBool); $pLoop.Constant = $false; $mSet.Parameters.Add($pLoop)
+    $pRev  = New-Object Mono.Cecil.ParameterDefinition("use_reverb", $optParam, $tBool); $pRev.Constant = $false; $mSet.Parameters.Add($pRev)
+    $ilSet = $mSet.Body.GetILProcessor()
+    if ($arrSetSound) {
+        $ilSet.Append($ilSet.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+        $ilSet.Append($ilSet.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_1))
+        $ilSet.Append($ilSet.Create([Mono.Cecil.Cil.OpCodes]::Newarr, $tSoundEffect))
+        $ilSet.Append($ilSet.Create([Mono.Cecil.Cil.OpCodes]::Dup))
+        $ilSet.Append($ilSet.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0))
+        $ilSet.Append($ilSet.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
+        $ilSet.Append($ilSet.Create([Mono.Cecil.Cil.OpCodes]::Stelem_Ref))
+        $ilSet.Append($ilSet.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_2))
+        $ilSet.Append($ilSet.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_3))
+        $ilSet.Append($ilSet.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_S, $pRev))
+        $ilSet.Append($ilSet.Create([Mono.Cecil.Cil.OpCodes]::Call, [Mono.Cecil.MethodReference]$arrSetSound))
+    }
+    $ilSet.Append($ilSet.Create([Mono.Cecil.Cil.OpCodes]::Ret))
+    $cd.Methods.Add($mSet)
+    $singleSetSound = $mSet
+}
+$defCtor = $cd.Methods | Where-Object { $_.Name -eq ".ctor" -and $_.Parameters.Count -eq 0 } | Select-Object -First 1
+$objCtor = ($defCtor.Body.Instructions | Where-Object { $_.OpCode -eq [Mono.Cecil.Cil.OpCodes]::Call } | Select-Object -First 1).Operand
+$fName   = $cd.Fields | Where-Object { $_.Name -eq "name" } | Select-Object -First 1
+foreach ($sndType in @($tSoundEffect, $tSoundEffectArr)) {
+    $exists = $cd.Methods | Where-Object {
+        $_.Name -eq ".ctor" -and $_.Parameters.Count -eq 5 -and $_.Parameters[1].ParameterType.FullName -eq $sndType.FullName
+    }
+    if (-not $exists) {
+        $cAttrs = [Mono.Cecil.MethodAttributes]([int][Mono.Cecil.MethodAttributes]::Public -bor [int][Mono.Cecil.MethodAttributes]::HideBySig -bor [int][Mono.Cecil.MethodAttributes]::SpecialName -bor [int][Mono.Cecil.MethodAttributes]::RTSpecialName)
+        $ctor = New-Object Mono.Cecil.MethodDefinition(".ctor", $cAttrs, $tVoid)
+        $ctor.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition("new_name", [Mono.Cecil.ParameterAttributes]::None, $tStr)))
+        $ctor.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition("sound_effect", [Mono.Cecil.ParameterAttributes]::None, $sndType)))
+        $ctor.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition("category_id", [Mono.Cecil.ParameterAttributes]::None, $tInt32)))
+        $pL = New-Object Mono.Cecil.ParameterDefinition("loop", $optParam, $tBool); $pL.Constant = $false; $ctor.Parameters.Add($pL)
+        $pR = New-Object Mono.Cecil.ParameterDefinition("use_reverb", $optParam, $tBool); $pR.Constant = $false; $ctor.Parameters.Add($pR)
+        $cilC = $ctor.Body.GetILProcessor()
+        $cilC.Append($cilC.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+        $cilC.Append($cilC.Create([Mono.Cecil.Cil.OpCodes]::Call, [Mono.Cecil.MethodReference]$objCtor))
+        $cilC.Append($cilC.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+        $cilC.Append($cilC.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
+        $cilC.Append($cilC.Create([Mono.Cecil.Cil.OpCodes]::Stfld, $fName))
+        $targetSet = if ($sndType -eq $tSoundEffect) { $singleSetSound } else { $arrSetSound }
+        if ($targetSet) {
+            $cilC.Append($cilC.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+            $cilC.Append($cilC.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_2))
+            $cilC.Append($cilC.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_3))
+            $cilC.Append($cilC.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_S, $pL))
+            $cilC.Append($cilC.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_S, $pR))
+            $cilC.Append($cilC.Create([Mono.Cecil.Cil.OpCodes]::Call, [Mono.Cecil.MethodReference]$targetSet))
+        }
+        $cilC.Append($cilC.Create([Mono.Cecil.Cil.OpCodes]::Ret))
+        $cd.Methods.Add($ctor)
+    }
+}
+Write-Host "  iOS UI Info Suite 2 Audio Fix (MonoGame): CueDefinition(LimitBehavior, instanceLimit, limitBehavior, SetSound, 5-arg .ctors) added!"
 
 $mgAsm.Write($outMG)
 $mgAsm.Dispose()

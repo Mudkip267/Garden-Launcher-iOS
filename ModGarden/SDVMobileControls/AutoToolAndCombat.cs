@@ -43,6 +43,79 @@ namespace SDVMobileControls
             Vector2 tv = new Vector2(tile.X, tile.Y);
             Vector2 tileCenter = new Vector2(tile.X * 64f + 32f, tile.Y * 64f + 32f);
 
+            // 0. Playable Event / Festival support (Game1.eventUp && CurrentEvent.playerControlSequence):
+            //    During festivals (Egg Festival, Luau, Fair, Spirit's Eve, Feast of the Winter Star, Ice Festival…),
+            //    villagers live in CurrentEvent.actors and interactive props/eggs live in CurrentEvent.props!
+            if (Game1.eventUp)
+            {
+                try
+                {
+                    Event ev = Game1.CurrentEvent;
+                    if (ev != null && ev.playerControlSequence)
+                    {
+                        if (ev.actors != null)
+                        {
+                            NPC evHitNpc = null;
+                            float bestEvNpcD = 78f;
+                            for (int i = 0; i < ev.actors.Count; i++)
+                            {
+                                NPC npc = ev.actors[i];
+                                if (npc == null || npc is Monster)
+                                    continue;
+                                Rectangle nbb = npc.GetBoundingBox();
+                                Rectangle nSprite = new Rectangle(nbb.X - 12, nbb.Y - 48, nbb.Width + 24, nbb.Height + 56);
+                                float d = nSprite.Contains((int)tileCenter.X, (int)tileCenter.Y)
+                                    ? 0f
+                                    : Vector2.Distance(nbb.Center.ToVector2(), tileCenter);
+                                if (d < bestEvNpcD)
+                                {
+                                    bestEvNpcD = d;
+                                    evHitNpc = npc;
+                                }
+                            }
+                            if (evHitNpc != null)
+                            {
+                                Rectangle nbb = evHitNpc.GetBoundingBox();
+                                intent.Kind = TileActionKind.Interact;
+                                intent.StopAdjacent = true;
+                                intent.AllowSameTile = true;
+                                intent.HasResolvedTile = true;
+                                intent.ResolvedTile = new Point((int)Math.Floor(nbb.Center.X / 64f), (int)Math.Floor(nbb.Center.Y / 64f));
+                                return intent;
+                            }
+                        }
+
+                        if (ev.props != null)
+                        {
+                            for (int i = 0; i < ev.props.Count; i++)
+                            {
+                                SObject prop = ev.props[i];
+                                if (prop != null && prop.TileLocation == tv)
+                                {
+                                    intent.Kind = TileActionKind.Interact;
+                                    intent.StopAdjacent = true;
+                                    intent.AllowSameTile = true;
+                                    return intent;
+                                }
+                            }
+                        }
+
+                        if (!string.IsNullOrEmpty(loc.doesTileHaveProperty(tile.X, tile.Y, "Action", "Buildings")))
+                        {
+                            intent.Kind = TileActionKind.Interact;
+                            intent.StopAdjacent = true;
+                            intent.PreferCardinal = true;
+                            return intent;
+                        }
+
+                        // Unless the festival explicitly enables tools (e.g. Ice Festival fishing contest), skip normal world tool targets
+                        if (!ev.canPlayerUseTool())
+                            return intent;
+                    }
+                }
+                catch { }
+            }
+
             // 1. Living monster near tapped tile
             Monster tappedMonster = FindMonsterNear(loc, tileCenter, 78f);
             if (tappedMonster != null)

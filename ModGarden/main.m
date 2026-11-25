@@ -806,7 +806,7 @@ static NSString *sdvProbeLocalNetwork(void) {
         ], 44)];
 
         [_pane addArrangedSubview:mkSectionTitle(@"Hướng dẫn nạp dữ liệu PC")];
-        UILabel *howLbl = mkLabel([NSString stringWithFormat:@"• Cách 1 (Nhanh nhất): Nén thư mục Stardew Valley PC 1.6.15 thành 1 tệp .ZIP rồi bấm Nhập gói dữ liệu game (.ZIP). Hệ thống sẽ tự động ẩn gọn tệp lõi game, trong Tệp chỉ còn Mods, Saves và ErrorLogs.\n• Cách 2 (Thủ công): Mở ứng dụng Tệp → Trên iPhone của tôi → %@ rồi chép Content/, Stardew Valley.dll, xTile.dll, BmFont.dll và StardewValley.GameData.dll vào đó — app sẽ tự gom ẩn gọn khi kiểm tra/mở lại.\n• Hoàn tất: Vuốt tắt hẳn ứng dụng rồi mở lại để vào game.", appNm], 13, UIFontWeightRegular, kInkSecondary);
+        UILabel *howLbl = mkLabel([NSString stringWithFormat:@"• Cách 1 (Nhanh nhất): Nén thư mục Stardew Valley PC 1.6.15 thành tệp .ZIP/.RAR/.7Z rồi bấm Nhập gói dữ liệu game (.ZIP). Thư mục StardewValley/Content/, Mods, Saves và ErrorLogs đều hiển thị trực tiếp trong ứng dụng Tệp.\n• Cách 2 (Thủ công): Mở ứng dụng Tệp → Trên iPhone của tôi → %@ → StardewValley rồi chép Content/, Stardew Valley.dll, xTile.dll, BmFont.dll và StardewValley.GameData.dll vào đó.\n• Hoàn tất: Vuốt tắt hẳn ứng dụng rồi mở lại để vào game.", appNm], 13, UIFontWeightRegular, kInkSecondary);
         [_pane addArrangedSubview:mkGroupedCard(howLbl, UIEdgeInsetsMake(12, 14, 12, 14))];
         return;
     }
@@ -955,6 +955,32 @@ static NSString *sdvProbeLocalNetwork(void) {
     [hero addArrangedSubview:chips];
 
     [_pane addArrangedSubview:mkGroupedCard(hero, UIEdgeInsetsMake(14, 14, 14, 14))];
+
+#ifdef GARDEN_IN_GAME
+    // Direct Content / Game Data Re-Import & Open Files Access Card (fixes #GL-FKRBMM!)
+    {
+        [_pane addArrangedSubview:mkSectionTitle(@"Dữ liệu Game gốc & Thư mục Content (.XNB)")];
+        UIStackView *gdBox = mkVStack(9);
+        UIStackView *gdTop = mkHStack(10);
+        [gdTop addArrangedSubview:mkSettingsIconBadge(@"folder.fill.badge.gearshape", kTintIndigo, 34)];
+        UIStackView *gdTxt = mkVStack(2);
+        [gdTxt addArrangedSubview:mkLabel(@"Truy cập tệp gốc & Nạp lại Content", 14.5, UIFontWeightSemibold, kInkPrimary)];
+        [gdTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"Đã mở quyền truy cập trực tiếp tại Tệp → Trên iPhone → %@ → StardewValley/Content/. Bạn có thể sửa/chép đè .XNB thẳng trong Tệp hoặc nạp lại gói Content / Game bên dưới.", sdvAppDisplayName()], 12, UIFontWeightRegular, kInkSecondary)];
+        [gdTop addArrangedSubview:gdTxt];
+        [gdBox addArrangedSubview:gdTop];
+
+        UIStackView *gdBtns = mkHStack(8);
+        SDVAppleButton *reImpBtn = mkIOSButton(@"Nạp lại Game / Content (ZIP/RAR/7Z)", @"arrow.triangle.2.circlepath.doc.on.clipboard", [kTintIndigo colorWithAlphaComponent:0.15], kTintIndigo, 13, UIEdgeInsetsMake(9, 12, 9, 12));
+        [reImpBtn addTarget:self action:@selector(importGameDataTapped) forControlEvents:UIControlEventTouchUpInside];
+        SDVAppleButton *reDirBtn = mkIOSButton(@"Chọn thư mục", @"folder", kBgCardSubtle, kInkPrimary, 12.5, UIEdgeInsetsMake(9, 11, 9, 11));
+        [reDirBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        [reDirBtn addTarget:self action:@selector(importGameDataFolderTapped) forControlEvents:UIControlEventTouchUpInside];
+        [gdBtns addArrangedSubview:reImpBtn];
+        [gdBtns addArrangedSubview:reDirBtn];
+        [gdBox addArrangedSubview:gdBtns];
+        [_pane addArrangedSubview:mkGroupedCard(gdBox, UIEdgeInsetsMake(12, 14, 12, 14))];
+    }
+#endif
 
     // Undo Row
     if (_last.length) {
@@ -1371,7 +1397,30 @@ static NSString *sdvProbeLocalNetwork(void) {
 
     if (_ctrlSectionTab == 0) {
         // ==================== TAB 0: ĐIỀU KHIỂN & CHIẾN ĐẤU ====================
-        [_pane addArrangedSubview:mkSectionTitle(@"Chế độ điều khiển")];
+        [_pane addArrangedSubview:mkSectionTitle(@"Chế độ Tay cầm chuyên dụng (Console / Bluetooth / USB-C)")];
+        {
+            UIStackView *gpCard = mkVStack(8);
+            UIView *gpSw = [self mkSettingsSwitchRow:@"Chế độ Tay cầm thuần (tắt hẳn lớp cảm ứng ảo)" icon:@"gamecontroller.fill" color:kTintPurple on:_mobileCfg.pureGamepadMode tag:54];
+            [gpCard addArrangedSubview:gpSw];
+            UILabel *gpDesc = mkLabel(@"Ngắt sạch bộ điều khiển cảm ứng ảo ngay từ lúc mở game để không bao giờ chạm nhầm màn hình khi gắn tay cầm (Backbone, Gamesir, Xbox, DualSense, Switch…). Giữ nguyên 100% bản fix tay cầm: Rung CoreHaptics, SnappyMenus, LB/RB chuyển tab & khung rương, thay/kéo/thả/vứt đồ và con trỏ R-Stick.", 12, UIFontWeightRegular, kInkSecondary);
+            [gpCard addArrangedSubview:gpDesc];
+#ifdef GARDEN_IN_GAME
+            UIStackView *gpAct = mkHStack(8);
+            UILabel *gpStatus = mkBadgePill(_mobileCfg.pureGamepadMode ? @"ĐANG BẬT · Cần khởi động lại nếu vừa đổi" : @"ĐANG TẮT · Tự động chuyển Cảm ứng ↔ Tay cầm",
+                [(_mobileCfg.pureGamepadMode ? kTintPurple : kTintBlue) colorWithAlphaComponent:0.14],
+                _mobileCfg.pureGamepadMode ? kTintPurple : kTintBlue, 11);
+            [gpAct addArrangedSubview:gpStatus];
+            [gpAct addArrangedSubview:[UIView new]];
+            SDVAppleButton *rstBtn = mkIOSButton(@"Khởi động lại ngay", @"power", [kTintRed colorWithAlphaComponent:0.14], kTintRed, 12, UIEdgeInsetsMake(6, 10, 6, 10));
+            [rstBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+            [rstBtn addTarget:self action:@selector(restartGameTapped) forControlEvents:UIControlEventTouchUpInside];
+            [gpAct addArrangedSubview:rstBtn];
+            [gpCard addArrangedSubview:gpAct];
+#endif
+            [_pane addArrangedSubview:mkGroupedCard(gpCard, UIEdgeInsetsMake(11, 14, 11, 14))];
+        }
+
+        [_pane addArrangedSubview:mkSectionTitle(@"Chế độ điều khiển cảm ứng")];
         UIStackView *mcTop = mkVStack(8);
         UIStackView *mcHdr = mkHStack(8);
         [mcHdr addArrangedSubview:mkSettingsIconBadge(@"hand.point.up.left.fill", kTintBlue, 28)];
@@ -2077,7 +2126,7 @@ static NSString *sdvProbeLocalNetwork(void) {
         [self renderAll:NO];
         return;
     }
-    if (sw.tag >= 30 && sw.tag <= 53) {
+    if (sw.tag >= 30 && sw.tag <= 54) {
         _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
         switch (sw.tag) {
             case 30: _mobileCfg.autoTool = sw.isOn; break;
@@ -2104,9 +2153,21 @@ static NSString *sdvProbeLocalNetwork(void) {
             case 51: _mobileCfg.leftHandedMobile = sw.isOn; break;
             case 52: _mobileCfg.respectMuteSwitch = sw.isOn; break;
             case 53: _mobileCfg.showToolHitLocation = sw.isOn; break;
+            case 54: _mobileCfg.pureGamepadMode = sw.isOn; break;
         }
         [_mobileCfg saveToDocuments:_root.path];
         [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+        if (sw.tag == 54) {
+            _message = sw.isOn
+                ? @"Đã bật Chế độ Tay cầm thuần! Hãy lưu game (nếu đang chơi) rồi khởi động lại để ngắt hẳn cảm ứng ảo."
+                : @"Đã tắt Chế độ Tay cầm thuần! Khởi động lại game để khôi phục bộ điều khiển cảm ứng Mobile.";
+            _messageIsError = NO;
+            [self renderAll:NO];
+#ifdef GARDEN_IN_GAME
+            [self restartGameTapped];
+#endif
+            return;
+        }
         if (sw.tag == 48) [self renderAll:NO];
         return;
     }
@@ -2301,8 +2362,8 @@ static NSString *sdvProbeLocalNetwork(void) {
     UIStackView *topRow = mkHStack(10);
     [topRow addArrangedSubview:mkSettingsIconBadge(@"book.fill", kTintOrange, 34)];
     UIStackView *topTxt = mkVStack(1);
-    [topTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"%@ v1.0.2 — Hướng dẫn toàn diện", appNm], 15.5, UIFontWeightSemibold, kInkPrimary)];
-    [topTxt addArrangedSubview:mkLabel(@"Đồ họa Native · SMAPI 4.5.2 · Mobile Controls · Shader GLSL ES (iOS 14–27+)", 12, UIFontWeightRegular, kInkSecondary)];
+    [topTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"%@ v1.0.3 — Hướng dẫn toàn diện", appNm], 15.5, UIFontWeightSemibold, kInkPrimary)];
+    [topTxt addArrangedSubview:mkLabel(@"Đồ họa Native · SMAPI 4.5.2 · Tay cầm & Mobile Controls · Shader GLSL ES (iOS 14–27+)", 12, UIFontWeightRegular, kInkSecondary)];
     SDVAppleButton *jumpBtn = mkIOSButton(@"Xem Credit", @"heart.fill", [kTintPink colorWithAlphaComponent:0.13], kTintPink, 12.5, UIEdgeInsetsMake(7, 11, 7, 11));
     [jumpBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     [jumpBtn addTarget:self action:@selector(switchToCreditTab) forControlEvents:UIControlEventTouchUpInside];
@@ -2337,7 +2398,7 @@ static NSString *sdvProbeLocalNetwork(void) {
         [self mkGuideStep:@"A" title:@"4 Chế độ Mobile & Tiện ích cảm ứng chuyên sâu" body:@"Chuyển trực tiếp giữa Vô hình, 2 Nút, Chạm đi (A* tự qua cửa, giữ trực tiếp trên nước để gồng Cần câu 0ms, giữ trên đất để gồng Cuốc/Bình tưới nâng cấp, kéo lướt thu hoạch) và Kết hợp. Hỗ trợ Thanh Item dọc kiểu Mobile (1–3 cột, 4–12 ô/cột, cạnh Trái/Phải, kéo cỡ trong Edit Layout), kéo mồi/phao thả lên cần câu, tự hiện nút ROT/SPEC, ngắm Súng cao su, lia camera ở Robin & Bảo tàng và máy thùng Prairie King / Junimo Kart / Crane Game." color:kTintBlue],
         [self mkGuideStep:@"B" title:@"Thanh tiện ích (BAG · MAP · QST · SAVE · KEY · HIDE · EDIT)" body:@"Mở nhanh Túi đồ (BAG), Bản đồ (MAP), Nhiệm vụ (QST), Bàn phím ảo iOS (KEY), ẩn toàn bộ nút (HIDE — chạm đúp để hiện lại) và chế độ chỉnh vị trí nút (EDIT). Bấm dấu < để thu gọn thanh khi cần màn hình thoáng." color:kTintGreen],
         [self mkGuideStep:@"C" title:@"Save Menu 20 mốc & Nhập / Xuất File Save đa nền tảng" body:@"Bấm nút SAVE trong game để tạo tới 20 mốc thời gian bất kỳ lúc nào. Vào tab File Save ở thanh bên để Nhập Save từ PC (Windows/Mac/Linux), Android, iOS (tự chuẩn hóa hoa-thường, tạo SaveGameInfo, sao lưu bản cũ) hoặc Xuất .ZIP đa nền tảng (kèm QuickSave)." color:kTintOrange],
-        [self mkGuideStep:@"D" title:@"Thêm nút phím PC tùy chọn & Hỗ trợ Tay cầm / Phím / Chuột ngoài" body:@"Thêm tối đa 16 phím máy tính (P, I, F1–F12, ESC, TAB, SHIFT, CTRL, ALT…) trong tab Hiệu năng & Nút hoặc +PHIM. Ngoài ra hỗ trợ trực tiếp Tay cầm Bluetooth/USB-C (đủ 2 cần analog, L3/R3 & điều khiển trong Menu), Bàn phím rời (WASD, Esc, phím tắt mod, gõ chat/đặt tên) và Chuột rời (di trỏ chuột, chuột trái/phải, cuộn con lăn)." color:kTintPurple]
+        [self mkGuideStep:@"D" title:@"Chế độ Tay cầm thuần, Rung CoreHaptics & Phím / Chuột ngoài" body:@"Hỗ trợ Tay cầm Bluetooth/USB-C chuẩn Console (rung CoreHaptics 2 mô-tơ, SnappyMenus, LB/RB chuyển tab & khung rương, kéo/thay/vứt đồ, con trỏ R-Stick cho UI Info Suite 2 & GMCM) kèm nút bật Chế độ Tay cầm thuần ngắt hẳn cảm ứng ảo. Ngoài ra thêm tối đa 16 phím PC tùy chọn, Bàn phím rời và Chuột rời." color:kTintPurple]
     ], 48)];
 
     [_pane addArrangedSubview:mkSectionTitle(@"3. Tối ưu RAM, Cảnh báo Lưu Game 85% / 90% & Lưu ý iOS 14–27+")];
@@ -2604,7 +2665,7 @@ static NSString *sdvProbeLocalNetwork(void) {
     UIStackView *topRow = mkHStack(10);
     [topRow addArrangedSubview:mkSettingsIconBadge(@"heart.fill", kTintPink, 34)];
     UIStackView *topTxt = mkVStack(1);
-    [topTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"%@ v1.0.2 — Credit & Cộng đồng", appNm], 15.5, UIFontWeightSemibold, kInkPrimary)];
+    [topTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"%@ v1.0.3 — Credit & Cộng đồng", appNm], 15.5, UIFontWeightSemibold, kInkPrimary)];
     [topTxt addArrangedSubview:mkLabel(@"Tri ân nhà phát triển game gốc, cộng đồng mã nguồn mở & Stardew Valley Việt Nam", 12, UIFontWeightRegular, kInkSecondary)];
     SDVAppleButton *chkUpdBtn = mkIOSButton(@"Kiểm tra cập nhật", @"arrow.triangle.2.circlepath", [kTintBlue colorWithAlphaComponent:0.13], kTintBlue, 12.5, UIEdgeInsetsMake(7, 11, 7, 11));
     [chkUpdBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
@@ -2626,8 +2687,8 @@ static NSString *sdvProbeLocalNetwork(void) {
         [self mkCreditRow:@"GAME GỐC — NHÀ PHÁT TRIỂN" name:@"ConcernedApe (Eric Barone)" detail:@"Tác giả toàn bộ trò chơi Stardew Valley. Mọi bản quyền thuộc về ConcernedApe LLC." url:@"https://www.stardewvalley.net" urlLabel:@"Web"],
         [self mkCreditRow:@"NỀN TẢNG iOS PORT (MIT)" name:@"DeadAKJ — SDViosport" detail:@"Mã nguồn host .NET 8 iOS, MonoGame, tích hợp SMAPI và tay cầm cảm ứng SDViOSTouchControls." url:@"https://github.com/DeadAKJ/SDViosport" urlLabel:@"GitHub"],
         [self mkCreditRow:@"NỀN TẢNG MODDING" name:@"SMAPI — Pathoschild & Cộng đồng" detail:@"Stardew Modding API cùng các tác giả mod trên NexusMods và nhóm Việt hóa cộng đồng." url:@"https://smapi.io" urlLabel:@"smapi.io"],
-        [self mkCreditRow:@"ĐÓNG GÓP MÃ NGUỒN — TAY CẦM & MOBILE UX" name:@"Nguyễn Ngọc Nguyên (Mudkip267)" detail:@"Tối ưu thanh cuộn Shop & thao tác rương kiểu Stardew Mobile, sửa lỗi tay cầm rời (animation chạy & con trỏ R-Stick Xbox) và khôi phục âm thanh SoundBank v1.0.1." url:@"https://github.com/Mudkip267/Garden-Launcher-iOS" urlLabel:@"GitHub"],
-        [self mkCreditRow:@"TRÌNH QUẢN LÝ & LAUNCHER iOS" name:@"Garden Launcher iOS (v1.0.2 Native Edition)" detail:@"Giao diện iOS chuẩn Apple, tự kiểm tra bản cập nhật mới kèm tóm tắt bản vá, giải nén mọi định dạng (.ZIP/.RAR/.7Z/.TAR.GZ), âm thanh OpenAL chuẩn iOS, điều khiển Mobile & ngoại vi, tương thích Shader GLSL ES, cảnh báo RAM 85%/90% và hỗ trợ iOS 14–27+." url:@"https://github.com/hanprm9-dot/Garden-Launcher-iOS" urlLabel:@"GitHub"]
+        [self mkCreditRow:@"ĐÓNG GÓP MÃ NGUỒN — TAY CẦM, RUMBLE & MOBILE UX" name:@"Nguyễn Ngọc Nguyên (Mudkip267)" detail:@"Rung tay cầm CoreHaptics 2 mô-tơ chuẩn Console, tương thích UI Info Suite 2 & đồng bộ chân dung Seasonal Anime Portrait, nút SKIP cutscene chuẩn giao diện, tối ưu thanh cuộn Shop & rương Mobile và khôi phục âm thanh SoundBank." url:@"https://github.com/Mudkip267/Garden-Launcher-iOS" urlLabel:@"GitHub"],
+        [self mkCreditRow:@"TRÌNH QUẢN LÝ & LAUNCHER iOS" name:@"Garden Launcher iOS (v1.0.3 Native Edition)" detail:@"Giao diện iOS chuẩn Apple, mở trực tiếp thư mục StardewValley/Content trong Tệp, Chế độ Tay cầm thuần + fix kéo/thay/vứt đồ & chuyển khung, đi lại trong Event/Lễ hội, giải nén mọi định dạng (.ZIP/Deflate64/.RAR/.7Z), Shader GLSL ES và hỗ trợ iOS 14–27+." url:@"https://github.com/hanprm9-dot/Garden-Launcher-iOS" urlLabel:@"GitHub"]
     ], 14);
     [_pane addArrangedSubview:_creditCard];
 
@@ -2975,6 +3036,7 @@ static NSArray<UTType *> *sdvAllArchivePickerTypes(void) {
 -(void)pickModFolder { _choosingFolder = NO; _importingGameData = NO; _importingSave = NO; _appendPick = NO; [self picker:@[UTTypeFolder] copy:NO multi:NO]; }
 -(void)addMorePackages { _choosingFolder = NO; _importingGameData = NO; _importingSave = NO; _appendPick = YES; [self picker:sdvAllArchivePickerTypes() copy:YES multi:YES]; }
 -(void)importGameDataTapped { _choosingFolder = NO; _importingGameData = YES; _importingSave = NO; _appendPick = NO; [self picker:sdvAllArchivePickerTypes() copy:YES multi:NO]; }
+-(void)importGameDataFolderTapped { _choosingFolder = NO; _importingGameData = YES; _importingSave = NO; _appendPick = NO; [self picker:@[UTTypeFolder] copy:NO multi:NO]; }
 
 -(void)recheckGameData {
     sdvMigrateDocumentsToHiddenLayout(_root.path);
@@ -3051,10 +3113,12 @@ static NSArray<UTType *> *sdvAllArchivePickerTypes(void) {
         _importingGameData = NO;
         NSURL *zipUrl = urls.firstObject;
         __block NSUInteger extracted = 0;
-        [self work:@"Đang giải nén dữ liệu game PC… (chờ 20–40 giây)" action:^{
+        [self work:@"Đang giải nén & cập nhật dữ liệu game / Content… (chờ 15–40 giây)" action:^{
+            BOOL scoped = [zipUrl startAccessingSecurityScopedResource];
             @try {
                 extracted = importGameDataZip(zipUrl, self->_root.path);
             } @finally {
+                if (scoped) [zipUrl stopAccessingSecurityScopedResource];
                 if ([zipUrl.path containsString:@"/tmp/"] || [zipUrl.path containsString:@"/Inbox/"]) {
                     [fm() removeItemAtURL:zipUrl error:nil];
                 }
@@ -3065,7 +3129,7 @@ static NSArray<UTType *> *sdvAllArchivePickerTypes(void) {
         } done:^{
             BOOL ready = [gameDataStatus(self->_root.path)[@"ready"] boolValue];
             self->_message = ready
-                ? [NSString stringWithFormat:@"Đã nhập xong %lu tệp dữ liệu game! Vuốt tắt hẳn app rồi mở lại để vào Stardew Valley.", (unsigned long)extracted]
+                ? [NSString stringWithFormat:@"Đã nạp thành công %lu tệp dữ liệu game / Content! Khởi động lại game để áp dụng tài nguyên mới.", (unsigned long)extracted]
                 : [NSString stringWithFormat:@"Đã giải nén %lu tệp. Kiểm tra mục còn thiếu bên dưới.", (unsigned long)extracted];
             self->_messageIsError = NO;
             [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];

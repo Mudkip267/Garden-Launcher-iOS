@@ -292,6 +292,7 @@ static long long sdvNextRev(void) {
 @property(nonatomic, assign) BOOL leftHandedMobile;
 @property(nonatomic, assign) float joyDeadzone; // 0.05..0.25
 @property(nonatomic, assign) BOOL respectMuteSwitch;
+@property(nonatomic, assign) BOOL pureGamepadMode;
 @property(nonatomic, strong) NSMutableArray<SDVCustomKeyEntry *> *customKeys;
 
 +(instancetype)defaults;
@@ -343,6 +344,7 @@ static long long sdvNextRev(void) {
     c.leftHandedMobile = NO;
     c.joyDeadzone = 0.11f;
     c.respectMuteSwitch = [NSUserDefaults.standardUserDefaults boolForKey:@"sdv_respect_mute_v1"];
+    c.pureGamepadMode = NO;
     c.customKeys = [NSMutableArray array];
     return c;
 }
@@ -350,7 +352,11 @@ static long long sdvNextRev(void) {
 +(instancetype)loadFromDocuments:(NSString *)docsPath {
     SDVMobileCtrlConfig *c = [self defaults];
     if (!docsPath.length) return c;
-    NSString *p = [sdvHiddenGardenDir(docsPath) stringByAppendingPathComponent:@"sdv_mobile_ctrl.cfg"];
+    NSString *gd = sdvHiddenGardenDir(docsPath);
+    NSString *gpFlag = [gd stringByAppendingPathComponent:@"sdv_gamepad_only.flag"];
+    BOOL flagOnDisk = [NSFileManager.defaultManager fileExistsAtPath:gpFlag];
+    c.pureGamepadMode = flagOnDisk;
+    NSString *p = [gd stringByAppendingPathComponent:@"sdv_mobile_ctrl.cfg"];
     NSString *raw = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil];
     if (!raw.length) return c;
     for (NSString *line in [raw componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
@@ -441,6 +447,8 @@ static long long sdvNextRev(void) {
             c.joyDeadzone = sdvClampf(v.floatValue, 0.05f, 0.25f);
         } else if ([k isEqualToString:@"respectmute"]) {
             c.respectMuteSwitch = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
+        } else if ([k isEqualToString:@"puregamepad"]) {
+            c.pureGamepadMode = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
         } else if ([k isEqualToString:@"ckey"] && c.customKeys.count < 16) {
             NSArray<NSString *> *pts = [v componentsSeparatedByString:@"|"];
             if (pts.count >= 7 && pts[2].integerValue > 0) {
@@ -535,7 +543,7 @@ static long long sdvNextRev(void) {
     }
 
     NSMutableString *s = [NSMutableString stringWithFormat:
-        @"mode=%ld\nautotool=%d\nautoattack=%d\npinchzoom=%d\ntouchhint2=%d\ntoputility=%d\nswapbuttons=%d\nmobileshopdrag=%d\nautokeyboard=%d\nsafecrafting=%d\nautosavemin=%ld\nreduceweather=%d\nuiscale=%.2f\nbuttonscale=%.2f\nemotebtn=%d\nautorepeat=%d\nrestoretool=%d\nspecbtn=%d\nautocombatmode=%d\nautohidegp=%d\nautopause=%d\nfishhaptic=%d\nsafepadding=%ld\nsafedialogue=%d\nverticaltb=%d\ntbsize=%.2f\ntbopacity=%.2f\ntbcols=%ld\ntbrows=%ld\ntbside=%ld\ntby=%.3f\ntoolhitbox=%d\nsaver30fps=%d\npixelopacity=%.2f\nlefthanded=%d\njoydeadzone=%.2f\nrespectmute=%d\n",
+        @"mode=%ld\nautotool=%d\nautoattack=%d\npinchzoom=%d\ntouchhint2=%d\ntoputility=%d\nswapbuttons=%d\nmobileshopdrag=%d\nautokeyboard=%d\nsafecrafting=%d\nautosavemin=%ld\nreduceweather=%d\nuiscale=%.2f\nbuttonscale=%.2f\nemotebtn=%d\nautorepeat=%d\nrestoretool=%d\nspecbtn=%d\nautocombatmode=%d\nautohidegp=%d\nautopause=%d\nfishhaptic=%d\nsafepadding=%ld\nsafedialogue=%d\nverticaltb=%d\ntbsize=%.2f\ntbopacity=%.2f\ntbcols=%ld\ntbrows=%ld\ntbside=%ld\ntby=%.3f\ntoolhitbox=%d\nsaver30fps=%d\npixelopacity=%.2f\nlefthanded=%d\njoydeadzone=%.2f\nrespectmute=%d\npuregamepad=%d\n",
         (long)MAX(1, MIN(4, self.mode)), self.autoTool ? 1 : 0, self.autoAttack ? 1 : 0,
         self.pinchZoom ? 1 : 0, self.showTouchHint ? 1 : 0,
         self.showTopUtility ? 1 : 0, self.swapRightButtons ? 1 : 0,
@@ -559,7 +567,8 @@ static long long sdvNextRev(void) {
         self.showToolHitLocation ? 1 : 0,
         (int)MAX(0, MIN(2, self.batterySaverFpsMode)),
         sdvClampf(self.pixelOpacity, 0.25f, 1.00f), self.leftHandedMobile ? 1 : 0,
-        sdvClampf(self.joyDeadzone, 0.05f, 0.25f), self.respectMuteSwitch ? 1 : 0];
+        sdvClampf(self.joyDeadzone, 0.05f, 0.25f), self.respectMuteSwitch ? 1 : 0,
+        self.pureGamepadMode ? 1 : 0];
     for (NSString *ex in extraLines) {
         [s appendFormat:@"%@\n", ex];
     }
@@ -568,6 +577,13 @@ static long long sdvNextRev(void) {
             (long)e.keyId, e.label ?: @"KEY", (long)e.keyCode, e.x, e.y, e.w, e.h];
     }
     [s writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+    NSString *gpFlag = [sdvHiddenGardenDir(docsPath) stringByAppendingPathComponent:@"sdv_gamepad_only.flag"];
+    if (self.pureGamepadMode) {
+        [@"1" writeToFile:gpFlag atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    } else {
+        [NSFileManager.defaultManager removeItemAtPath:gpFlag error:nil];
+    }
 }
 
 +(void)triggerEditLayoutInDocs:(NSString *)docsPath {

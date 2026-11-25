@@ -49,6 +49,7 @@ namespace SDVMobileControls
         private readonly Dictionary<string, long> _lastUsedSeq = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         private long _warpSeq;
         private int _flagPollCounter;
+        private long _lastWarpPruneMs;
 
         // Cached reflection handles (initialized lazily on first prune)
         private bool _reflReady;
@@ -85,6 +86,7 @@ namespace SDVMobileControls
         {
             ScanContentPatcherPacks();
             RecordCurrentMapTileSheets();
+            EnsureCriticalTexturesIntact(Game1.currentLocation);
         }
 
         public void OnWarped(GameLocation newLocation)
@@ -92,9 +94,14 @@ namespace SDVMobileControls
             if (!Context.IsWorldReady || newLocation == null)
                 return;
             RecordLocationTileSheets(newLocation);
-            // Keep up to 2 most recently visited off-screen tilesheets so stepping in/out of
-            // FarmHouse/Coop/Barn/Shops stays instant while evicting older maps!
-            RunPrune(keepRecentOffscreen: 2, runGc: false, reason: "Warp:" + (newLocation.NameOrUniqueName ?? "?"));
+            EnsureCriticalTexturesIntact(newLocation);
+            // Cooldown prevents hitching when stepping rapidly between FarmHouse/Coop/Barn/Shops
+            long nowMs = Environment.TickCount64;
+            if (nowMs - _lastWarpPruneMs < 12000L)
+                return;
+            _lastWarpPruneMs = nowMs;
+            // Keep up to 2 most recently visited off-screen tilesheets so stepping in/out stays instant while evicting older maps!
+            RunPrune(keepRecentOffscreen: 2, runGc: false, blockingGc: false, reason: "Warp:" + (newLocation.NameOrUniqueName ?? "?"));
         }
 
         public void OnDayStarted()
@@ -102,23 +109,65 @@ namespace SDVMobileControls
             if (!Context.IsWorldReady)
                 return;
             RecordCurrentMapTileSheets();
-            // New day (or season change): flush all off-screen map tilesheets cleanly
-            RunPrune(keepRecentOffscreen: 0, runGc: true, reason: "DayStarted");
+            EnsureCriticalTexturesIntact(Game1.currentLocation);
+            // NEVER run blocking compacting Gen2 GC right as the player wakes up on bed — prevents wake-up freeze!
+            if (_knownTileSheetKeys.Count <= 4)
+                return;
+            RunPrune(keepRecentOffscreen: 1, runGc: false, blockingGc: false, reason: "DayStarted");
+        }
+
+        /// <summary>
+        /// Verifies core world/fishing/water textures (bobbers, cursors, animations, and active map tilesheets)
+        /// are never disposed/corrupted on iOS OpenGL ES, auto-healing any stale GPU texture handle cleanly.
+        /// </summary>
+        public void EnsureCriticalTexturesIntact(GameLocation loc)
+        {
+            try
+            {
+                if (Game1.content != null)
+                {
+                    if (Game1.bobbersTexture == null || Game1.bobbersTexture.IsDisposed)
+                        Game1.bobbersTexture = Game1.content.Load<Texture2D>("TileSheets\\bobbers");
+                    if (Game1.mouseCursors == null || Game1.mouseCursors.IsDisposed)
+                        Game1.mouseCursors = Game1.content.Load<Texture2D>("LooseSprites/Cursors");
+                    if (Game1.animations == null || Game1.animations.IsDisposed)
+                        Game1.animations = Game1.content.Load<Texture2D>("TileSheets\\animations");
+                }
+                if (loc?.Map != null && EnsureReflection(Game1.content) && _fTileSheetTextures != null && Game1.mapDisplayDevice != null)
+                {
+                    var tsDict = _fTileSheetTextures.GetValue(Game1.mapDisplayDevice) as Dictionary<TileSheet, Texture2D>;
+                    if (tsDict != null && loc.Map.TileSheets != null)
+                    {
+                        for (int i = 0; i < loc.Map.TileSheets.Count; i++)
+                        {
+                            TileSheet ts = loc.Map.TileSheets[i];
+                            if (ts != null && tsDict.TryGetValue(ts, out Texture2D tex) && (tex == null || tex.IsDisposed))
+                            {
+                                tsDict.Remove(ts);
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
         }
 
         public void PollManualPruneFlag()
         {
             if (!Context.IsWorldReady)
                 return;
-            if (++_flagPollCounter < 45)
+            if (++_flagPollCounter < 60)
                 return;
             _flagPollCounter = 0;
             try
             {
                 if (!File.Exists(_pruneFlagPath))
                     return;
+                string mode = "";
+                try { mode = File.ReadAllText(_pruneFlagPath)?.Trim() ?? ""; } catch { }
                 File.Delete(_pruneFlagPath);
-                RunPrune(keepRecentOffscreen: 0, runGc: true, reason: "ManualGC");
+                bool critical = string.Equals(mode, "CRIT", StringComparison.OrdinalIgnoreCase);
+                RunPrune(keepRecentOffscreen: 0, runGc: true, blockingGc: critical, reason: critical ? "AutoCritGC" : "ManualGC");
             }
             catch { }
         }
@@ -127,8 +176,162 @@ namespace SDVMobileControls
         {
             if (!Context.IsWorldReady)
                 return;
-            RunPrune(keepRecentOffscreen: 0, runGc: true, reason: reason ?? "HighRAM");
+            bool isCrit = reason != null && reason.IndexOf("90", StringComparison.Ordinal) >= 0;
+            RunPrune(keepRecentOffscreen: 0, runGc: true, blockingGc: isCrit, reason: reason ?? "HighRAM");
         }
+
+        /// <summary>
+        /// Safely refreshes stale or Content Patcher-invalidated NPC portraits without relying on
+        /// MonoGame iOS Texture2D.CopyFromTexture() (which uses OpenGL ES FBO + glReadPixels and
+        /// silently swallows failures, leaving early-loaded villagers stuck on vanilla portraits
+        /// while lazy-loaded villagers show Seasonal Anime Portraits).
+        /// </summary>
+        public int RefreshInvalidatedPortraits(HashSet<string> invalidatedNormKeys, bool reloadAll, string reason)
+        {
+            if (!Context.IsWorldReady || Game1.content == null)
+                return 0;
+            if (!EnsureReflection(Game1.content) || _fNpcPortrait == null)
+                return 0;
+
+            int unlinkedCacheKeys = 0;
+            int refreshedNpcs = 0;
+            int eagerReloaded = 0;
+            try
+            {
+                object coordinator = _fCoordinator.GetValue(Game1.content);
+                var mgrListObj = coordinator != null ? (_fContentManagers.GetValue(coordinator) as IEnumerable) : null;
+
+                // 1. Unlink ONLY stale/invalidated Portraits/* entries from GameContentManagers (never Dispose!)
+                //    so the next Game1.content.Load<Texture2D>() creates a fresh Texture2D straight from Content Patcher.
+                if (mgrListObj != null)
+                {
+                    var gameManagers = new List<object>(8);
+                    foreach (object m in mgrListObj)
+                    {
+                        if (m != null && m.GetType().Name.IndexOf("GameContentManager", StringComparison.Ordinal) >= 0)
+                            gameManagers.Add(m);
+                    }
+
+                    var unlinkedTex = new HashSet<Texture2D>(ReferenceComparer.Instance);
+                    foreach (object gm in gameManagers)
+                    {
+                        var dict = GetCacheDict(gm);
+                        if (dict == null || dict.Count == 0) continue;
+                        List<string> rmKeys = null;
+                        foreach (var kv in dict)
+                        {
+                            if (!(kv.Value is Texture2D tex))
+                                continue;
+                            string norm = NormalizeAssetKey(kv.Key);
+                            if (!norm.StartsWith("portraits/", StringComparison.OrdinalIgnoreCase))
+                                continue;
+                            if (reloadAll || (invalidatedNormKeys != null && invalidatedNormKeys.Contains(norm)))
+                            {
+                                if (rmKeys == null) rmKeys = new List<string>(16);
+                                rmKeys.Add(kv.Key);
+                                unlinkedTex.Add(tex);
+                            }
+                        }
+                        if (rmKeys != null)
+                        {
+                            for (int i = 0; i < rmKeys.Count; i++)
+                            {
+                                if (dict.TryGetValue(rmKeys[i], out object v) && v is Texture2D t)
+                                    RemoveFromBaseDisposables(gm, t);
+                                dict.Remove(rmKeys[i]);
+                                unlinkedCacheKeys++;
+                            }
+                        }
+                    }
+
+                    if (unlinkedTex.Count > 0)
+                        PurgeFromMonoGameContentManager(_fVanillaContentMgr?.GetValue(coordinator), unlinkedTex);
+                }
+
+                // 2. Refresh every NPC (top-level locations + all building interiors + active event actors)
+                var currentLoc = Game1.currentLocation;
+                void RefreshNpc(NPC ch, bool isLocalOrEvent)
+                {
+                    if (ch == null || ch.portraitOverridden)
+                        return;
+
+                    Texture2D curTex = _fNpcPortrait.GetValue(ch) as Texture2D;
+                    bool shouldRefresh = reloadAll;
+                    if (!shouldRefresh && invalidatedNormKeys != null && invalidatedNormKeys.Count > 0)
+                    {
+                        string curNorm = curTex != null ? NormalizeAssetKey(curTex.Name) : null;
+                        if (!string.IsNullOrEmpty(curNorm) && invalidatedNormKeys.Contains(curNorm))
+                            shouldRefresh = true;
+                        else if (!string.IsNullOrEmpty(ch.Name))
+                        {
+                            string baseKey = "portraits/" + ch.Name.ToLowerInvariant();
+                            if (invalidatedNormKeys.Contains(baseKey))
+                                shouldRefresh = true;
+                            else
+                            {
+                                string prefix = baseKey + "_";
+                                foreach (string ik in invalidatedNormKeys)
+                                {
+                                    if (ik.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        shouldRefresh = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (!shouldRefresh)
+                        return;
+
+                    if (!ch.IsVillager && curTex == null)
+                        return;
+
+                    _fNpcPortrait.SetValue(ch, null);
+                    if (reloadAll)
+                    {
+                        try { ch.LastAppearanceId = null; } catch { }
+                    }
+                    refreshedNpcs++;
+
+                    if (isLocalOrEvent || ReferenceEquals(ch.currentLocation, currentLoc))
+                    {
+                        try
+                        {
+                            ch.ChooseAppearance(null);
+                            eagerReloaded++;
+                        }
+                        catch { }
+                    }
+                }
+
+                Utility.ForEachCharacter(ch =>
+                {
+                    RefreshNpc(ch, isLocalOrEvent: false);
+                    return true;
+                });
+
+                var evActors = Game1.CurrentEvent?.actors;
+                if (evActors != null)
+                {
+                    for (int i = 0; i < evActors.Count; i++)
+                        RefreshNpc(evActors[i], isLocalOrEvent: true);
+                }
+
+                if (refreshedNpcs > 0 || unlinkedCacheKeys > 0)
+                {
+                    _monitor?.Log($"[PortraitSync:{reason}] Refreshed {refreshedNpcs} NPCs ({eagerReloaded} local eager, {unlinkedCacheKeys} cached Portraits/* reset for fresh Content Patcher load).", LogLevel.Info);
+                }
+            }
+            catch (Exception ex)
+            {
+                _monitor?.Log($"[PortraitSync:{reason}] Error: {ex.Message}", LogLevel.Trace);
+            }
+            return refreshedNpcs;
+        }
+
+        public static string NormalizePortraitKey(string raw) => NormalizeAssetKey(raw);
 
         private void ScanContentPatcherPacks()
         {
@@ -249,7 +452,7 @@ namespace SDVMobileControls
             return _fCoordinator != null && _fCacheObj != null && _fCacheDict != null && _fContentManagers != null;
         }
 
-        private void RunPrune(int keepRecentOffscreen, bool runGc, string reason)
+        private void RunPrune(int keepRecentOffscreen, bool runGc, bool blockingGc, string reason)
         {
             // Never prune while actively saving, mid-event, or inside title/minigame
             if (Game1.content == null || Game1.currentLocation == null || Game1.eventUp || Game1.currentMinigame != null)
@@ -356,37 +559,32 @@ namespace SDVMobileControls
                     catch { }
                 }
 
-                // Protect portraits of NPCs in the current location or with custom overridden portraits
-                bool prunePortraits = (_fNpcPortrait != null && Game1.activeClickableMenu == null && !Game1.dialogueUp);
-                if (prunePortraits)
+                // Protect ALL villager/NPC portraits across every location, building interior, and active event.
+                // Never evict Portraits/* during RAM pruning — all portraits combined are small (~6-8 MB),
+                // and evicting them breaks Content Patcher Seasonal Anime Portrait propagation on iOS!
+                bool prunePortraits = false;
+                if (_fNpcPortrait != null)
                 {
                     try
                     {
-                        if (Game1.currentLocation?.characters != null)
+                        Utility.ForEachCharacter(ch =>
                         {
-                            for (int i = 0; i < Game1.currentLocation.characters.Count; i++)
+                            if (ch != null && _fNpcPortrait.GetValue(ch) is Texture2D pt && !pt.IsDisposed)
+                                protectedTex.Add(pt);
+                            return true;
+                        });
+                        var evActors = Game1.CurrentEvent?.actors;
+                        if (evActors != null)
+                        {
+                            for (int i = 0; i < evActors.Count; i++)
                             {
-                                NPC ch = Game1.currentLocation.characters[i];
-                                if (ch != null && _fNpcPortrait.GetValue(ch) is Texture2D pt)
+                                NPC ch = evActors[i];
+                                if (ch != null && _fNpcPortrait.GetValue(ch) is Texture2D pt && !pt.IsDisposed)
                                     protectedTex.Add(pt);
                             }
                         }
-                        if (Game1.locations != null)
-                        {
-                            for (int l = 0; l < Game1.locations.Count; l++)
-                            {
-                                var loc = Game1.locations[l];
-                                if (loc?.characters == null) continue;
-                                for (int c = 0; c < loc.characters.Count; c++)
-                                {
-                                    NPC ch = loc.characters[c];
-                                    if (ch != null && (ch.portraitOverridden || !ch.IsVillager) && _fNpcPortrait.GetValue(ch) is Texture2D pt)
-                                        protectedTex.Add(pt);
-                                }
-                            }
-                        }
                     }
-                    catch { prunePortraits = false; }
+                    catch { }
                 }
 
                 // Protect non-evictable textures in ALL GameContentManagers (in case a texture is shared under a protected key)
@@ -478,62 +676,35 @@ namespace SDVMobileControls
                     toUnlink.Add(c.tex);
                 }
 
-                // 4. Clean ModContentManagers:
-                //    (a) ALWAYS remove any entry referencing a texture in `toUnlink`
-                //    (b) For pure Pathoschild.ContentPatcher content packs (0% C# code), also evict & immediately
-                //        dispose dead Texture2D copies not referenced by any live GameContentManager or protectedTex
-                //        (e.g., EditImage source PNG duplicates — zero C# mod can hold these).
-                HashSet<Texture2D> allLiveGameTex = null;
-                foreach (object mm in modManagers)
+                // 4. Clean ModContentManagers ONLY for textures already in `toUnlink` (off-screen evicted map tilesheets).
+                //    CRITICAL iOS OpenGL ES Texture Integrity Fix: NEVER eagerly call tex.Dispose() on Content Patcher
+                //    ModContentManager textures! Content Patcher retains source PNGs for EditImage/Load re-patching
+                //    (Cursors, Beach, Bobbers, UI, Recolor); eager glDeleteTextures causes corrupted/black sprites!
+                if (toUnlink.Count > 0)
                 {
-                    var dict = GetCacheDict(mm);
-                    if (dict == null || dict.Count == 0) continue;
-
-                    bool isCpPack = IsContentPatcherPackManager(mm);
-                    if (isCpPack && allLiveGameTex == null)
+                    foreach (object mm in modManagers)
                     {
-                        allLiveGameTex = new HashSet<Texture2D>(protectedTex, ReferenceComparer.Instance);
-                        foreach (object gm in gameManagers)
+                        var dict = GetCacheDict(mm);
+                        if (dict == null || dict.Count == 0) continue;
+
+                        List<string> rmKeys = null;
+                        foreach (var kv in dict)
                         {
-                            var gd = GetCacheDict(gm);
-                            if (gd == null) continue;
-                            foreach (var gkv in gd)
+                            if (kv.Value is Texture2D mtex && toUnlink.Contains(mtex))
                             {
-                                if (gkv.Value is Texture2D gtex && !gtex.IsDisposed)
-                                    allLiveGameTex.Add(gtex);
+                                if (rmKeys == null) rmKeys = new List<string>(4);
+                                rmKeys.Add(kv.Key);
                             }
                         }
-                    }
 
-                    List<string> rmKeys = null;
-                    foreach (var kv in dict)
-                    {
-                        if (!(kv.Value is Texture2D mtex))
-                            continue;
-
-                        bool shouldEvict = toUnlink.Contains(mtex);
-                        if (!shouldEvict && isCpPack && !mtex.IsDisposed && !allLiveGameTex.Contains(mtex))
+                        if (rmKeys != null)
                         {
-                            // Pure Content Patcher pack texture not referenced by any GameContentManager or Game1
-                            shouldEvict = true;
-                            toUnlink.Add(mtex);
-                            toImmediateDispose.Add(mtex);
-                        }
-
-                        if (shouldEvict)
-                        {
-                            if (rmKeys == null) rmKeys = new List<string>(8);
-                            rmKeys.Add(kv.Key);
-                        }
-                    }
-
-                    if (rmKeys != null)
-                    {
-                        for (int i = 0; i < rmKeys.Count; i++)
-                        {
-                            if (dict.TryGetValue(rmKeys[i], out object v) && v is Texture2D mt)
-                                RemoveFromBaseDisposables(mm, mt);
-                            dict.Remove(rmKeys[i]);
+                            for (int i = 0; i < rmKeys.Count; i++)
+                            {
+                                if (dict.TryGetValue(rmKeys[i], out object v) && v is Texture2D mt)
+                                    RemoveFromBaseDisposables(mm, mt);
+                                dict.Remove(rmKeys[i]);
+                            }
                         }
                     }
                 }
@@ -648,7 +819,7 @@ namespace SDVMobileControls
                         double mbGc = bytesGcCandidate / (1024.0 * 1024.0);
                         _monitor?.Log($"[MapRamOptimizer] ({reason}) Freed {disposedCount} CP textures ({mbImm:F1} MB) + unlinked {unlinkedCount} off-screen textures ({mbGc:F1} MB GC-safe).", LogLevel.Info);
 
-                        if (runGc)
+                        if (runGc && blockingGc)
                         {
                             try
                             {
@@ -656,7 +827,7 @@ namespace SDVMobileControls
                             }
                             catch { }
                         }
-                        else if ((bytesImmediate + bytesGcCandidate) >= 24L * 1024L * 1024L)
+                        else if (runGc || (bytesImmediate + bytesGcCandidate) >= 24L * 1024L * 1024L)
                         {
                             try
                             {
@@ -817,13 +988,24 @@ namespace SDVMobileControls
                 string.Equals(normKey, "paths", StringComparison.OrdinalIgnoreCase))
                 return false;
 
-            // Keep current season's core outdoor/town/beach tilesheets resident (avoids reload stutter & shader cache churn on FarmHouse/Shop warps)
+            // Never evict bobber, water, beach, animation, or fishing textures
+            if (normKey.IndexOf("bobber", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                normKey.IndexOf("beach", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                normKey.IndexOf("water", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                normKey.IndexOf("animation", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                normKey.IndexOf("splash", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                normKey.IndexOf("fishing", StringComparison.OrdinalIgnoreCase) >= 0)
+                return false;
+
+            // Keep current season's core outdoor/town/beach/forest/mountain tilesheets resident (avoids reload stutter & texture churn)
             string curSeason = Game1.currentSeason;
             if (!string.IsNullOrEmpty(curSeason) &&
                 normKey.IndexOf(curSeason + "_", StringComparison.OrdinalIgnoreCase) >= 0 &&
                 (normKey.IndexOf("outdoorstilesheet", StringComparison.OrdinalIgnoreCase) >= 0 ||
                  normKey.IndexOf("_town", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                 normKey.IndexOf("_beach", StringComparison.OrdinalIgnoreCase) >= 0))
+                 normKey.IndexOf("_beach", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 normKey.IndexOf("_forest", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 normKey.IndexOf("_mountain", StringComparison.OrdinalIgnoreCase) >= 0))
                 return false;
 
             // Must be a known map tilesheet or under Maps/

@@ -1,15 +1,15 @@
 {
-  "version": "1.0.2",
-  "build": 10200,
-  "date": "2026-11-24",
-  "release_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/tag/v1.0.2",
-  "ios14_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.2/Garden-Launcher-1.0.2-iOS14-18.ipa",
-  "ios26_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.2/Garden-Launcher-1.0.2-iOS26-27.ipa",
+  "version": "1.0.3",
+  "build": 10300,
+  "date": "2026-11-25",
+  "release_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/tag/v1.0.3",
+  "ios14_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.3/Garden-Launcher-1.0.3-iOS14-18.ipa",
+  "ios26_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.3/Garden-Launcher-1.0.3-iOS26-27.ipa",
   "summary": [
-    "Sửa dứt điểm lỗi kẹt màn hình tải khi có StardewModdingAPI.crash.marker từ lần văng trước và sửa thanh % nhảy vọt lên 94% lúc mới mở app.",
-    "Sửa lỗi chặn bỏ vật phẩm & dụng cụ từ balô vào Rương (kiểm tra đúng behaviorFunction thay vì chỉ reverseGrab).",
-    "Thêm tính năng tự động Kiểm tra cập nhật Launcher kèm tóm tắt bản vá ngay trong app.",
-    "Khôi phục 100% âm thanh & nhạc nền SoundBank, tối ưu Shop/Rương Mobile UX & sửa tay cầm rời Xbox/PS R-Stick (đóng góp bởi @Mudkip267).",
-    "Sửa bấm OK & chọn nghề Level 5/10 (LevelUpMenu / trang Kỹ năng #GL-LTQ82M) và bảo vệ hòm thư Data/mail 1.6."
+    "Biểu tượng ứng dụng mới Slime khung đá rêu Pixel Art 16-bit & mở lại quyền truy cập trực tiếp thư mục StardewValley/Content trong ứng dụng Tệp.",
+    "Sửa lỗi #GL-FKRBMM nạp lại Content (.XNB) / Wave Bank Deflate64 (tự chuyển libarchive, mở khóa quyền ghi đè XNB và thêm nút Nạp lại Game / Content ngay trong tab Cài Mod).",
+    "Đại tu điều khiển Tay cầm: sửa tương tác giao diện SnappyMenus trên 0% JIT, chuyển khung Balô ↔ Rương ↔ Trang bị ↔ Shop bằng LB/RB/LT/RT, thay (Swap), vứt (Drop) và giữ A kéo-thả (Drag) vật phẩm mượt.",
+    "Thêm nút bật Chế độ Tay cầm thuần (tắt hẳn HUD & lớp chặn cảm ứng ngay từ lúc khởi động, kèm nút Khởi động lại ngay) và sửa lỗi nhân vật đứng yên không đi được trong Event / Lễ hội.",
+    "Tích hợp rung tay cầm CoreHaptics, tương thích UI Info Suite 2 v2.3.7, đồng bộ chân dung Anime theo mùa, nút SKIP Cutscene gốc và dời số tầng Hầm mỏ né góc bo iPhone (đóng góp bởi @Mudkip267)."
   ]
 }

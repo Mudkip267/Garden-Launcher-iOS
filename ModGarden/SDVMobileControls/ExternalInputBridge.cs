@@ -6,6 +6,7 @@ using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Input;
 using StardewModdingAPI;
 using StardewValley;
+using StardewValley.Menus;
 
 namespace SDVMobileControls
 {
@@ -17,11 +18,13 @@ namespace SDVMobileControls
     }
 
     /// <summary>
-    /// Bridges native iOS 14–27+ GameController.framework peripherals (ExternalInput.m in SDVModGarden.framework)
-    /// into MonoGame, Stardew Valley, and SMAPI:
-    ///   - Full Physical Gamepad (sticks, triggers, bumpers, L3/R3, Options/Menu, D-Pad, full Menu/Shop/Inventory cursor snapping)
-    ///   - Full Physical Hardware Keyboard (WASD, Esc, all PC mod hotkeys, plus native TextBox/Chat typing)
-    ///   - Full Physical Mouse / Trackpad (hover cursor, left/right/middle/X1/X2 clicks, scroll wheel)
+    /// Bridges native iOS 14–27+ GameController.framework + CoreHaptics peripherals (ExternalInput.m in SDVModGarden.framework)
+    /// into MonoGame, Stardew Valley, and SMAPI (100% Zero-Harmony compatible for 0% JIT Mono Interpreter):
+    ///   - Full Physical Gamepad (sticks, triggers, bumpers, L3/R3, Options/Menu, D-Pad, CoreHaptics Rumble)
+    ///   - Console-grade SnappyMenus + same-frame SInputState/oldMouseState sync, LB/RB/LT/RT frame &amp; tab switching,
+    ///     item Swap / Drop (-99998 safe-clamp fix) / Hold-A Drag-and-Drop, and universal R-Stick menu cursor
+    ///   - Optional Pure Gamepad Mode (disables virtual touch HUD &amp; touch interceptors cleanly from boot)
+    ///   - Full Physical Hardware Keyboard &amp; Mouse / Trackpad
     /// </summary>
     internal sealed class ExternalInputBridge
     {
@@ -61,6 +64,9 @@ namespace SDVMobileControls
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate int GetDirectTouchCountDelegate();
 
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate void SetRumbleDelegate(float leftMotor, float rightMotor);
+
         [DllImport("/usr/lib/libSystem.dylib", EntryPoint = "dlsym")]
         private static extern IntPtr DarwinDlsym(IntPtr handle, [MarshalAs(UnmanagedType.LPStr)] string symbol);
 
@@ -88,12 +94,28 @@ namespace SDVMobileControls
         private static PropertyInfo _windowMouseStateProp;
         private static FieldInfo _windowMouseStateField;
         private static bool _windowMouseMemberResolved;
+        private static FieldInfo _sInputControllerField;
+        private static FieldInfo _sInputMouseField;
+        private static bool _sInputFieldsResolved;
+
+        // Cached reflection handles for StardewValley.Rumble (100% Zero-Harmony console/Switch rumble mirror!)
+        private static bool _rumbleFieldsResolved;
+        private static FieldInfo _fRumbleIsRumbling;
+        private static FieldInfo _fRumbleStrength;
+        private static FieldInfo _fRumbleTimerCurrent;
+        private static FieldInfo _fRumbleTimerMax;
+        private static FieldInfo _fRumbleFade;
+        private static FieldInfo _fRumbleDuringFade;
 
         private readonly IMonitor _monitor;
         private readonly IntPtr _snapBuf;
         private PollInputDelegate _nativePoll;
         private SetMouseNormDelegate _nativeSetMouseNorm;
         private GetDirectTouchCountDelegate _nativeDirectTouches;
+        private SetRumbleDelegate _nativeSetRumble;
+        private float _lastSentRumbleL;
+        private float _lastSentRumbleR;
+        private bool _ensuredDefaultRumbleOnce;
         private bool _nativeResolved;
         private bool _nativeAvailable;
         private bool _abiMismatchLogged;
@@ -120,10 +142,39 @@ namespace SDVMobileControls
         private float _gamepadCursorYf = 360f;
         private bool _gamepadCursorInit;
         private long _lastRightStickStepMs;
+
+        public bool PureGamepadMode { get; private set; }
         public bool IsRightStickSteeringGameplayCursor { get; private set; }
+        public bool IsRightStickMenuCursorActive { get; private set; }
+        public bool SuppressGamepadAButtonThisFrame { get; private set; }
+        public bool SuppressGamepadXButtonThisFrame { get; private set; }
+        public bool SuppressGamepadShoulderThisFrame { get; private set; }
+        public bool SuppressGamepadTriggerThisFrame { get; private set; }
+
+        private bool _prevGamepadAButtonDown;
+        private bool _prevGamepadXButtonDown;
+        private bool _prevGamepadR3ButtonDown;
+        private bool _prevGamepadLBDown;
+        private bool _prevGamepadRBDown;
+        private bool _prevGamepadLTDown;
+        private bool _prevGamepadRTDown;
+        private int _menuSyntheticLeftClickFrames;
+        private int _menuSyntheticRightClickFrames;
+        private bool _rStickModHoldLeftDown;
+        private bool _rStickModHoldRightDown;
+
+        // Auto-snap & Hold-A Drag-and-Drop tracking across menus
+        private WeakReference<IClickableMenu> _lastSnappedMenuRef;
+        private int _lastGameMenuTab = -1;
+        private bool _gpDragTracking;
+        private bool _gpDragMoved;
+        private Point _gpDragStartUi;
+        private int _gpDragStartSnapId = int.MinValue;
 
         private static readonly List<Keys> EmptyKeysList = new List<Keys>(0);
+        private static readonly object[] EmptyKeysArg = new object[] { EmptyKeysList };
         private readonly List<Keys> _physicalKeys = new List<Keys>(32);
+        private readonly object[] _kbSetKeysArg = new object[1];
         private readonly HashSet<Keys> _prevSpecialKeys = new HashSet<Keys>();
         private readonly HashSet<Keys> _currSpecialKeys = new HashSet<Keys>();
         private readonly List<Keys> _mergeScratch = new List<Keys>(48);
@@ -136,20 +187,66 @@ namespace SDVMobileControls
         public bool IsGamepadConnected => _gpConnected;
         public bool IsKeyboardConnected => _kbConnected;
         public bool IsMouseConnected => _mouseConnected;
-        public bool IsPhysicalGamepadActive => ActiveMode == ExternalInputMode.Gamepad && _gpConnected && !IsSuppressed;
+        public bool IsPhysicalGamepadActive =>
+            !IsSuppressed &&
+            ((ActiveMode == ExternalInputMode.Gamepad && _gpConnected) ||
+             (PureGamepadMode && ActiveMode != ExternalInputMode.KeyboardMouse));
         public bool IsExternalMouseActive => ActiveMode == ExternalInputMode.KeyboardMouse && _mouseConnected && _mouseEverUsed && !IsSuppressed;
-        public bool IsExternalDeviceActive => ActiveMode != ExternalInputMode.Touch && !IsSuppressed;
+        public bool IsExternalDeviceActive => (PureGamepadMode || ActiveMode != ExternalInputMode.Touch) && !IsSuppressed;
         public bool ShouldOverrideMouse => IsExternalMouseActive || IsPhysicalGamepadActive;
+
+        // Only push/overwrite Game1.input._currentMouseState & Mouse.PrimaryWindow when external mouse is active,
+        // during free gameplay (no menu), or while actively steering/clicking the R-stick cursor inside a menu.
+        // Otherwise inside menus, let Stardew's native SnappyMenus + Game1.setMousePositionRaw() own the cursor!
+        public bool ShouldPushMouseStateNow =>
+            IsExternalMouseActive ||
+            (IsPhysicalGamepadActive && (
+                Game1.activeClickableMenu == null ||
+                IsRightStickMenuCursorActive ||
+                _menuSyntheticLeftClickFrames > 0 ||
+                _menuSyntheticRightClickFrames > 0 ||
+                _rStickModHoldLeftDown ||
+                _rStickModHoldRightDown));
+
         public bool HasPhysicalKeysPressed => !IsSuppressed && _physicalKeys.Count > 0;
         public IReadOnlyList<Keys> PhysicalKeys => _physicalKeys;
 
         public event Action<ExternalInputMode> ModeChanged;
 
-        public ExternalInputBridge(IMonitor monitor)
+        public ExternalInputBridge(IMonitor monitor, bool pureGamepadMode = false)
         {
             _monitor = monitor;
+            PureGamepadMode = pureGamepadMode;
+            if (pureGamepadMode)
+                ActiveMode = ExternalInputMode.Gamepad;
             _snapBuf = Marshal.AllocHGlobal(256);
             ResolveNativeExports();
+        }
+
+        public void SyncPureGamepadConfig(bool enabled)
+        {
+            if (PureGamepadMode == enabled)
+                return;
+            PureGamepadMode = enabled;
+            if (enabled && ActiveMode == ExternalInputMode.Touch)
+                SetActiveMode(ExternalInputMode.Gamepad);
+            else if (!enabled && ActiveMode == ExternalInputMode.Gamepad && !_gpConnected)
+                SetActiveMode(ExternalInputMode.Touch);
+        }
+
+        private static bool IsBlockingNonPlayableEvent()
+        {
+            if (!Game1.eventUp)
+                return false;
+            try
+            {
+                Event ev = Game1.CurrentEvent;
+                return ev == null || !ev.playerControlSequence;
+            }
+            catch
+            {
+                return true;
+            }
         }
 
         private void ResolveNativeExports()
@@ -161,6 +258,7 @@ namespace SDVMobileControls
                 IntPtr pPoll = IntPtr.Zero;
                 IntPtr pSetMouse = IntPtr.Zero;
                 IntPtr pDirectTouch = IntPtr.Zero;
+                IntPtr pSetRumble = IntPtr.Zero;
 
                 string[] libNames =
                 {
@@ -175,6 +273,7 @@ namespace SDVMobileControls
                         NativeLibrary.TryGetExport(h, "sdv_ext_poll_input", out pPoll);
                         NativeLibrary.TryGetExport(h, "sdv_ext_set_mouse_norm", out pSetMouse);
                         NativeLibrary.TryGetExport(h, "sdv_ext_get_direct_touch_count", out pDirectTouch);
+                        NativeLibrary.TryGetExport(h, "sdv_ext_set_rumble", out pSetRumble);
                         if (pPoll != IntPtr.Zero) break;
                     }
                 }
@@ -186,8 +285,13 @@ namespace SDVMobileControls
                         pPoll = DarwinDlsym(RTLD_DEFAULT, "sdv_ext_poll_input");
                         pSetMouse = DarwinDlsym(RTLD_DEFAULT, "sdv_ext_set_mouse_norm");
                         pDirectTouch = DarwinDlsym(RTLD_DEFAULT, "sdv_ext_get_direct_touch_count");
+                        pSetRumble = DarwinDlsym(RTLD_DEFAULT, "sdv_ext_set_rumble");
                     }
                     catch { }
+                }
+                else if (pSetRumble == IntPtr.Zero)
+                {
+                    try { pSetRumble = DarwinDlsym(RTLD_DEFAULT, "sdv_ext_set_rumble"); } catch { }
                 }
 
                 if (pPoll != IntPtr.Zero)
@@ -197,8 +301,10 @@ namespace SDVMobileControls
                         _nativeSetMouseNorm = Marshal.GetDelegateForFunctionPointer<SetMouseNormDelegate>(pSetMouse);
                     if (pDirectTouch != IntPtr.Zero)
                         _nativeDirectTouches = Marshal.GetDelegateForFunctionPointer<GetDirectTouchCountDelegate>(pDirectTouch);
+                    if (pSetRumble != IntPtr.Zero)
+                        _nativeSetRumble = Marshal.GetDelegateForFunctionPointer<SetRumbleDelegate>(pSetRumble);
                     _nativeAvailable = true;
-                    _monitor?.Log("[ExternalInput] Bound native iOS GameController bridge (Gamepad + Keyboard + Mouse).", LogLevel.Info);
+                    _monitor?.Log($"[ExternalInput] Bound native iOS GameController bridge (Gamepad + Keyboard + Mouse + CoreHapticsRumble={_nativeSetRumble != null}, PureGamepad={PureGamepadMode}).", LogLevel.Info);
                 }
                 else
                 {
@@ -256,15 +362,19 @@ namespace SDVMobileControls
 
         private void OnSuppressionTransition(bool wasSuppressed, bool nowSuppressed)
         {
+            if (nowSuppressed)
+                PushRumbleToNative(0f, 0f);
             CurrentGamePadState = default;
             _physicalKeys.Clear();
             _prevSpecialKeys.Clear();
+            _gpDragTracking = false;
+            _gpDragMoved = false;
+            _rStickModHoldLeftDown = false;
+            _rStickModHoldRightDown = false;
             SyncMonoGameKeyboardKeys(forceClear: true);
 
             if (!nowSuppressed)
             {
-                // Re-baseline native activity sequences so opening/closing Mod Garden or Edit Layout
-                // never fires a stale edge on frame 1 after resume.
                 _seqInitialized = false;
             }
 
@@ -272,18 +382,13 @@ namespace SDVMobileControls
             FlushFarmerMovementAndState(restoreAutoRun: !nowSuppressed);
         }
 
-        /// <summary>
-        /// Safely halts lingering Farmer movement/directions, clears stale Game1.oldPadState,
-        /// and optionally resyncs Farmer.running with Game1.options.autoRun so mode/UI transitions
-        /// never leave the farmer stuck running in place, sliding, or locked into walk animation.
-        /// </summary>
         public void FlushFarmerMovementAndState(bool restoreAutoRun = true)
         {
             try { Game1.oldPadState = default; } catch { }
             try
             {
                 Farmer who = Game1.player;
-                if (who != null && !Game1.eventUp && who.controller == null &&
+                if (who != null && !IsBlockingNonPlayableEvent() && who.controller == null &&
                     !who.UsingTool && !who.isEating && !who.IsSitting())
                 {
                     if (who.movementDirections != null && who.movementDirections.Count > 0)
@@ -311,9 +416,9 @@ namespace SDVMobileControls
 
         public void NotifyDirectTouch(int directTouchCount)
         {
-            // Ignore touches while suppressed (Mod Garden / Edit Layout / Save Menu) so dragging UI
-            // never flips ActiveMode back and forth behind the overlay.
-            if (IsSuppressed) return;
+            // In Pure Gamepad Mode (or while Mod Garden / Edit Layout / Save Menu is open),
+            // NEVER allow accidental screen touches to switch ActiveMode back to Touch!
+            if (IsSuppressed || PureGamepadMode) return;
             if (directTouchCount > 0 && ActiveMode != ExternalInputMode.Touch)
             {
                 SetActiveMode(ExternalInputMode.Touch);
@@ -322,6 +427,8 @@ namespace SDVMobileControls
 
         private void SetActiveMode(ExternalInputMode next)
         {
+            if (PureGamepadMode && next == ExternalInputMode.Touch)
+                next = ExternalInputMode.Gamepad;
             if (ActiveMode == next) return;
             ExternalInputMode prev = ActiveMode;
             ActiveMode = next;
@@ -342,10 +449,21 @@ namespace SDVMobileControls
             if (next != ExternalInputMode.Gamepad)
             {
                 IsRightStickSteeringGameplayCursor = false;
+                IsRightStickMenuCursorActive = false;
+                SuppressGamepadAButtonThisFrame = false;
+                SuppressGamepadXButtonThisFrame = false;
+                SuppressGamepadShoulderThisFrame = false;
+                SuppressGamepadTriggerThisFrame = false;
+                _menuSyntheticLeftClickFrames = 0;
+                _menuSyntheticRightClickFrames = 0;
+                _rStickModHoldLeftDown = false;
+                _rStickModHoldRightDown = false;
+                _gpDragTracking = false;
+                _gpDragMoved = false;
                 _lastRightStickStepMs = 0;
+                PushRumbleToNative(0f, 0f);
             }
 
-            // Clear any stale touch-simulated WASD keys when switching into or out of Gamepad mode
             if (next == ExternalInputMode.Gamepad || prev == ExternalInputMode.Gamepad)
             {
                 if (_physicalKeys.Count == 0)
@@ -354,9 +472,6 @@ namespace SDVMobileControls
 
             ApplyStardewGamepadMode();
 
-            // Leaving Gamepad flips Game1.options.gamepadControls -> false, which causes Stardew
-            // to skip its gamepad stick-release block. Flush movement cleanly so Farmer never
-            // stays stuck with orphaned movementDirections / running-in-place animation!
             if (prev == ExternalInputMode.Gamepad)
             {
                 FlushFarmerMovementAndState(restoreAutoRun: true);
@@ -367,7 +482,7 @@ namespace SDVMobileControls
                 try
                 {
                     Farmer who = Game1.player;
-                    if (who != null && Game1.options != null && !Game1.eventUp &&
+                    if (who != null && Game1.options != null && !IsBlockingNonPlayableEvent() &&
                         who.controller == null && !who.UsingTool && !who.isEating &&
                         !who.IsSitting() && !who.canOnlyWalk && !who.bathingClothes.Value &&
                         who.stamina > 0f && !who.isRidingHorse())
@@ -394,6 +509,14 @@ namespace SDVMobileControls
                         Game1.options.gamepadMode = Options.GamepadModes.ForceOn;
                     if (!Game1.options.gamepadControls)
                         Game1.options.gamepadControls = true;
+                    if (!_ensuredDefaultRumbleOnce)
+                    {
+                        _ensuredDefaultRumbleOnce = true;
+                        Game1.options.rumble = true;
+                    }
+                    // CRITICAL for StardewValley.Rumble.update(): if playerOneIndex < 0, Rumble returns early!
+                    if ((int)Game1.playerOneIndex < 0)
+                        Game1.playerOneIndex = PlayerIndex.One;
                 }
                 else
                 {
@@ -435,6 +558,424 @@ namespace SDVMobileControls
                 gs.DPad);
         }
 
+        public GamePadState GetEffectiveGamePadStateForGame()
+        {
+            GamePadState gs = CurrentGamePadState;
+            bool stripR = IsRightStickSteeringGameplayCursor || IsRightStickMenuCursorActive;
+            bool stripA = SuppressGamepadAButtonThisFrame;
+            bool stripX = SuppressGamepadXButtonThisFrame;
+            bool stripSh = SuppressGamepadShoulderThisFrame;
+            bool stripTr = SuppressGamepadTriggerThisFrame;
+            if (!stripR && !stripA && !stripX && !stripSh && !stripTr)
+                return gs;
+
+            Buttons mask = 0;
+            if (!stripA && gs.Buttons.A == ButtonState.Pressed) mask |= Buttons.A;
+            if (gs.Buttons.B == ButtonState.Pressed) mask |= Buttons.B;
+            if (!stripX && gs.Buttons.X == ButtonState.Pressed) mask |= Buttons.X;
+            if (gs.Buttons.Y == ButtonState.Pressed) mask |= Buttons.Y;
+            if (!stripSh && gs.Buttons.LeftShoulder == ButtonState.Pressed) mask |= Buttons.LeftShoulder;
+            if (!stripSh && gs.Buttons.RightShoulder == ButtonState.Pressed) mask |= Buttons.RightShoulder;
+            if (gs.Buttons.Start == ButtonState.Pressed) mask |= Buttons.Start;
+            if (gs.Buttons.Back == ButtonState.Pressed) mask |= Buttons.Back;
+            if (gs.Buttons.BigButton == ButtonState.Pressed) mask |= Buttons.BigButton;
+            if (gs.Buttons.LeftStick == ButtonState.Pressed) mask |= Buttons.LeftStick;
+            if (gs.Buttons.RightStick == ButtonState.Pressed) mask |= Buttons.RightStick;
+            if (gs.DPad.Up == ButtonState.Pressed) mask |= Buttons.DPadUp;
+            if (gs.DPad.Down == ButtonState.Pressed) mask |= Buttons.DPadDown;
+            if (gs.DPad.Left == ButtonState.Pressed) mask |= Buttons.DPadLeft;
+            if (gs.DPad.Right == ButtonState.Pressed) mask |= Buttons.DPadRight;
+
+            float lt = stripTr ? 0f : gs.Triggers.Left;
+            float rt = stripTr ? 0f : gs.Triggers.Right;
+            if (lt > 0.35f) mask |= Buttons.LeftTrigger;
+            if (rt > 0.35f) mask |= Buttons.RightTrigger;
+
+            Vector2 ls = gs.ThumbSticks.Left;
+            if (ls.Y > 0.5f) mask |= Buttons.LeftThumbstickUp;
+            else if (ls.Y < -0.5f) mask |= Buttons.LeftThumbstickDown;
+            if (ls.X < -0.5f) mask |= Buttons.LeftThumbstickLeft;
+            else if (ls.X > 0.5f) mask |= Buttons.LeftThumbstickRight;
+
+            Vector2 rs = stripR ? Vector2.Zero : gs.ThumbSticks.Right;
+            if (rs.Y > 0.5f) mask |= Buttons.RightThumbstickUp;
+            else if (rs.Y < -0.5f) mask |= Buttons.RightThumbstickDown;
+            if (rs.X < -0.5f) mask |= Buttons.RightThumbstickLeft;
+            else if (rs.X > 0.5f) mask |= Buttons.RightThumbstickRight;
+
+            return new GamePadState(
+                new GamePadThumbSticks(ls, rs),
+                new GamePadTriggers(lt, rt),
+                new GamePadButtons(mask),
+                gs.DPad);
+        }
+
+        public static bool IsPointOnVanillaInventoryControl(GameMenu gm, Point ui)
+        {
+            if (gm == null) return false;
+            try
+            {
+                if (gm.upperRightCloseButton != null && gm.upperRightCloseButton.containsPoint(ui.X, ui.Y))
+                    return true;
+                if (gm.tabs != null)
+                {
+                    for (int i = 0; i < gm.tabs.Count; i++)
+                    {
+                        var t = gm.tabs[i];
+                        if (t != null && t.containsPoint(ui.X, ui.Y))
+                            return true;
+                    }
+                }
+                if (gm.GetCurrentPage() is InventoryPage inv)
+                {
+                    if (inv.inventory?.inventory != null)
+                    {
+                        for (int i = 0; i < inv.inventory.inventory.Count; i++)
+                        {
+                            var cc = inv.inventory.inventory[i];
+                            if (cc != null && cc.containsPoint(ui.X, ui.Y))
+                                return true;
+                        }
+                    }
+                    if (inv.equipmentIcons != null)
+                    {
+                        for (int i = 0; i < inv.equipmentIcons.Count; i++)
+                        {
+                            var eq = inv.equipmentIcons[i];
+                            if (eq != null && eq.containsPoint(ui.X, ui.Y))
+                                return true;
+                        }
+                    }
+                    if (inv.organizeButton != null && inv.organizeButton.containsPoint(ui.X, ui.Y)) return true;
+                    if (inv.trashCan != null && inv.trashCan.containsPoint(ui.X, ui.Y)) return true;
+                    if (inv.junimoNoteIcon != null && inv.junimoNoteIcon.containsPoint(ui.X, ui.Y)) return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private static Point RawToUiPoint(int rawX, int rawY, int bw, int bh)
+        {
+            int uiW = Game1.uiViewport.Width;
+            int uiH = Game1.uiViewport.Height;
+            if (uiW <= 0 || uiH <= 0 || bw <= 0 || bh <= 0)
+                return new Point(rawX, rawY);
+            return new Point((int)((long)rawX * uiW / bw), (int)((long)rawY * uiH / bh));
+        }
+
+        private bool TryReadLiveGameMousePosition(int bw, int bh, out int lx, out int ly)
+        {
+            lx = 0;
+            ly = 0;
+            try
+            {
+                if (Game1.input != null)
+                {
+                    if (InputCurrentMouseField != null &&
+                        InputCurrentMouseField.GetValue(Game1.input) is MouseState baseMs &&
+                        baseMs.X >= 0 && baseMs.X < bw && baseMs.Y >= 0 && baseMs.Y < bh && (baseMs.X != 0 || baseMs.Y != 0))
+                    {
+                        lx = baseMs.X;
+                        ly = baseMs.Y;
+                        return true;
+                    }
+                    MouseState liveMs = Game1.input.GetMouseState();
+                    if (liveMs.X >= 0 && liveMs.X < bw && liveMs.Y >= 0 && liveMs.Y < bh && (liveMs.X != 0 || liveMs.Y != 0))
+                    {
+                        lx = liveMs.X;
+                        ly = liveMs.Y;
+                        return true;
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private static IClickableMenu ResolveTopMenuForSnap(IClickableMenu raw)
+        {
+            if (raw == null) return null;
+            try
+            {
+                if (raw is TitleMenu && TitleMenu.subMenu != null)
+                    raw = TitleMenu.subMenu;
+                int guard = 0;
+                while (raw.GetChildMenu() != null && guard++ < 8)
+                    raw = raw.GetChildMenu();
+                if (raw is GameMenu gm)
+                {
+                    IClickableMenu page = gm.GetCurrentPage();
+                    if (page != null)
+                        return page;
+                }
+            }
+            catch { }
+            return raw;
+        }
+
+        private static bool IsThirdPartyMenu(IClickableMenu menu)
+        {
+            if (menu == null) return false;
+            try { return menu.GetType().Assembly != typeof(Game1).Assembly; }
+            catch { return false; }
+        }
+
+        private static bool IsTextSubscriberActive()
+        {
+            try
+            {
+                var sub = Game1.keyboardDispatcher?.Subscriber;
+                return sub != null && sub.Selected;
+            }
+            catch { return false; }
+        }
+
+        private static void SnapMenuToComponent(IClickableMenu menu, ClickableComponent target)
+        {
+            if (menu == null || target == null) return;
+            try
+            {
+                menu.currentlySnappedComponent = target;
+                menu.snapCursorToCurrentSnappedComponent();
+                Game1.playSound("shiny4");
+            }
+            catch { }
+        }
+
+        private static Item GetHeldItemInMenu(IClickableMenu rawMenu)
+        {
+            if (rawMenu == null) return null;
+            try
+            {
+                if (rawMenu is GameMenu gm)
+                {
+                    if (gm.GetCurrentPage() is InventoryPage)
+                        return Game1.player?.CursorSlotItem;
+                    if (gm.GetCurrentPage() is CraftingPage cp)
+                    {
+                        FieldInfo fHeld = typeof(CraftingPage).GetField("heldItem", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                        return fHeld?.GetValue(cp) as Item;
+                    }
+                }
+                if (rawMenu is MenuWithInventory mwi)
+                    return mwi.heldItem;
+            }
+            catch { }
+            return null;
+        }
+
+        private static bool SupportsHoldADrag(IClickableMenu rawMenu)
+        {
+            if (rawMenu == null) return false;
+            if (rawMenu is GameMenu gm)
+            {
+                var p = gm.GetCurrentPage();
+                return p is InventoryPage || p is CraftingPage;
+            }
+            return rawMenu is ItemGrabMenu || rawMenu is ForgeMenu || rawMenu is TailoringMenu || rawMenu is JunimoNoteMenu;
+        }
+
+        private static bool IsPointOutsideMenuFrame(IClickableMenu menu, Point ui)
+        {
+            if (menu == null) return false;
+            if (menu is GameMenu gm)
+            {
+                for (int i = 0; i < (gm.tabs?.Count ?? 0); i++)
+                {
+                    if (gm.tabs[i] != null && gm.tabs[i].containsPoint(ui.X, ui.Y))
+                        return false;
+                }
+                if (gm.upperRightCloseButton != null && gm.upperRightCloseButton.containsPoint(ui.X, ui.Y))
+                    return false;
+            }
+            return ui.X < menu.xPositionOnScreen - 24 ||
+                   ui.X > menu.xPositionOnScreen + menu.width + 24 ||
+                   ui.Y < menu.yPositionOnScreen - 24 ||
+                   ui.Y > menu.yPositionOnScreen + menu.height + 24;
+        }
+
+        private static bool TryDropHeldItemFromMenu(IClickableMenu rawMenu, bool singleItemOnly)
+        {
+            if (rawMenu == null || Game1.player == null)
+                return false;
+            try
+            {
+                if (rawMenu is GameMenu gm && gm.GetCurrentPage() is InventoryPage)
+                {
+                    Item cur = Game1.player.CursorSlotItem;
+                    if (cur == null || !cur.canBeDropped())
+                        return false;
+                    Item toDrop;
+                    if (singleItemOnly && cur.Stack > 1)
+                    {
+                        toDrop = cur.getOne();
+                        cur.Stack -= 1;
+                    }
+                    else
+                    {
+                        toDrop = cur;
+                        Game1.player.CursorSlotItem = null;
+                    }
+                    Game1.createItemDebris(toDrop, Game1.player.getStandingPosition(), Game1.player.FacingDirection);
+                    Game1.playSound("throwDownITem");
+                    return true;
+                }
+                if (rawMenu is MenuWithInventory mwi && mwi.heldItem != null && mwi.heldItem.canBeDropped() && mwi.AllowExitWithHeldItem)
+                {
+                    if (singleItemOnly && mwi.heldItem.Stack > 1)
+                    {
+                        Item one = mwi.heldItem.getOne();
+                        mwi.heldItem.Stack -= 1;
+                        Game1.createItemDebris(one, Game1.player.getStandingPosition(), Game1.player.FacingDirection);
+                    }
+                    else
+                    {
+                        mwi.DropHeldItem();
+                    }
+                    Game1.playSound("throwDownITem");
+                    return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private void HandleMenuFrameSwitching(IClickableMenu rawMenu, bool lbEdge, bool rbEdge, bool ltEdge, bool rtEdge)
+        {
+            if (rawMenu == null || IsTextSubscriberActive())
+                return;
+            if (!lbEdge && !rbEdge && !ltEdge && !rtEdge)
+                return;
+
+            try
+            {
+                // 1. GameMenu: LB/RB switches top tabs when readyToClose(), OR cycles Backpack <-> Equipment <-> Side buttons when holding an item!
+                if (rawMenu is GameMenu gm && gm.GetChildMenu() == null)
+                {
+                    IClickableMenu curPage = gm.GetCurrentPage();
+                    int dir = (rbEdge || rtEdge) ? 1 : -1;
+
+                    if ((lbEdge || rbEdge) && curPage != null && curPage.readyToClose())
+                    {
+                        SuppressGamepadShoulderThisFrame = true;
+                        IsRightStickMenuCursorActive = false;
+                        if (gm.currentTab == GameMenu.mapTab)
+                        {
+                            int nextFromMap = dir > 0 ? (GameMenu.mapTab + 1) : (GameMenu.mapTab - 1);
+                            if (nextFromMap >= 0 && nextFromMap <= GameMenu.numberOfTabs)
+                            {
+                                Game1.activeClickableMenu = new GameMenu(nextFromMap, -1, playOpeningSound: true);
+                                Game1.playSound("smallSelect");
+                            }
+                            return;
+                        }
+                        int targetTab = gm.currentTab + dir;
+                        if (targetTab >= 0 && targetTab <= GameMenu.numberOfTabs)
+                        {
+                            gm.changeTab(targetTab, playSound: true);
+                        }
+                        return;
+                    }
+
+                    // Inside InventoryPage while holding an item on cursor (tabs locked): cycle Backpack <-> Equipment <-> Trash/Organize!
+                    if (curPage is InventoryPage inv && Game1.player?.CursorSlotItem != null)
+                    {
+                        if (lbEdge || rbEdge) SuppressGamepadShoulderThisFrame = true;
+                        if (ltEdge || rtEdge) SuppressGamepadTriggerThisFrame = true;
+                        IsRightStickMenuCursorActive = false;
+
+                        ClickableComponent curSnap = inv.currentlySnappedComponent;
+                        int section = 0; // 0=Backpack, 1=Equipment, 2=Organize/Trash
+                        if (curSnap != null)
+                        {
+                            if (inv.equipmentIcons != null && inv.equipmentIcons.Contains(curSnap))
+                                section = 1;
+                            else if (curSnap == inv.organizeButton || curSnap == inv.trashCan || curSnap == inv.junimoNoteIcon)
+                                section = 2;
+                        }
+                        int nextSec = (section + dir + 3) % 3;
+                        ClickableComponent dst = null;
+                        if (nextSec == 0 && inv.inventory?.inventory != null && inv.inventory.inventory.Count > 0)
+                            dst = inv.inventory.inventory[0];
+                        else if (nextSec == 1 && inv.equipmentIcons != null && inv.equipmentIcons.Count > 0)
+                            dst = inv.equipmentIcons[0];
+                        else
+                            dst = (ClickableComponent)inv.trashCan ?? inv.organizeButton ?? (inv.inventory?.inventory?.Count > 0 ? inv.inventory.inventory[0] : null);
+                        SnapMenuToComponent(inv, dst);
+                        return;
+                    }
+                }
+
+                // 2. ItemGrabMenu (Chest / Fridge / Junimo Chest):
+                //    - LT / RT toggles directly between Chest slots <-> Player Backpack slots (preserving column!)
+                //    - LB / RB cycles cleanly between Chest <-> Backpack <-> Side Buttons (Fill Stacks / Organize / Color / Trash)
+                if (rawMenu is ItemGrabMenu igm && igm.GetChildMenu() == null && !igm.shippingBin && igm.ItemsToGrabMenu?.inventory != null && igm.inventory?.inventory != null)
+                {
+                    var chestSlots = igm.ItemsToGrabMenu.inventory;
+                    var bagSlots = igm.inventory.inventory;
+                    if (chestSlots.Count > 0 && bagSlots.Count > 0)
+                    {
+                        ClickableComponent cur = igm.currentlySnappedComponent;
+                        int curFrame = 0; // 0=Chest, 1=Backpack, 2=SideButtons
+                        int curCol = 0;
+                        if (cur != null)
+                        {
+                            int cIdx = chestSlots.IndexOf(cur);
+                            int bIdx = bagSlots.IndexOf(cur);
+                            if (cIdx >= 0) { curFrame = 0; curCol = cIdx % 12; }
+                            else if (bIdx >= 0) { curFrame = 1; curCol = bIdx % 12; }
+                            else curFrame = 2;
+                        }
+
+                        if (ltEdge || rtEdge)
+                        {
+                            SuppressGamepadTriggerThisFrame = true;
+                            IsRightStickMenuCursorActive = false;
+                            var targetList = (curFrame == 0) ? bagSlots : chestSlots;
+                            int dstIdx = Math.Clamp(curCol, 0, targetList.Count - 1);
+                            SnapMenuToComponent(igm, targetList[dstIdx]);
+                            return;
+                        }
+
+                        if (lbEdge || rbEdge)
+                        {
+                            SuppressGamepadShoulderThisFrame = true;
+                            IsRightStickMenuCursorActive = false;
+                            ClickableComponent sideBtn = (ClickableComponent)igm.fillStacksButton
+                                ?? igm.organizeButton
+                                ?? igm.colorPickerToggleButton
+                                ?? igm.trashCan;
+                            int frameCount = sideBtn != null ? 3 : 2;
+                            int dir = rbEdge ? 1 : -1;
+                            int nextFrame = (curFrame + dir + frameCount) % frameCount;
+                            ClickableComponent dst = nextFrame == 0
+                                ? chestSlots[Math.Clamp(curCol, 0, chestSlots.Count - 1)]
+                                : nextFrame == 1
+                                    ? bagSlots[Math.Clamp(curCol, 0, bagSlots.Count - 1)]
+                                    : sideBtn;
+                            SnapMenuToComponent(igm, dst);
+                            return;
+                        }
+                    }
+                }
+
+                // 3. ShopMenu: LB/RB or LT/RT toggles cleanly between Shop Goods list <-> Player Inventory!
+                if (rawMenu is ShopMenu sm && sm.GetChildMenu() == null && sm.forSaleButtons != null && sm.forSaleButtons.Count > 0 && sm.inventory?.inventory != null && sm.inventory.inventory.Count > 0)
+                {
+                    if (lbEdge || rbEdge) SuppressGamepadShoulderThisFrame = true;
+                    if (ltEdge || rtEdge) SuppressGamepadTriggerThisFrame = true;
+                    IsRightStickMenuCursorActive = false;
+
+                    ClickableComponent cur = sm.currentlySnappedComponent;
+                    bool inBag = cur != null && sm.inventory.inventory.Contains(cur);
+                    ClickableComponent dst = inBag ? (ClickableComponent)sm.forSaleButtons[0] : sm.inventory.inventory[0];
+                    SnapMenuToComponent(sm, dst);
+                }
+            }
+            catch { }
+        }
+
         private void StepGamepadRightStickCursor(float rx, float ry, int bw, int bh)
         {
             EnsureValidLocalMultiplayerWindow(bw, bh);
@@ -447,12 +988,129 @@ namespace SDVMobileControls
                 _gamepadCursorInit = true;
             }
 
-            // During free gameplay (no modal menu / minigame / emote wheel), drive smooth analog
-            // right-stick cursor movement directly in backbuffer coordinates so players can freely
-            // glide the cursor over UI Info Suite 2 icons and world tiles without pressing anything else.
-            bool canFreeCursor = Game1.activeClickableMenu == null && Game1.currentMinigame == null && Game1.emoteMenu == null;
+            SuppressGamepadAButtonThisFrame = false;
+            SuppressGamepadXButtonThisFrame = false;
+            SuppressGamepadShoulderThisFrame = false;
+            SuppressGamepadTriggerThisFrame = false;
+
+            IClickableMenu rawMenu = Game1.activeClickableMenu;
+            bool inMenu = rawMenu != null;
+            bool isFishingBar = rawMenu is BobberBar;
+            IClickableMenu snapTargetMenu = ResolveTopMenuForSnap(rawMenu);
+            bool isThirdPartyMenu = IsThirdPartyMenu(snapTargetMenu);
+
+            if (!inMenu || isFishingBar)
+            {
+                IsRightStickMenuCursorActive = false;
+                _menuSyntheticLeftClickFrames = 0;
+                _menuSyntheticRightClickFrames = 0;
+                _rStickModHoldLeftDown = false;
+                _rStickModHoldRightDown = false;
+                _gpDragTracking = false;
+                _gpDragMoved = false;
+                _lastSnappedMenuRef = null;
+                _lastGameMenuTab = -1;
+            }
+            else
+            {
+                // Auto-snap newly opened menus / switched GameMenu tabs so SnappyMenus cursor is immediately ready!
+                int curGmTab = (rawMenu is GameMenu gmChk) ? gmChk.currentTab : -1;
+                IClickableMenu prevMenu = null;
+                _lastSnappedMenuRef?.TryGetTarget(out prevMenu);
+                if (!ReferenceEquals(prevMenu, snapTargetMenu) || curGmTab != _lastGameMenuTab)
+                {
+                    _lastSnappedMenuRef = new WeakReference<IClickableMenu>(snapTargetMenu);
+                    _lastGameMenuTab = curGmTab;
+                    _gpDragTracking = false;
+                    _gpDragMoved = false;
+                    if (!IsRightStickMenuCursorActive && !isThirdPartyMenu && snapTargetMenu != null)
+                    {
+                        try
+                        {
+                            if (snapTargetMenu.allClickableComponents == null)
+                                snapTargetMenu.populateClickableComponentList();
+                            if (snapTargetMenu.currentlySnappedComponent == null)
+                                snapTargetMenu.snapToDefaultClickableComponent();
+                        }
+                        catch { }
+                    }
+                }
+
+                // If user navigates with Left Stick, D-Pad, bumpers, triggers, or B/Y/Start,
+                // immediately hand cursor control right back to Stardew's native SnappyMenus!
+                Vector2 ls = CurrentGamePadState.ThumbSticks.Left;
+                var btns = CurrentGamePadState.Buttons;
+                bool navUsed = (ls.X * ls.X + ls.Y * ls.Y > 0.09f) ||
+                    CurrentGamePadState.DPad.Up == ButtonState.Pressed ||
+                    CurrentGamePadState.DPad.Down == ButtonState.Pressed ||
+                    CurrentGamePadState.DPad.Left == ButtonState.Pressed ||
+                    CurrentGamePadState.DPad.Right == ButtonState.Pressed ||
+                    btns.LeftShoulder == ButtonState.Pressed ||
+                    btns.RightShoulder == ButtonState.Pressed ||
+                    CurrentGamePadState.Triggers.Left > 0.35f ||
+                    CurrentGamePadState.Triggers.Right > 0.35f ||
+                    btns.B == ButtonState.Pressed ||
+                    btns.Y == ButtonState.Pressed ||
+                    btns.Start == ButtonState.Pressed;
+                if (navUsed && !isThirdPartyMenu)
+                {
+                    IsRightStickMenuCursorActive = false;
+                    _menuSyntheticLeftClickFrames = 0;
+                    _menuSyntheticRightClickFrames = 0;
+                    _rStickModHoldLeftDown = false;
+                    _rStickModHoldRightDown = false;
+                }
+            }
+
+            // Edge detection for A, X, R3, LB, RB, LT, RT
+            bool aNow = CurrentGamePadState.Buttons.A == ButtonState.Pressed;
+            bool xNow = CurrentGamePadState.Buttons.X == ButtonState.Pressed;
+            bool r3Now = CurrentGamePadState.Buttons.RightStick == ButtonState.Pressed;
+            bool lbNow = CurrentGamePadState.Buttons.LeftShoulder == ButtonState.Pressed;
+            bool rbNow = CurrentGamePadState.Buttons.RightShoulder == ButtonState.Pressed;
+            bool ltNow = CurrentGamePadState.Triggers.Left > 0.45f;
+            bool rtNow = CurrentGamePadState.Triggers.Right > 0.45f;
+
+            bool aRising = aNow && !_prevGamepadAButtonDown;
+            bool aFalling = !aNow && _prevGamepadAButtonDown;
+            bool xRising = xNow && !_prevGamepadXButtonDown;
+            bool r3Rising = r3Now && !_prevGamepadR3ButtonDown;
+            bool lbRising = lbNow && !_prevGamepadLBDown;
+            bool rbRising = rbNow && !_prevGamepadRBDown;
+            bool ltRising = ltNow && !_prevGamepadLTDown;
+            bool rtRising = rtNow && !_prevGamepadRTDown;
+
+            _prevGamepadAButtonDown = aNow;
+            _prevGamepadXButtonDown = xNow;
+            _prevGamepadR3ButtonDown = r3Now;
+            _prevGamepadLBDown = lbNow;
+            _prevGamepadRBDown = rbNow;
+            _prevGamepadLTDown = ltNow;
+            _prevGamepadRTDown = rtNow;
+
+            // Frame & Tab switching (GameMenu LB/RB, ItemGrabMenu Chest <-> Backpack <-> Side Buttons, ShopMenu Goods <-> Bag)
+            if (inMenu && !isFishingBar && (lbRising || rbRising || ltRising || rtRising))
+            {
+                HandleMenuFrameSwitching(rawMenu, lbRising, rbRising, ltRising, rtRising);
+            }
+
+            // Adopt Stardew's live snapped cursor from Game1.input._currentMouseState whenever SnappyMenus owns the menu
+            if (inMenu && !IsRightStickMenuCursorActive && _menuSyntheticLeftClickFrames == 0 && _menuSyntheticRightClickFrames == 0 && !_rStickModHoldLeftDown && !_rStickModHoldRightDown)
+            {
+                if (TryReadLiveGameMousePosition(bw, bh, out int liveX, out int liveY))
+                {
+                    _gamepadCursorX = liveX;
+                    _gamepadCursorY = liveY;
+                    _gamepadCursorXf = liveX;
+                    _gamepadCursorYf = liveY;
+                }
+            }
+
+            // Universal smooth analog Right-Stick cursor in BOTH free gameplay AND ALL non-BobberBar menus!
+            bool canFreeCursor = (!inMenu && Game1.currentMinigame == null && Game1.emoteMenu == null) || (inMenu && !isFishingBar);
             float magSq = rx * rx + ry * ry;
-            if (canFreeCursor && magSq > 0.0001f)
+            float entryThresholdSq = (inMenu && !IsRightStickMenuCursorActive) ? 0.0625f : 0.0001f;
+            if (canFreeCursor && magSq > entryThresholdSq)
             {
                 long nowMs = Environment.TickCount64;
                 float dt = (_lastRightStickStepMs > 0) ? (nowMs - _lastRightStickStepMs) / 1000f : (1f / 60f);
@@ -460,7 +1118,6 @@ namespace SDVMobileControls
                 dt = Math.Clamp(dt, 0.004f, 0.05f);
                 _lastRightStickStepMs = nowMs;
 
-                // If cursor faded away and somehow sat at (0,0) before user touched it, start smoothly near center
                 if (Game1.timerUntilMouseFade <= 0 && _gamepadCursorX == 0 && _gamepadCursorY == 0)
                 {
                     _gamepadCursorXf = bw * 0.5f;
@@ -471,7 +1128,6 @@ namespace SDVMobileControls
                 float clampedMag = Math.Min(1f, mag);
                 float dx = rx / mag;
                 float dy = ry / mag;
-                // Hybrid linear + quadratic response: fine precision for small HUD icons, brisk travel at full tilt
                 float curved = 0.35f * clampedMag + 0.65f * clampedMag * clampedMag;
                 float speedPxPerSec = Math.Max(680f, bh * 1.15f);
 
@@ -479,14 +1135,16 @@ namespace SDVMobileControls
                 _gamepadCursorYf = Math.Clamp(_gamepadCursorYf - dy * curved * speedPxPerSec * dt, 0f, Math.Max(0, bh - 1));
                 _gamepadCursorX = (int)Math.Round(_gamepadCursorXf);
                 _gamepadCursorY = (int)Math.Round(_gamepadCursorYf);
-                IsRightStickSteeringGameplayCursor = true;
+                IsRightStickSteeringGameplayCursor = !inMenu;
+                if (inMenu)
+                    IsRightStickMenuCursorActive = true;
 
                 try
                 {
                     Game1.timerUntilMouseFade = 4000;
                     Game1.mouseCursorTransparency = 1f;
                     Game1.wasMouseVisibleThisFrame = true;
-                    Game1.lastCursorMotionWasMouse = false;
+                    Game1.lastCursorMotionWasMouse = inMenu && isThirdPartyMenu;
                     Game1.lastMousePositionBeforeFade = new Point(_gamepadCursorX, _gamepadCursorY);
                     Game1.input?.SetMousePosition(_gamepadCursorX, _gamepadCursorY);
                 }
@@ -502,9 +1160,275 @@ namespace SDVMobileControls
                 _gamepadCursorYf = _gamepadCursorY;
             }
 
+            if (inMenu && !isFishingBar)
+            {
+                Point uiPt = RawToUiPoint(_gamepadCursorX, _gamepadCursorY, bw, bh);
+                ClickableComponent curSnap = snapTargetMenu?.currentlySnappedComponent;
+                int curSnapId = curSnap?.myID ?? int.MinValue;
+
+                // A) R-Stick free cursor clicks on 3rd-party mod menus (GMCM, CJB, Chests Anywhere, UIIS2 popups)
+                //    OR non-vanilla areas inside GameMenu (UI Info Suite 2 Calendar & Help Wanted Quest icons!)
+                GameMenu gmMod = rawMenu as GameMenu;
+                bool isNonVanillaGameMenuSpot = gmMod != null && IsRightStickMenuCursorActive && !IsPointOnVanillaInventoryControl(gmMod, uiPt) && GetHeldItemInMenu(rawMenu) == null;
+                if (isThirdPartyMenu || isNonVanillaGameMenuSpot)
+                {
+                    if (IsRightStickMenuCursorActive)
+                    {
+                        try
+                        {
+                            Game1.timerUntilMouseFade = 4000;
+                            Game1.mouseCursorTransparency = 1f;
+                            Game1.wasMouseVisibleThisFrame = true;
+                        }
+                        catch { }
+                    }
+
+                    if (isThirdPartyMenu)
+                    {
+                        // Hold-capable real mouse button synthesis so GMCM sliders, checkboxes, dropdowns & scrollbars work!
+                        if (aRising || r3Rising)
+                        {
+                            _rStickModHoldLeftDown = true;
+                            try
+                            {
+                                Game1.lastCursorMotionWasMouse = true;
+                                Game1.input?.SetMousePosition(_gamepadCursorX, _gamepadCursorY);
+                            }
+                            catch { }
+                        }
+                        if (!aNow && !r3Now)
+                            _rStickModHoldLeftDown = false;
+                        if (_rStickModHoldLeftDown)
+                            SuppressGamepadAButtonThisFrame = true;
+
+                        if (xRising)
+                            _rStickModHoldRightDown = true;
+                        if (!xNow)
+                            _rStickModHoldRightDown = false;
+                        if (_rStickModHoldRightDown)
+                            SuppressGamepadXButtonThisFrame = true;
+                    }
+                    else if (r3Rising || aRising)
+                    {
+                        _menuSyntheticLeftClickFrames = 2;
+                        SuppressGamepadAButtonThisFrame = true;
+                        try
+                        {
+                            Game1.lastCursorMotionWasMouse = true;
+                            Game1.input?.SetMousePosition(_gamepadCursorX, _gamepadCursorY);
+                        }
+                        catch { }
+                    }
+                }
+                else
+                {
+                    _rStickModHoldLeftDown = false;
+                    _rStickModHoldRightDown = false;
+
+                    // B) Item Drop Fix (-99998 region_dropItem or R-stick cursor outside menu frame on scaled iPhone UI!)
+                    bool onDropSpot = (!IsRightStickMenuCursorActive && (curSnapId == -99998 || (rawMenu is MenuWithInventory mwiDrop && curSnap != null && curSnap == mwiDrop.dropItemInvisibleButton))) ||
+                                      (IsRightStickMenuCursorActive && IsPointOutsideMenuFrame(rawMenu, uiPt));
+                    if (onDropSpot && (aRising || xRising) && GetHeldItemInMenu(rawMenu) != null)
+                    {
+                        if (TryDropHeldItemFromMenu(rawMenu, singleItemOnly: xRising && !aRising))
+                        {
+                            if (aRising) SuppressGamepadAButtonThisFrame = true;
+                            if (xRising) SuppressGamepadXButtonThisFrame = true;
+                            _gpDragTracking = false;
+                            _gpDragMoved = false;
+                        }
+                    }
+
+                    // C) Hold-A + Move (R-Stick / D-Pad / L-Stick) + Release-A single-motion Drag-and-Drop!
+                    //    Coexists 100% with classic Console 2-press A pickup & swap!
+                    if (SupportsHoldADrag(rawMenu))
+                    {
+                        if (aRising && !SuppressGamepadAButtonThisFrame)
+                        {
+                            _gpDragTracking = true;
+                            _gpDragMoved = false;
+                            _gpDragStartUi = uiPt;
+                            _gpDragStartSnapId = IsRightStickMenuCursorActive ? int.MinValue : curSnapId;
+                        }
+                        else if (aNow && _gpDragTracking)
+                        {
+                            int dxUi = uiPt.X - _gpDragStartUi.X;
+                            int dyUi = uiPt.Y - _gpDragStartUi.Y;
+                            bool movedBySnap = !IsRightStickMenuCursorActive && _gpDragStartSnapId != int.MinValue && curSnapId != int.MinValue && curSnapId != _gpDragStartSnapId;
+                            bool movedByDist = (dxUi * dxUi + dyUi * dyUi) > 484; // >22 UI px
+                            if (movedBySnap || movedByDist)
+                                _gpDragMoved = true;
+                            if (_gpDragMoved)
+                            {
+                                try { rawMenu.leftClickHeld(uiPt.X, uiPt.Y); } catch { }
+                            }
+                        }
+                        else if (aFalling && _gpDragTracking)
+                        {
+                            bool didMove = _gpDragMoved;
+                            _gpDragTracking = false;
+                            _gpDragMoved = false;
+                            if (didMove && GetHeldItemInMenu(rawMenu) != null)
+                            {
+                                if (onDropSpot)
+                                {
+                                    TryDropHeldItemFromMenu(rawMenu, singleItemOnly: false);
+                                }
+                                else
+                                {
+                                    try
+                                    {
+                                        rawMenu.receiveLeftClick(uiPt.X, uiPt.Y, playSound: true);
+                                        rawMenu.releaseLeftClick(uiPt.X, uiPt.Y);
+                                    }
+                                    catch { }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            ButtonState synthLeft = _rStickModHoldLeftDown ? ButtonState.Pressed : ButtonState.Released;
+            if (_menuSyntheticLeftClickFrames > 0)
+            {
+                _menuSyntheticLeftClickFrames--;
+                synthLeft = ButtonState.Pressed;
+            }
+            ButtonState synthRight = _rStickModHoldRightDown ? ButtonState.Pressed : ButtonState.Released;
+            if (_menuSyntheticRightClickFrames > 0)
+            {
+                _menuSyntheticRightClickFrames--;
+                synthRight = ButtonState.Pressed;
+            }
+
             CurrentMouseState = new MouseState(
                 _gamepadCursorX, _gamepadCursorY, _scrollWheelValue,
-                ButtonState.Released, ButtonState.Released, ButtonState.Released, ButtonState.Released, ButtonState.Released);
+                synthLeft, ButtonState.Released, synthRight, ButtonState.Released, ButtonState.Released);
+        }
+
+        private static void EnsureRumbleFieldsResolved()
+        {
+            if (_rumbleFieldsResolved) return;
+            _rumbleFieldsResolved = true;
+            try
+            {
+                const BindingFlags stat = BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public;
+                Type rt = typeof(Rumble);
+                _fRumbleIsRumbling = rt.GetField("isRumbling", stat);
+                _fRumbleStrength = rt.GetField("rumbleStrength", stat);
+                _fRumbleTimerCurrent = rt.GetField("rumbleTimerCurrent", stat);
+                _fRumbleTimerMax = rt.GetField("rumbleTimerMax", stat);
+                _fRumbleFade = rt.GetField("fade", stat);
+                _fRumbleDuringFade = rt.GetField("rumbleDuringFade", stat);
+            }
+            catch { }
+        }
+
+        public void SetRumbleDirect(float leftMotor, float rightMotor)
+        {
+            if ((!IsPhysicalGamepadActive && !_gpConnected) || IsSuppressed || Game1.options == null || !Game1.options.rumble || Game1.paused)
+            {
+                PushRumbleToNative(0f, 0f);
+                return;
+            }
+            ShapeAndPushConsoleRumble(leftMotor, rightMotor);
+        }
+
+        public void UpdateControllerRumble()
+        {
+            if (_nativeSetRumble == null)
+                return;
+
+            if ((!IsPhysicalGamepadActive && !_gpConnected) || IsSuppressed || Game1.options == null || !Game1.options.rumble || Game1.paused)
+            {
+                PushRumbleToNative(0f, 0f);
+                return;
+            }
+
+            EnsureRumbleFieldsResolved();
+            if (_fRumbleIsRumbling == null)
+                return;
+
+            try
+            {
+                bool active = (bool)_fRumbleIsRumbling.GetValue(null);
+                float strength = 0f;
+                if (active)
+                {
+                    float tCur = _fRumbleTimerCurrent != null ? (float)_fRumbleTimerCurrent.GetValue(null) : 0f;
+                    float tMax = _fRumbleTimerMax != null ? (float)_fRumbleTimerMax.GetValue(null) : 0f;
+                    if (tCur <= tMax)
+                    {
+                        bool fading = _fRumbleFade != null && (bool)_fRumbleFade.GetValue(null);
+                        if (fading)
+                        {
+                            float rawFade = _fRumbleDuringFade != null ? (float)_fRumbleDuringFade.GetValue(null) : 0f;
+                            strength = Math.Clamp(rawFade * 1.45f, 0f, 1f);
+                        }
+                        else
+                        {
+                            strength = _fRumbleStrength != null ? (float)_fRumbleStrength.GetValue(null) : 0f;
+                        }
+                    }
+                }
+                strength = Math.Clamp(strength, 0f, 1f);
+                ShapeAndPushConsoleRumble(strength, strength);
+            }
+            catch
+            {
+                PushRumbleToNative(0f, 0f);
+            }
+        }
+
+        private void ShapeAndPushConsoleRumble(float rawLeft, float rawRight)
+        {
+            float l = Math.Clamp(rawLeft, 0f, 1f);
+            float r = Math.Clamp(rawRight, 0f, 1f);
+            float peak = Math.Max(l, r);
+            if (peak <= 0.005f)
+            {
+                PushRumbleToNative(0f, 0f);
+                return;
+            }
+
+            float outL, outR;
+            if (peak >= 0.60f)
+            {
+                outL = l;
+                outR = r * 0.85f;
+            }
+            else if (peak >= 0.25f)
+            {
+                outL = l;
+                outR = r * 0.92f;
+            }
+            else
+            {
+                outL = l * 0.72f;
+                outR = Math.Clamp(Math.Max(r * 1.28f, 0.15f), 0f, 1f);
+            }
+            PushRumbleToNative(outL, outR);
+        }
+
+        private void PushRumbleToNative(float left, float right)
+        {
+            if (_nativeSetRumble == null)
+                return;
+            left = Math.Clamp(left, 0f, 1f);
+            right = Math.Clamp(right, 0f, 1f);
+            bool activeNow = left > 0.005f || right > 0.005f;
+            bool activePrev = _lastSentRumbleL > 0.005f || _lastSentRumbleR > 0.005f;
+            if (!activeNow && !activePrev)
+                return;
+            if (activeNow == activePrev &&
+                Math.Abs(left - _lastSentRumbleL) < 0.015f &&
+                Math.Abs(right - _lastSentRumbleR) < 0.015f)
+                return;
+
+            _lastSentRumbleL = left;
+            _lastSentRumbleR = right;
+            try { _nativeSetRumble(left, right); } catch { }
         }
 
         public void OnGameSetMousePositionRaw(int x, int y)
@@ -535,19 +1459,18 @@ namespace SDVMobileControls
             if (directTouchCount < 0)
             {
                 directTouchCount = 0;
-                if (_nativeDirectTouches != null)
+                if (!PureGamepadMode && _nativeDirectTouches != null)
                 {
                     try { directTouchCount = _nativeDirectTouches(); } catch { }
                 }
             }
             int tick = Game1.ticks;
             long nowMs = Environment.TickCount64;
-            if (tick == _lastPollTick && nowMs - _lastPollMs < 6)
+            if (tick == _lastPollTick && nowMs - _lastPollMs < 3)
             {
                 if (directTouchCount > 0) NotifyDirectTouch(directTouchCount);
-                // Always restore Game1.options.gamepadControls even on fast frames because
-                // SDViOSTouchControls.ModEntry.OnUpdateTicking forces it false every tick!
                 ApplyStardewGamepadMode();
+                SyncDirectZeroHarmonyInputStates();
                 return;
             }
             _lastPollTick = tick;
@@ -618,7 +1541,8 @@ namespace SDVMobileControls
 
                 CurrentGamePadState = BuildGamePadState(mask, lx, ly, rx, ry, lt, rt);
 
-                if (directTouchCount == 0 && (gpActiveEdge || mask != 0 || lx * lx + ly * ly > 0.04f || rx * rx + ry * ry > 0.04f || lt > 0.2f || rt > 0.2f))
+                if ((PureGamepadMode || directTouchCount == 0) &&
+                    (PureGamepadMode || gpActiveEdge || mask != 0 || lx * lx + ly * ly > 0.04f || rx * rx + ry * ry > 0.04f || lt > 0.2f || rt > 0.2f))
                 {
                     SetActiveMode(ExternalInputMode.Gamepad);
                 }
@@ -626,7 +1550,7 @@ namespace SDVMobileControls
             else
             {
                 CurrentGamePadState = default;
-                if (ActiveMode == ExternalInputMode.Gamepad && !_gpConnected)
+                if (!PureGamepadMode && ActiveMode == ExternalInputMode.Gamepad && !_gpConnected)
                     SetActiveMode(ExternalInputMode.Touch);
             }
 
@@ -642,7 +1566,7 @@ namespace SDVMobileControls
                         _physicalKeys.Add((Keys)kCode);
                 }
 
-                if (directTouchCount == 0 && (kbActiveEdge || _physicalKeys.Count > 0))
+                if (!PureGamepadMode && directTouchCount == 0 && (kbActiveEdge || _physicalKeys.Count > 0))
                 {
                     SetActiveMode(ExternalInputMode.KeyboardMouse);
                 }
@@ -670,7 +1594,7 @@ namespace SDVMobileControls
                 float ny = Math.Clamp(ReadFloat(_snapBuf, OffMouseNormY), 0f, 1f);
                 uint mMask = unchecked((uint)Marshal.ReadInt32(_snapBuf, OffMouseButtonsMask));
 
-                if (directTouchCount == 0 && (mouseActiveEdge || mMask != 0 || scrollDelta != 0))
+                if ((PureGamepadMode || directTouchCount == 0) && (mouseActiveEdge || mMask != 0 || scrollDelta != 0))
                 {
                     _mouseEverUsed = true;
                     SetActiveMode(ExternalInputMode.KeyboardMouse);
@@ -691,7 +1615,7 @@ namespace SDVMobileControls
             }
             else if (ActiveMode == ExternalInputMode.KeyboardMouse && !_kbConnected && !_mouseConnected)
             {
-                SetActiveMode(ExternalInputMode.Touch);
+                SetActiveMode(PureGamepadMode ? ExternalInputMode.Gamepad : ExternalInputMode.Touch);
             }
 
             if (IsPhysicalGamepadActive)
@@ -702,6 +1626,7 @@ namespace SDVMobileControls
             else
             {
                 IsRightStickSteeringGameplayCursor = false;
+                IsRightStickMenuCursorActive = false;
                 _lastRightStickStepMs = 0;
             }
 
@@ -709,20 +1634,38 @@ namespace SDVMobileControls
             SyncDirectZeroHarmonyInputStates();
         }
 
-        /// <summary>
-        /// Zero-Harmony direct state push into Game1.input and MonoGame Mouse.PrimaryWindow so physical
-        /// Xbox/PS/MFi controllers, R-stick cursor, and external mice work 100% even on 0% JIT where
-        /// 0Harmony.dll is a no-op stub.
-        /// </summary>
+        private static void EnsureSInputFieldsResolved(InputState inp)
+        {
+            if (_sInputFieldsResolved || inp == null) return;
+            _sInputFieldsResolved = true;
+            try
+            {
+                const BindingFlags instAny = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+                Type t = inp.GetType();
+                _sInputControllerField = t.GetField("<ControllerState>k__BackingField", instAny);
+                _sInputMouseField = t.GetField("<MouseState>k__BackingField", instAny);
+            }
+            catch { }
+        }
+
         public void SyncDirectZeroHarmonyInputStates()
         {
             try
             {
-                if (ShouldOverrideMouse)
+                InputState inp = Game1.input;
+                if (inp != null)
+                    EnsureSInputFieldsResolved(inp);
+
+                if (ShouldPushMouseStateNow)
                 {
                     MouseState ms = CurrentMouseState;
-                    if (Game1.input != null && InputCurrentMouseField != null)
-                        InputCurrentMouseField.SetValue(Game1.input, ms);
+                    if (inp != null)
+                    {
+                        if (InputCurrentMouseField != null)
+                            InputCurrentMouseField.SetValue(inp, ms);
+                        if (_sInputMouseField != null)
+                            _sInputMouseField.SetValue(inp, ms);
+                    }
                     if (MousePrimaryWindowField != null)
                     {
                         object win = MousePrimaryWindowField.GetValue(null);
@@ -743,12 +1686,36 @@ namespace SDVMobileControls
                         }
                     }
                 }
-                if (IsPhysicalGamepadActive && Game1.input != null && InputCurrentGamepadField != null)
+                else if (IsPhysicalGamepadActive && inp != null && Game1.activeClickableMenu != null &&
+                         InputCurrentMouseField != null && _sInputMouseField != null)
                 {
-                    GamePadState gps = IsRightStickSteeringGameplayCursor
-                        ? StripRightStick(CurrentGamePadState)
-                        : CurrentGamePadState;
-                    InputCurrentGamepadField.SetValue(Game1.input, gps);
+                    // Same-frame SnappyMenus cursor sync on 0% JIT:
+                    // Game1.setMousePositionRaw(x, y) updates InputState._currentMouseState, NOT SInputState.<MouseState>k__BackingField!
+                    // Mirroring _currentMouseState -> _sInputMouseField + Game1.oldMouseState immediately keeps hover & click 100% aligned!
+                    if (InputCurrentMouseField.GetValue(inp) is MouseState baseMs &&
+                        _sInputMouseField.GetValue(inp) is MouseState smapiMs &&
+                        (baseMs.X != smapiMs.X || baseMs.Y != smapiMs.Y))
+                    {
+                        _sInputMouseField.SetValue(inp, baseMs);
+                        MouseState prevOld = Game1.oldMouseState;
+                        Game1.oldMouseState = new MouseState(
+                            baseMs.X, baseMs.Y, prevOld.ScrollWheelValue,
+                            prevOld.LeftButton, prevOld.MiddleButton, prevOld.RightButton,
+                            prevOld.XButton1, prevOld.XButton2);
+                        _gamepadCursorX = baseMs.X;
+                        _gamepadCursorY = baseMs.Y;
+                        _gamepadCursorXf = baseMs.X;
+                        _gamepadCursorYf = baseMs.Y;
+                    }
+                }
+
+                if (IsPhysicalGamepadActive && inp != null)
+                {
+                    GamePadState gps = GetEffectiveGamePadStateForGame();
+                    if (InputCurrentGamepadField != null)
+                        InputCurrentGamepadField.SetValue(inp, gps);
+                    if (_sInputControllerField != null)
+                        _sInputControllerField.SetValue(inp, gps);
                 }
             }
             catch { }
@@ -780,7 +1747,7 @@ namespace SDVMobileControls
                         gs.Buttons.Start == ButtonState.Pressed || gs.Buttons.Back == ButtonState.Pressed ||
                         gs.DPad.Up == ButtonState.Pressed || gs.DPad.Down == ButtonState.Pressed ||
                         gs.DPad.Left == ButtonState.Pressed || gs.DPad.Right == ButtonState.Pressed;
-                    if (directTouchCount == 0 && used)
+                    if ((PureGamepadMode || directTouchCount == 0) && (PureGamepadMode || used))
                         SetActiveMode(ExternalInputMode.Gamepad);
                     if (IsPhysicalGamepadActive)
                     {
@@ -798,7 +1765,7 @@ namespace SDVMobileControls
 
             _gpConnected = false;
             CurrentGamePadState = default;
-            if (ActiveMode == ExternalInputMode.Gamepad)
+            if (!PureGamepadMode && ActiveMode == ExternalInputMode.Gamepad)
                 SetActiveMode(ExternalInputMode.Touch);
         }
 
@@ -862,12 +1829,13 @@ namespace SDVMobileControls
             {
                 if (!forceClear && _physicalKeys.Count > 0)
                 {
-                    KeyboardSetKeysMethod.Invoke(null, new object[] { _physicalKeys });
+                    _kbSetKeysArg[0] = _physicalKeys;
+                    KeyboardSetKeysMethod.Invoke(null, _kbSetKeysArg);
                     _syncedEmptyMonoGameKeys = false;
                 }
                 else if (forceClear || !_syncedEmptyMonoGameKeys)
                 {
-                    KeyboardSetKeysMethod.Invoke(null, new object[] { EmptyKeysList });
+                    KeyboardSetKeysMethod.Invoke(null, EmptyKeysArg);
                     _syncedEmptyMonoGameKeys = true;
                 }
             }
@@ -891,7 +1859,6 @@ namespace SDVMobileControls
                             sub.RecieveTextInput(ch);
                     }
 
-                    // Edge-triggered special navigation keys (arrows, Delete, Home, End)
                     _currSpecialKeys.Clear();
                     for (int i = 0; i < _physicalKeys.Count; i++)
                     {

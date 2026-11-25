@@ -173,7 +173,7 @@ static NSData *sdvReadTrimmedLogUtf8(NSString *path, NSUInteger maxBytes) {
 
 // Builds a compact, privacy-sanitized ErrorLogs.zip plus structured system metadata for online report or Share Sheet export.
 static NSDictionary *sdvBuildBugReportBundle(NSString *docsPath) {
-    NSString *appVer = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"] ?: @"1.0.2";
+    NSString *appVer = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"] ?: @"1.0.3";
     NSString *iosVer = UIDevice.currentDevice.systemVersion ?: @"?";
     NSString *hwModel = sdvHardwareModelId();
     SDVRamSnapshot ram = [SDVRamMonitor.shared sample];
@@ -182,7 +182,7 @@ static NSDictionary *sdvBuildBugReportBundle(NSString *docsPath) {
         sdvFmtMemMB(ram.availBytes), (double)ram.deviceBytes / (1024.0 * 1024.0 * 1024.0)];
 
     SDVMobileCtrlConfig *mc = [SDVMobileCtrlConfig loadFromDocuments:docsPath];
-    NSString *ctrlMode = sdvControlModeDisplayName(mc.mode);
+    NSString *ctrlMode = mc.pureGamepadMode ? @"Tay cầm thuần (Pure Gamepad)" : sdvControlModeDisplayName(mc.mode);
 
     NSArray<NSDictionary *> *catalog = docsPath.length ? (modCatalog(docsPath) ?: @[]) : @[];
     NSArray<NSDictionary *> *issues = docsPath.length ? (sdvDiagnoseMods(docsPath) ?: @[]) : @[];

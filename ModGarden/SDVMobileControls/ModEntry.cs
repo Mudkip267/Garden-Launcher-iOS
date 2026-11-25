@@ -14,7 +14,9 @@ using StardewModdingAPI;
 using StardewModdingAPI.Events;
 using StardewModdingAPI.Utilities;
 using StardewValley;
+using StardewValley.BellsAndWhistles;
 using StardewValley.Extensions;
+using StardewValley.Locations;
 using StardewValley.Menus;
 using StardewValley.Mods;
 using StardewValley.Tools;
@@ -56,6 +58,7 @@ namespace SDVMobileControls
         internal static bool SynthesizingTapAction;
         private static readonly List<HUDMessage> _stashedHudMessages = new List<HUDMessage>(8);
         private static bool _hudMessagesStashed;
+        private static bool _mineFloorRelocateSuppressed;
         private static FieldInfo _soundBankSoundsField;
         private static FieldInfo _game1HooksField;
         private static bool _gardenHooksInstalled;
@@ -65,6 +68,10 @@ namespace SDVMobileControls
         private static int _lastMailboxDayKey = -1;
         private static bool _mfmResolved;
         private static MethodInfo _mfmShowLetterMethod;
+        private static readonly HashSet<string> _pendingPortraitKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private static bool _pendingReloadAllPortraits;
+        private static int _portraitSyncDelayTicks = -1;
+        private static string _portraitSyncReason;
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate void BootReportDelegate(
@@ -127,7 +134,7 @@ namespace SDVMobileControls
             ReportNativeBoot(58, "Đang khởi chạy SDV Mobile Controls…", "Khởi chạy Mod: SDV Mobile Controls · Cảm ứng & Thiết bị rời", 2);
 
             var cfg = new MobileConfig();
-            ExternalInput = new ExternalInputBridge(Monitor);
+            ExternalInput = new ExternalInputBridge(Monitor, cfg.PureGamepadMode);
             Engine = new MobileControlsEngine(cfg, Monitor, helper.DirectoryPath);
             RamOptimizer = new MapRamOptimizer(helper, Monitor);
             ExternalInput.ModeChanged += mode =>
@@ -141,6 +148,7 @@ namespace SDVMobileControls
             InstallExternalInputHarmonyPatches("Entry");
 
             helper.Events.Content.AssetRequested += OnAssetRequestedMailGuard;
+            helper.Events.Content.AssetsInvalidated += OnAssetsInvalidatedPortraits;
             helper.Events.GameLoop.GameLaunched += OnGameLaunched;
             helper.Events.GameLoop.UpdateTicking += OnUpdateTicking;
             helper.Events.GameLoop.UpdateTicked += OnUpdateTicked;
@@ -234,6 +242,7 @@ namespace SDVMobileControls
             _bootGameLaunched = true;
             WriteBootStage("90|Kích hoạt GameLaunched — chuẩn bị vào game…");
             ReportNativeBoot(90, "Kích hoạt GameLaunched — chuẩn bị vào game…", "Hoàn tất đồng bộ Content Patcher & cảm ứng", 4);
+            try { if (Game1.options != null) Game1.options.rumble = true; } catch { }
             BindAllLoadedTouchVirtualPads("GameLaunched");
             EnsureGardenModHooksInstalled("GameLaunched");
             InstallMobileHarmonyPatches("GameLaunched");
@@ -249,6 +258,8 @@ namespace SDVMobileControls
         private void OnSaveLoaded(object sender, SaveLoadedEventArgs e)
         {
             try { RamOptimizer?.OnSaveLoaded(); } catch { }
+            // Stagger portrait sync past bed wake-up fade so the player can walk immediately without hitching!
+            SchedulePortraitSync(reloadAll: true, delayTicks: 35, reason: "SaveLoaded");
             // Automatically recover any missed Level 5 / Level 10 profession choices (#GL-LTQ82M)
             try
             {
@@ -257,22 +268,18 @@ namespace SDVMobileControls
             }
             catch { }
             ResetMailboxWatchdogSnapshot();
-            LogMailDiagnostic("SaveLoaded");
-            if (!_audioDiagRanWorld)
-            {
-                _audioDiagRanWorld = true;
-                RunAudioDiagnosticAndRepair("SaveLoaded");
-            }
-            _shaderDiagWaitingSave = true;
-            _shaderDiagSaveTicks = 0;
-            _shaderDiagRanOutdoor = false;
+            // Lightweight in-memory master-volume guard (no blocking disk I/O or heavy OpenGL/Assembly scans on wake-up!)
+            try { if (SoundEffect.MasterVolume < 0.01f) SoundEffect.MasterVolume = 1.0f; } catch { }
+            if (!_audioDiagRanWorld) _audioDiagRanWorld = true;
+            _shaderDiagWaitingSave = false;
+            _shaderDiagRanOutdoor = true;
         }
 
         private void OnDayStarted(object sender, DayStartedEventArgs e)
         {
             try { RamOptimizer?.OnDayStarted(); } catch { }
+            SchedulePortraitSync(reloadAll: true, delayTicks: 35, reason: "DayStarted");
             ResetMailboxWatchdogSnapshot();
-            LogMailDiagnostic("DayStarted");
         }
 
         private void LogMailDiagnostic(string phase)
@@ -352,6 +359,74 @@ namespace SDVMobileControls
                 }
                 catch { }
             }, AssetEditPriority.Late);
+        }
+
+        private static void SchedulePortraitSync(bool reloadAll, int delayTicks, string reason)
+        {
+            if (reloadAll)
+                _pendingReloadAllPortraits = true;
+            if (_portraitSyncDelayTicks < 0 || delayTicks > _portraitSyncDelayTicks)
+                _portraitSyncDelayTicks = delayTicks;
+            if (string.IsNullOrEmpty(_portraitSyncReason) || reloadAll)
+                _portraitSyncReason = reason;
+        }
+
+        private void OnAssetsInvalidatedPortraits(object sender, AssetsInvalidatedEventArgs e)
+        {
+            if (!Context.IsWorldReady || e?.NamesWithoutLocale == null)
+                return;
+            try
+            {
+                foreach (IAssetName asset in e.NamesWithoutLocale)
+                {
+                    if (asset == null || string.IsNullOrEmpty(asset.Name))
+                        continue;
+                    if (asset.IsEquivalentTo("Data/Characters"))
+                    {
+                        SchedulePortraitSync(reloadAll: true, delayTicks: 1, reason: "Data/Characters");
+                        continue;
+                    }
+                    string raw = asset.Name;
+                    if (raw.StartsWith("Portraits/", StringComparison.OrdinalIgnoreCase) ||
+                        raw.StartsWith("Portraits\\", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string norm = MapRamOptimizer.NormalizePortraitKey(raw);
+                        if (!string.IsNullOrEmpty(norm))
+                        {
+                            _pendingPortraitKeys.Add(norm);
+                            SchedulePortraitSync(reloadAll: false, delayTicks: 1, reason: "AssetsInvalidated");
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private static void FlushPendingPortraitSync()
+        {
+            if (_portraitSyncDelayTicks < 0)
+                return;
+            if (!Context.IsWorldReady)
+            {
+                _portraitSyncDelayTicks = -1;
+                _pendingReloadAllPortraits = false;
+                _pendingPortraitKeys.Clear();
+                _portraitSyncReason = null;
+                return;
+            }
+            if (--_portraitSyncDelayTicks >= 0)
+                return;
+
+            bool reloadAll = _pendingReloadAllPortraits;
+            string reason = _portraitSyncReason ?? "Sync";
+            HashSet<string> keys = (!reloadAll && _pendingPortraitKeys.Count > 0)
+                ? new HashSet<string>(_pendingPortraitKeys, StringComparer.OrdinalIgnoreCase)
+                : null;
+            _pendingReloadAllPortraits = false;
+            _pendingPortraitKeys.Clear();
+            _portraitSyncReason = null;
+
+            try { RamOptimizer?.RefreshInvalidatedPortraits(keys, reloadAll, reason); } catch { }
         }
 
         private static void ResetMailboxWatchdogSnapshot()
@@ -451,9 +526,40 @@ namespace SDVMobileControls
             }
         }
 
+        private static void RestoreMineFloorRelocateIfNeeded()
+        {
+            if (!_mineFloorRelocateSuppressed)
+                return;
+            _mineFloorRelocateSuppressed = false;
+            try
+            {
+                if (Game1.game1 != null)
+                    Game1.game1.takingMapScreenshot = false;
+            }
+            catch { }
+        }
+
         private void OnRenderingStepHudRelocate(object sender, RenderingStepEventArgs e)
         {
-            if (e == null || e.Step != RenderSteps.HUD || Engine == null || (Game1.game1 != null && Game1.game1.takingMapScreenshot))
+            if (e == null || Engine == null)
+                return;
+
+            // 1. Relocate MineShaft (Mines / Skull Cavern) & VolcanoDungeon floor number safely below iPhone rounded corner!
+            if (e.Step == RenderSteps.World_AlwaysFront)
+            {
+                if (!Context.IsWorldReady || Game1.game1 == null || Game1.game1.takingMapScreenshot)
+                    return;
+                var loc = Game1.currentLocation;
+                bool relocateMine = (loc is MineShaft ms && !ms.isSideBranch()) || (loc is VolcanoDungeon vd && vd.level.Value > 0);
+                if (relocateMine)
+                {
+                    Game1.game1.takingMapScreenshot = true;
+                    _mineFloorRelocateSuppressed = true;
+                }
+                return;
+            }
+
+            if (e.Step != RenderSteps.HUD || (Game1.game1 != null && Game1.game1.takingMapScreenshot))
                 return;
             try
             {
@@ -478,7 +584,57 @@ namespace SDVMobileControls
 
         private void OnRenderedStepHudRelocate(object sender, RenderedStepEventArgs e)
         {
-            if (e == null || e.Step != RenderSteps.HUD || !_hudMessagesStashed)
+            if (e == null)
+                return;
+
+            if (e.Step == RenderSteps.World_AlwaysFront && _mineFloorRelocateSuppressed)
+            {
+                RestoreMineFloorRelocateIfNeeded();
+                try
+                {
+                    if (e.SpriteBatch == null || Engine == null || !Context.IsWorldReady)
+                        return;
+                    Rectangle tsarea = Game1.graphics.GraphicsDevice.Viewport.GetTitleSafeArea();
+                    if (!Engine.TryGetMineFloorSafePosition(tsarea, out int fx, out int fy))
+                        return;
+
+                    if (Game1.currentLocation is MineShaft ms && !ms.isSideBranch())
+                    {
+                        int area = ms.getMineArea(-1);
+                        Color color = (area == 0 || (ms.isDarkArea() && area != 121)) ? SpriteText.color_White
+                            : area == 10 ? SpriteText.color_Green
+                            : area == 40 ? SpriteText.color_Cyan
+                            : area == 80 ? SpriteText.color_Red
+                            : SpriteText.color_Purple;
+                        string levelStr = (ms.mineLevel + (area == 121 ? -120 : 0)).ToString();
+                        int height = SpriteText.getHeightOfString(levelStr);
+                        SpriteText.drawString(e.SpriteBatch, levelStr, fx, fy, 999999, -1, height, 1f, 1f, false, 2, "", color);
+                        if (ms.mustKillAllMonstersToAdvance() && Game1.mouseCursors != null && !Game1.mouseCursors.IsDisposed)
+                        {
+                            int width = SpriteText.getWidthOfString(levelStr);
+                            e.SpriteBatch.Draw(
+                                Game1.mouseCursors,
+                                new Vector2(fx + width + 16, fy) + new Vector2(4f, 6f) * 4f,
+                                new Rectangle(192, 324, 7, 10),
+                                Color.White,
+                                0f,
+                                new Vector2(3f, 5f),
+                                4f + Game1.dialogueButtonScale / 25f,
+                                SpriteEffects.None,
+                                1f);
+                        }
+                    }
+                    else if (Game1.currentLocation is VolcanoDungeon vd && vd.level.Value > 0)
+                    {
+                        string levelStr = vd.level.Value.ToString();
+                        SpriteText.drawString(e.SpriteBatch, levelStr, fx, fy, 999999, -1, 999999, 1f, 1f, false, 2, "", SpriteText.color_Red);
+                    }
+                }
+                catch { }
+                return;
+            }
+
+            if (e.Step != RenderSteps.HUD || !_hudMessagesStashed)
                 return;
 
             RestoreStashedHudMessagesIfNeeded();
@@ -501,14 +657,19 @@ namespace SDVMobileControls
 
         private void OnUpdateTicking(object sender, UpdateTickingEventArgs e)
         {
+            RestoreMineFloorRelocateIfNeeded();
             try
             {
                 if (!_gardenHooksInstalled)
                     EnsureGardenModHooksInstalled("UpdateTicking");
                 if (ExternalInput != null)
                 {
+                    if (Engine != null)
+                        ExternalInput.SyncPureGamepadConfig(Engine.IsPureGamepadMode);
                     ExternalInput.SetManagedSuppressed(Engine != null && Engine.IsUiOverlayBlockingExternalInput(null));
-                    ExternalInput.ApplyStardewGamepadMode();
+                    // CRITICAL: Poll & push SInputState.<ControllerState>k__BackingField AFTER SInputState.TrueUpdate()
+                    // and BEFORE Game1._update() -> Game1.updateActiveMenu() so Gamepad UI menus work 100% on 0% JIT!
+                    ExternalInput.PollFrame();
                 }
             }
             catch { }
@@ -516,18 +677,23 @@ namespace SDVMobileControls
 
         private void OnUpdateTicked(object sender, UpdateTickedEventArgs e)
         {
+            RestoreMineFloorRelocateIfNeeded();
             RestoreStashedHudMessagesIfNeeded();
             try
             {
                 if (ExternalInput != null)
                 {
+                    if (Engine != null)
+                        ExternalInput.SyncPureGamepadConfig(Engine.IsPureGamepadMode);
                     ExternalInput.SetManagedSuppressed(Engine != null && Engine.IsUiOverlayBlockingExternalInput(null));
                     ExternalInput.PollFrame();
+                    ExternalInput.UpdateControllerRumble();
                 }
             }
             catch { }
             try { Engine?.OnUpdateTickedGlobal(); } catch { }
             try { RamOptimizer?.PollManualPruneFlag(); } catch { }
+            FlushPendingPortraitSync();
             PollMailboxWatchdog();
             if (!_audioDiagRanLaunch && ++_audioDiagTicks >= 120)
             {
@@ -1003,6 +1169,7 @@ namespace SDVMobileControls
                     // 1. GamePad (Priority.First = 800 -> always preempts SDViOSTouchControls [400] when physical gamepad is active!)
                     patchedNow += ApplyExtPatch(typeof(GamePad).GetMethod("GetState", any, null, new[] { typeof(PlayerIndex) }, null), nameof(PrefixExtGamePadState), 800, null, 400);
                     patchedNow += ApplyExtPatch(typeof(InputState).GetMethod("GetGamePadState", any, null, Type.EmptyTypes, null), nameof(PrefixExtGamePadState), 800, null, 400);
+                    patchedNow += ApplyExtPatch(typeof(GamePad).GetMethod("SetVibration", any, null, new[] { typeof(int), typeof(float), typeof(float), typeof(float), typeof(float) }, null), nameof(PrefixExtSetVibration), 800, null, 400);
 
                     // 2. Mouse (Priority.First = 800 -> full external mouse/hover/right-click/scroll + gamepad right-stick & menu cursor!)
                     patchedNow += ApplyExtPatch(typeof(Mouse).GetMethod("GetState", any, null, Type.EmptyTypes, null), nameof(PrefixExtMouseState), 800, null, 400);
@@ -1083,7 +1250,19 @@ namespace SDVMobileControls
             var ext = ExternalInput;
             if (ext != null && ext.IsPhysicalGamepadActive)
             {
-                __result = ext.CurrentGamePadState;
+                __result = ext.GetEffectiveGamePadStateForGame();
+                return false;
+            }
+            return true;
+        }
+
+        private static bool PrefixExtSetVibration(int index, float leftMotor, float rightMotor, ref bool __result)
+        {
+            var ext = ExternalInput;
+            if (ext != null && ext.IsPhysicalGamepadActive && index == 0)
+            {
+                ext.SetRumbleDirect(leftMotor, rightMotor);
+                __result = true;
                 return false;
             }
             return true;
@@ -1092,7 +1271,7 @@ namespace SDVMobileControls
         private static bool PrefixExtMouseState(ref MouseState __result)
         {
             var ext = ExternalInput;
-            if (ext != null && ext.ShouldOverrideMouse)
+            if (ext != null && ext.ShouldPushMouseStateNow)
             {
                 __result = ext.CurrentMouseState;
                 return false;
@@ -1106,6 +1285,11 @@ namespace SDVMobileControls
             if (ext != null && ext.ShouldOverrideMouse)
             {
                 ext.OnGameSetMousePositionRaw(x, y);
+                if (!ext.ShouldPushMouseStateNow)
+                {
+                    // Allow Stardew native Game1.setMousePositionRaw to run unimpeded for SnappyMenus!
+                    return true;
+                }
                 try
                 {
                     Game1.input?.SetMousePosition(x, y);
@@ -1135,8 +1319,9 @@ namespace SDVMobileControls
                 return true;
 
             ext.ApplyStardewGamepadMode();
+            ext.SyncDirectZeroHarmonyInputStates();
 
-            if (ext.ShouldOverrideMouse)
+            if (ext.ShouldPushMouseStateNow)
                 mouseState = ext.CurrentMouseState;
 
             if (ext.IsPhysicalGamepadActive)
@@ -1145,16 +1330,12 @@ namespace SDVMobileControls
                 // Never allow stale touch-simulated WASD keys from TouchVirtualPad to leak
                 // into Game1.UpdateControlInput while a physical controller is driving movement!
                 keyboardState = ext.BuildPhysicalKeyboardState();
-                // When ExternalInputBridge is directly steering the free gameplay cursor with the right stick,
-                // strip ThumbSticks.Right from the state passed into Game1.<UpdateControlInput>b__0 so Stardew
-                // never double-moves the cursor or teleports it via localMultiplayerWindow/lastMousePositionBeforeFade!
-                gamePadState = ext.IsRightStickSteeringGameplayCursor
-                    ? ExternalInputBridge.StripRightStick(ext.CurrentGamePadState)
-                    : ext.CurrentGamePadState;
-                Game1.lastCursorMotionWasMouse = false;
+                gamePadState = ext.GetEffectiveGamePadStateForGame();
+                if (!ext.SuppressGamepadAButtonThisFrame)
+                    Game1.lastCursorMotionWasMouse = false;
                 // Keep cursor visible in menus AND throughout the 4-second fade window after releasing R-stick
                 // so players can comfortably hover and read UI Info Suite 2 tooltips!
-                if (Game1.activeClickableMenu != null || Game1.timerUntilMouseFade > 0 || ext.IsRightStickSteeringGameplayCursor)
+                if (Game1.activeClickableMenu != null || Game1.timerUntilMouseFade > 0 || ext.IsRightStickSteeringGameplayCursor || ext.IsRightStickMenuCursorActive)
                     Game1.wasMouseVisibleThisFrame = true;
                 else
                     Game1.wasMouseVisibleThisFrame = false;
@@ -1247,19 +1428,19 @@ namespace SDVMobileControls
         internal static void ApplyExternalControlInputStates(ExternalInputBridge ext, ref KeyboardState keyboardState, ref MouseState mouseState, ref GamePadState gamePadState)
         {
             ext.ApplyStardewGamepadMode();
+            ext.SyncDirectZeroHarmonyInputStates();
 
-            if (ext.ShouldOverrideMouse)
+            if (ext.ShouldPushMouseStateNow)
                 mouseState = ext.CurrentMouseState;
 
             if (ext.IsPhysicalGamepadActive)
             {
                 ext.EnsureValidLocalMultiplayerWindow();
                 keyboardState = ext.BuildPhysicalKeyboardState();
-                gamePadState = ext.IsRightStickSteeringGameplayCursor
-                    ? ExternalInputBridge.StripRightStick(ext.CurrentGamePadState)
-                    : ext.CurrentGamePadState;
-                Game1.lastCursorMotionWasMouse = false;
-                if (Game1.activeClickableMenu != null || Game1.timerUntilMouseFade > 0 || ext.IsRightStickSteeringGameplayCursor)
+                gamePadState = ext.GetEffectiveGamePadStateForGame();
+                if (!ext.SuppressGamepadAButtonThisFrame)
+                    Game1.lastCursorMotionWasMouse = false;
+                if (Game1.activeClickableMenu != null || Game1.timerUntilMouseFade > 0 || ext.IsRightStickSteeringGameplayCursor || ext.IsRightStickMenuCursorActive)
                     Game1.wasMouseVisibleThisFrame = true;
                 else
                     Game1.wasMouseVisibleThisFrame = false;
@@ -1794,10 +1975,26 @@ namespace SDVMobileControls
             try
             {
                 Engine.TrackPadReference(pad);
+                if (Engine.IsPureGamepadMode)
+                {
+                    if (ExternalInput != null)
+                    {
+                        ExternalInput.SyncPureGamepadConfig(true);
+                        ExternalInput.SetManagedSuppressed(false);
+                        ExternalInput.PollFrame();
+                    }
+                    Engine.PollPureGamepadKeyboardOnly(pad, gameTime);
+                    Engine.TryHandleSkipCutsceneTap(pad, TouchPanel.GetState());
+                    Engine.ResetVirtualPadForExternal(pad);
+                    ExternalInput?.ApplyStardewGamepadMode();
+                    return true;
+                }
+
                 Engine.PollPendingEditLayoutFlag();
                 bool blockExt = Engine.IsUiOverlayBlockingExternalInput(pad);
                 if (ExternalInput != null)
                 {
+                    ExternalInput.SyncPureGamepadConfig(false);
                     ExternalInput.SetManagedSuppressed(blockExt);
                     ExternalInput.PollFrame();
                 }
@@ -1831,6 +2028,12 @@ namespace SDVMobileControls
                         ExternalInput.ApplyStardewGamepadMode();
                         return true;
                     }
+                    if (Engine.TryHandleSkipCutsceneTap(pad, fallbackTouches))
+                    {
+                        Engine.ResetVirtualPadForExternal(pad);
+                        ExternalInput.ApplyStardewGamepadMode();
+                        return true;
+                    }
                     ExternalInput.NotifyDirectTouch(activeTouchCnt);
                 }
 
@@ -1851,6 +2054,11 @@ namespace SDVMobileControls
 
             try
             {
+                if (Engine.IsPureGamepadMode)
+                {
+                    Engine.DrawSkipCutsceneButtonOnly(pad, spriteBatch);
+                    return true;
+                }
                 if (Engine.ShouldInterceptGameplay(pad))
                 {
                     Engine.DrawGameplayOverlay(spriteBatch);
@@ -1863,6 +2071,7 @@ namespace SDVMobileControls
                 }
                 if (Engine.ShouldAutoHideLegacyVirtualGamepad(pad))
                 {
+                    Engine.DrawSkipCutsceneButtonOnly(pad, spriteBatch);
                     return true;
                 }
                 return false;

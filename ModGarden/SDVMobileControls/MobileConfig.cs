@@ -66,6 +66,7 @@ namespace SDVMobileControls
         public int ToolbarSide { get; set; } = 0;                 // 0 = Left edge, 1 = Right edge
         public float ToolbarY { get; set; } = 0.50f;              // 0.0..1.0 vertical alignment when shorter than screen height
         public bool ShowToolHitLocation { get; set; } = true;     // Always show red tool hit box (PC default false -> essential for mobile!)
+        public bool PureGamepadMode { get; set; } = false;        // Pure Gamepad Mode (disables virtual touch HUD & touch interceptors from boot)
 
         // Normalized layout (0..1 of viewport) for Invisible Mode: Left Joystick Rect + 2 Right Vertical Rectangular Bars
         public float InvJoyX { get; set; }
@@ -109,6 +110,7 @@ namespace SDVMobileControls
         private readonly string _pauseFlagPath;
         private readonly string _hapticBiteFlagPath;
         private readonly string _safeAreaPath;
+        private readonly string _pureGamepadFlagPath;
         private DateTime _lastWriteUtc = DateTime.MinValue;
         private DateTime _lastSafeAreaUtc = DateTime.MinValue;
         private int _pollCounter;
@@ -131,6 +133,8 @@ namespace SDVMobileControls
             _pauseFlagPath = Path.Combine(gardenDir, "sdv_pause_now.flag");
             _hapticBiteFlagPath = Path.Combine(gardenDir, "sdv_haptic_bite.flag");
             _safeAreaPath = Path.Combine(gardenDir, "sdv_safe_area.cfg");
+            _pureGamepadFlagPath = Path.Combine(gardenDir, "sdv_gamepad_only.flag");
+            try { PureGamepadMode = File.Exists(_pureGamepadFlagPath); } catch { }
             ResetLayoutDefaults();
             Reload(force: true);
             PollNativeSafeArea(force: true);
@@ -228,7 +232,7 @@ namespace SDVMobileControls
 
         public bool ConsumeEditLayoutFlag()
         {
-            if (++_flagCounter < 8)
+            if (++_flagCounter < 25)
                 return false;
             _flagCounter = 0;
             try
@@ -267,7 +271,7 @@ namespace SDVMobileControls
 
         public bool ConsumePauseFlag()
         {
-            if (++_pauseCounter < 6)
+            if (++_pauseCounter < 20)
                 return false;
             _pauseCounter = 0;
             try
@@ -311,7 +315,7 @@ namespace SDVMobileControls
         public void PollReload()
         {
             PollNativeSafeArea(force: false);
-            if (++_pollCounter < 25)
+            if (++_pollCounter < 60)
                 return;
             _pollCounter = 0;
             Reload(force: false);
@@ -413,6 +417,7 @@ namespace SDVMobileControls
                             break;
                         case "tby": ToolbarY = ParseFloat(v, 0.50f, 0.0f, 1.0f); break;
                         case "toolhitbox": ShowToolHitLocation = ParseBool(v, true); break;
+                        case "puregamepad": PureGamepadMode = ParseBool(v, PureGamepadMode); break;
 
                         case "inv_joy_x": InvJoyX = ParseFloat(v, InvJoyX, 0.0f, 0.90f); break;
                         case "inv_joy_y": InvJoyY = ParseFloat(v, InvJoyY, 0.0f, 0.90f); break;
@@ -525,6 +530,7 @@ namespace SDVMobileControls
                 sb.AppendLine($"tbside={(ToolbarSide == 1 ? 1 : 0)}");
                 sb.AppendLine($"tby={ToolbarY.ToString("0.000", CultureInfo.InvariantCulture)}");
                 sb.AppendLine($"toolhitbox={(ShowToolHitLocation ? 1 : 0)}");
+                sb.AppendLine($"puregamepad={(PureGamepadMode ? 1 : 0)}");
                 sb.AppendLine($"inv_joy_x={F(InvJoyX)}");
                 sb.AppendLine($"inv_joy_y={F(InvJoyY)}");
                 sb.AppendLine($"inv_joy_w={F(InvJoyW)}");

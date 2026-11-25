@@ -336,7 +336,8 @@ static NSString *sdvProbeLocalNetwork(void) {
 -(void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     if (_root.path.length) {
-        _uiCfg = [SDVUiConfig loadFromDocuments:_root.path];
+        if (_root.path.length) sdvMarkHotPatchBootSucceeded(_root.path);
+    _uiCfg = [SDVUiConfig loadFromDocuments:_root.path];
         _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
         _savesList = sdvListSaves(_root.path);
         if (_pane) [self renderAll:NO];
@@ -390,6 +391,7 @@ static NSString *sdvProbeLocalNetwork(void) {
         _root = [NSURL URLByResolvingBookmarkData:bm options:0 relativeToURL:nil bookmarkDataIsStale:&stale error:nil];
     }
 #endif
+    if (_root.path.length) sdvMarkHotPatchBootSucceeded(_root.path);
     _uiCfg = [SDVUiConfig loadFromDocuments:_root.path];
     _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
     _savesList = sdvListSaves(_root.path);
@@ -628,15 +630,23 @@ static NSString *sdvProbeLocalNetwork(void) {
     }
     NSDictionary *updBadge = sdvAvailableLauncherUpdate(NO);
     if (_verPillLabel) {
-        if (updBadge) {
-            _verPillLabel.text = [NSString stringWithFormat:@"  🔔 Có bản v%@  ", updBadge[@"version"]];
-            _verPillLabel.backgroundColor = [kTintGreen colorWithAlphaComponent:0.16];
-            _verPillLabel.textColor = kTintGreen;
+    if (updBadge) {
+        if ([updBadge[@"canHotPatch"] boolValue]) {
+            _verPillLabel.text = [NSString stringWithFormat:@"  ⚡ Cập nhật v%@  ", updBadge[@"version"]];
         } else {
-            _verPillLabel.text = @"  v" kSDVAppVersion @" · Native  ";
-            _verPillLabel.backgroundColor = [kTintBlue colorWithAlphaComponent:0.12];
-            _verPillLabel.textColor = kTintBlue;
+            _verPillLabel.text = [NSString stringWithFormat:@"  🔔 Có bản v%@  ", updBadge[@"version"]];
         }
+        _verPillLabel.backgroundColor = [kTintGreen colorWithAlphaComponent:0.16];
+        _verPillLabel.textColor = kTintGreen;
+    } else if (sdvActiveHotPatchInfo() != nil) {
+        _verPillLabel.text = [NSString stringWithFormat:@"  ⚡ v%@ · Hot-Patch  ", sdvEffectiveAppVersion()];
+        _verPillLabel.backgroundColor = [kTintTeal colorWithAlphaComponent:0.14];
+        _verPillLabel.textColor = kTintTeal;
+    } else {
+        _verPillLabel.text = @"  v" kSDVAppVersion @" · Native  ";
+        _verPillLabel.backgroundColor = [kTintBlue colorWithAlphaComponent:0.12];
+        _verPillLabel.textColor = kTintBlue;
+    }
     }
 
     for (NSInteger i = 0; i < (NSInteger)_tabButtons.count; i++) {
@@ -662,7 +672,8 @@ static NSString *sdvProbeLocalNetwork(void) {
     if (_tab == 2) {
         _savesList = sdvListSaves(_root.path);
     } else if (_tab == 3) {
-        _uiCfg = [SDVUiConfig loadFromDocuments:_root.path];
+        if (_root.path.length) sdvMarkHotPatchBootSucceeded(_root.path);
+    _uiCfg = [SDVUiConfig loadFromDocuments:_root.path];
         _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
     }
     [self renderAll:YES];
@@ -2661,18 +2672,36 @@ static NSString *sdvProbeLocalNetwork(void) {
 // ============================================================
 -(void)renderCreditTab {
     NSString *appNm = sdvAppDisplayName();
+    NSString *effVer = sdvEffectiveAppVersion();
+    NSDictionary *activeHp = sdvActiveHotPatchInfo();
 
     UIStackView *topRow = mkHStack(10);
     [topRow addArrangedSubview:mkSettingsIconBadge(@"heart.fill", kTintPink, 34)];
     UIStackView *topTxt = mkVStack(1);
-    [topTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"%@ v1.0.3 — Credit & Cộng đồng", appNm], 15.5, UIFontWeightSemibold, kInkPrimary)];
-    [topTxt addArrangedSubview:mkLabel(@"Tri ân nhà phát triển game gốc, cộng đồng mã nguồn mở & Stardew Valley Việt Nam", 12, UIFontWeightRegular, kInkSecondary)];
+    [topTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"%@ v%@ — Credit & Cộng đồng", appNm, effVer], 15.5, UIFontWeightSemibold, kInkPrimary)];
+    [topTxt addArrangedSubview:mkLabel(@"Hỗ trợ Cập nhật nhanh trực tiếp trong ứng dụng (OTA Hot-Patch xác thực SHA-256 — không cần ký lại IPA)", 12, UIFontWeightRegular, kInkSecondary)];
     SDVAppleButton *chkUpdBtn = mkIOSButton(@"Kiểm tra cập nhật", @"arrow.triangle.2.circlepath", [kTintBlue colorWithAlphaComponent:0.13], kTintBlue, 12.5, UIEdgeInsetsMake(7, 11, 7, 11));
     [chkUpdBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     [chkUpdBtn addTarget:self action:@selector(manualCheckUpdateTapped) forControlEvents:UIControlEventTouchUpInside];
     [topRow addArrangedSubview:topTxt];
     [topRow addArrangedSubview:chkUpdBtn];
     [_pane addArrangedSubview:mkGroupedCard(topRow, UIEdgeInsetsMake(12, 14, 12, 14))];
+
+    if (activeHp) {
+        NSString *hpSha = [activeHp[@"sha256"] isKindOfClass:NSString.class] ? activeHp[@"sha256"] : @"";
+        NSString *shaShort = (hpSha.length >= 10) ? [hpSha substringToIndex:10] : hpSha;
+        UIStackView *hpRow = mkHStack(10);
+        [hpRow addArrangedSubview:mkSettingsIconBadge(@"bolt.horizontal.circle.fill", kTintTeal, 32)];
+        UIStackView *hpTxt = mkVStack(1.5);
+        [hpTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"Đang chạy Bản vá nóng v%@ (trên nền IPA gốc v" kSDVAppVersion @")", effVer], 13.5, UIFontWeightSemibold, kInkPrimary)];
+        [hpTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"Đã xác thực SHA-256 (%@…) · %ld tệp · Tự động giữ nguyên qua các lần mở game", shaShort, (long)[activeHp[@"fileCount"] integerValue]], 11.5, UIFontWeightRegular, kInkSecondary)];
+        SDVAppleButton *rbBtn = mkIOSButton(@"Về gốc IPA", @"arrow.uturn.backward", [kTintOrange colorWithAlphaComponent:0.14], kTintOrange, 12, UIEdgeInsetsMake(7, 10, 7, 10));
+        [rbBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        [rbBtn addTarget:self action:@selector(rollbackHotPatchTapped) forControlEvents:UIControlEventTouchUpInside];
+        [hpRow addArrangedSubview:hpTxt];
+        [hpRow addArrangedSubview:rbBtn];
+        [_pane addArrangedSubview:mkGroupedCard(hpRow, UIEdgeInsetsMake(11, 14, 11, 14))];
+    }
 
     [_pane addArrangedSubview:mkSectionTitle(@"Cộng đồng Stardew Valley Việt Nam (Facebook Groups & Pages)")];
     [_pane addArrangedSubview:mkGroupedRows(@[
@@ -2688,7 +2717,7 @@ static NSString *sdvProbeLocalNetwork(void) {
         [self mkCreditRow:@"NỀN TẢNG iOS PORT (MIT)" name:@"DeadAKJ — SDViosport" detail:@"Mã nguồn host .NET 8 iOS, MonoGame, tích hợp SMAPI và tay cầm cảm ứng SDViOSTouchControls." url:@"https://github.com/DeadAKJ/SDViosport" urlLabel:@"GitHub"],
         [self mkCreditRow:@"NỀN TẢNG MODDING" name:@"SMAPI — Pathoschild & Cộng đồng" detail:@"Stardew Modding API cùng các tác giả mod trên NexusMods và nhóm Việt hóa cộng đồng." url:@"https://smapi.io" urlLabel:@"smapi.io"],
         [self mkCreditRow:@"ĐÓNG GÓP MÃ NGUỒN — TAY CẦM, RUMBLE & MOBILE UX" name:@"Nguyễn Ngọc Nguyên (Mudkip267)" detail:@"Rung tay cầm CoreHaptics 2 mô-tơ chuẩn Console, tương thích UI Info Suite 2 & đồng bộ chân dung Seasonal Anime Portrait, nút SKIP cutscene chuẩn giao diện, tối ưu thanh cuộn Shop & rương Mobile và khôi phục âm thanh SoundBank." url:@"https://github.com/Mudkip267/Garden-Launcher-iOS" urlLabel:@"GitHub"],
-        [self mkCreditRow:@"TRÌNH QUẢN LÝ & LAUNCHER iOS" name:@"Garden Launcher iOS (v1.0.3 Native Edition)" detail:@"Giao diện iOS chuẩn Apple, mở trực tiếp thư mục StardewValley/Content trong Tệp, Chế độ Tay cầm thuần + fix kéo/thay/vứt đồ & chuyển khung, đi lại trong Event/Lễ hội, giải nén mọi định dạng (.ZIP/Deflate64/.RAR/.7Z), Shader GLSL ES và hỗ trợ iOS 14–27+." url:@"https://github.com/hanprm9-dot/Garden-Launcher-iOS" urlLabel:@"GitHub"]
+        [self mkCreditRow:@"TRÌNH QUẢN LÝ & LAUNCHER iOS" name:@"Garden Launcher iOS (v1.0.3 Native Edition)" detail:@"Giao diện iOS chuẩn Apple, Cập nhật nhanh OTA Hot-Patch không cần ký lại IPA, mở trực tiếp thư mục StardewValley/Content trong Tệp, Chế độ Tay cầm thuần + fix kéo/thay/vứt đồ & chuyển khung, đi lại trong Event/Lễ hội, giải nén mọi định dạng (.ZIP/Deflate64/.RAR/.7Z), Shader GLSL ES và hỗ trợ iOS 14–27+." url:@"https://github.com/hanprm9-dot/Garden-Launcher-iOS" urlLabel:@"GitHub"]
     ], 14);
     [_pane addArrangedSubview:_creditCard];
 
@@ -2735,6 +2764,8 @@ static NSString *sdvProbeLocalNetwork(void) {
     NSString *dateStr = info[@"date"] ?: @"";
     NSString *summary = info[@"summary"] ?: @"";
     NSString *updateId = info[@"updateId"] ?: @"";
+    BOOL canHotPatch = [info[@"canHotPatch"] boolValue];
+    long long hpSize = [info[@"hotpatchSize"] respondsToSelector:@selector(longLongValue)] ? [info[@"hotpatchSize"] longLongValue] : 0;
     NSInteger majorIOS = NSProcessInfo.processInfo.operatingSystemVersion.majorVersion;
     NSString *ipaLabel = (majorIOS >= 19) ? @"Tải IPA (iOS 26–27+)" : @"Tải IPA (iOS 14–18)";
     NSString *dlUrl = sdvRecommendedUpdateDownloadURL(info);
@@ -2743,13 +2774,19 @@ static NSString *sdvProbeLocalNetwork(void) {
     UIStackView *box = mkVStack(8);
 
     UIStackView *hdr = mkHStack(10);
-    [hdr addArrangedSubview:mkSettingsIconBadge(@"arrow.down.circle.fill", kTintGreen, 32)];
+    [hdr addArrangedSubview:mkSettingsIconBadge(canHotPatch ? @"bolt.horizontal.circle.fill" : @"arrow.down.circle.fill", kTintGreen, 32)];
     UIStackView *hdrTxt = mkVStack(1.5);
+    NSString *titlePrefix = canHotPatch ? @"Đã có Bản cập nhật nhanh" : @"Đã có bản cập nhật mới";
     NSString *titleText = dateStr.length
-        ? [NSString stringWithFormat:@"Đã có bản cập nhật mới — Garden Launcher v%@ (%@)", ver, dateStr]
-        : [NSString stringWithFormat:@"Đã có bản cập nhật mới — Garden Launcher v%@", ver];
+        ? [NSString stringWithFormat:@"%@ — Garden Launcher v%@ (%@)", titlePrefix, ver, dateStr]
+        : [NSString stringWithFormat:@"%@ — Garden Launcher v%@", titlePrefix, ver];
     [hdrTxt addArrangedSubview:mkLabel(titleText, 14, UIFontWeightSemibold, kInkPrimary)];
-    [hdrTxt addArrangedSubview:mkLabel(@"Cài đè IPA cùng Bundle ID sẽ giữ nguyên 100% File Save & Mod đã cài", 11.5, UIFontWeightRegular, kInkSecondary)];
+    if (canHotPatch) {
+        NSString *szTxt = (hpSize > 0) ? [NSString stringWithFormat:@"~%.0f KB · ", MAX(1.0, (double)hpSize / 1024.0)] : @"";
+        [hdrTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"⚡ Cập nhật trực tiếp ngay trong app (%@Xác thực SHA-256) — KHÔNG CẦN tải hay ký lại tệp IPA!", szTxt], 11.5, UIFontWeightMedium, kTintGreen)];
+    } else {
+        [hdrTxt addArrangedSubview:mkLabel(@"Bản này nâng cấp lõi hệ thống/biểu tượng nên cần cài đè IPA (giữ nguyên 100% File Save & Mod đã cài)", 11.5, UIFontWeightRegular, kInkSecondary)];
+    }
     [hdr addArrangedSubview:hdrTxt];
     [box addArrangedSubview:hdr];
 
@@ -2765,9 +2802,22 @@ static NSString *sdvProbeLocalNetwork(void) {
     }
 
     UIStackView *btnRow = mkHStack(8);
-    SDVAppleButton *dlBtn = mkIOSButton(ipaLabel, @"arrow.down.to.line.compact", kTintGreen, UIColor.whiteColor, 13, UIEdgeInsetsMake(9, 12, 9, 12));
-    dlBtn.accessibilityValue = dlUrl;
-    [dlBtn addTarget:self action:@selector(openExternalLink:) forControlEvents:UIControlEventTouchUpInside];
+    if (canHotPatch) {
+        SDVAppleButton *hpBtn = mkIOSButton(@"⚡ Cập nhật nhanh ngay", @"bolt.fill", kTintGreen, UIColor.whiteColor, 13, UIEdgeInsetsMake(9, 12, 9, 12));
+        [hpBtn addTarget:self action:@selector(installHotPatchTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [btnRow addArrangedSubview:hpBtn];
+
+        SDVAppleButton *ipaSubBtn = mkIOSButton(@"Tải IPA", @"arrow.down.to.line.compact", [kTintBlue colorWithAlphaComponent:0.13], kTintBlue, 12.5, UIEdgeInsetsMake(9, 10, 9, 10));
+        ipaSubBtn.accessibilityValue = dlUrl;
+        [ipaSubBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        [ipaSubBtn addTarget:self action:@selector(openExternalLink:) forControlEvents:UIControlEventTouchUpInside];
+        [btnRow addArrangedSubview:ipaSubBtn];
+    } else {
+        SDVAppleButton *dlBtn = mkIOSButton(ipaLabel, @"arrow.down.to.line.compact", kTintGreen, UIColor.whiteColor, 13, UIEdgeInsetsMake(9, 12, 9, 12));
+        dlBtn.accessibilityValue = dlUrl;
+        [dlBtn addTarget:self action:@selector(openExternalLink:) forControlEvents:UIControlEventTouchUpInside];
+        [btnRow addArrangedSubview:dlBtn];
+    }
 
     SDVAppleButton *ghBtn = mkIOSButton(@"GitHub", @"arrow.up.right.square", [kTintBlue colorWithAlphaComponent:0.13], kTintBlue, 12.5, UIEdgeInsetsMake(9, 11, 9, 11));
     ghBtn.accessibilityValue = relUrl;
@@ -2779,7 +2829,6 @@ static NSString *sdvProbeLocalNetwork(void) {
     [skipBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     [skipBtn addTarget:self action:@selector(dismissLauncherUpdateTapped:) forControlEvents:UIControlEventTouchUpInside];
 
-    [btnRow addArrangedSubview:dlBtn];
     [btnRow addArrangedSubview:ghBtn];
     if (_tab != 7) [btnRow addArrangedSubview:skipBtn];
     [box addArrangedSubview:btnRow];
@@ -2788,6 +2837,76 @@ static NSString *sdvProbeLocalNetwork(void) {
     card.layer.borderWidth = 1.0;
     card.layer.borderColor = [kTintGreen colorWithAlphaComponent:0.45].CGColor;
     return card;
+}
+
+-(void)installHotPatchTapped:(UIButton *)sender {
+    (void)sender;
+    if (_veil) return;
+    NSDictionary *info = sdvAvailableLauncherUpdate(YES);
+    if (![info[@"canHotPatch"] boolValue]) return;
+    NSString *docs = _root.path.length ? _root.path : [fm() URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject.path;
+    NSString *ver = info[@"version"] ?: @"?";
+    __block NSUInteger deployed = 0;
+    [self work:@"Đang tải & xác thực gói cập nhật nhanh (SHA-256)…" action:^{
+        deployed = sdvInstallHotPatchSync(info, docs);
+        if (self->_root && [gameDataStatus(docs)[@"ready"] boolValue]) {
+            [self scan:self->_root];
+        }
+    } done:^{
+        [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];
+        self->_message = [NSString stringWithFormat:@"⚡ Đã cập nhật nhanh lên v%@ (%lu tệp, không cần ký lại IPA)! Mở lại game để áp dụng ngay.", ver, (unsigned long)deployed];
+        self->_messageIsError = NO;
+        [self updateSidebarChrome];
+        [self renderAll:YES];
+
+        UIAlertController *a = [UIAlertController alertControllerWithTitle:[NSString stringWithFormat:@"⚡ Đã cập nhật lên v%@!", ver]
+            message:[NSString stringWithFormat:@"Đã tải, xác thực SHA-256 và áp dụng %lu tệp cập nhật trực tiếp mà không cần tải hay ký lại tệp IPA.\n\nNếu đang chơi trong nông trại, hãy lưu game (SAVE / đi ngủ) trước rồi bấm Đóng & Mở lại để chạy bản mới.", (unsigned long)deployed]
+            preferredStyle:UIAlertControllerStyleAlert];
+#ifdef GARDEN_IN_GAME
+        [a addAction:[UIAlertAction actionWithTitle:@"Đóng & Khởi động lại" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *act) {
+            (void)act;
+            @try {
+                [self->_uiCfg saveToDocuments:docs];
+                [self->_mobileCfg saveToDocuments:docs];
+                [NSUserDefaults.standardUserDefaults synchronize];
+                fflush(NULL);
+            } @catch (NSException *ex) { }
+            [UIView animateWithDuration:0.18 animations:^{
+                self.view.window.alpha = 0.0;
+            } completion:^(BOOL finished) {
+                (void)finished;
+                _exit(0);
+            }];
+        }]];
+#endif
+        [a addAction:[UIAlertAction actionWithTitle:@"Để lát nữa" style:UIAlertActionStyleCancel handler:nil]];
+        [self presentSafely:a];
+    }];
+}
+
+-(void)rollbackHotPatchTapped {
+    if (_veil) return;
+    NSString *docs = _root.path.length ? _root.path : [fm() URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject.path;
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Khôi phục về bản gốc IPA?"
+        message:[NSString stringWithFormat:@"Sẽ gỡ bỏ Bản vá nóng hiện tại và khôi phục nguyên bản các tệp hệ thống của IPA gốc (v%@). Toàn bộ File Save & Mod của bạn vẫn giữ nguyên 100%%.", kSDVAppVersion]
+        preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
+    [a addAction:[UIAlertAction actionWithTitle:@"Khôi phục gốc IPA" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *ac) {
+        (void)ac;
+        [self work:@"Đang khôi phục tệp gốc từ IPA…" action:^{
+            sdvRollbackHotPatchSync(docs);
+            if (self->_root && [gameDataStatus(docs)[@"ready"] boolValue]) {
+                [self scan:self->_root];
+            }
+        } done:^{
+            [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];
+            self->_message = [NSString stringWithFormat:@"Đã khôi phục về bản gốc IPA (v%@). Mở lại game để áp dụng.", kSDVAppVersion];
+            self->_messageIsError = NO;
+            [self updateSidebarChrome];
+            [self renderAll:YES];
+        }];
+    }]];
+    [self presentSafely:a];
 }
 
 -(void)dismissLauncherUpdateTapped:(UIButton *)sender {

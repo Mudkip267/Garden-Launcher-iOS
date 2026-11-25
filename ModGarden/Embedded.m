@@ -1580,7 +1580,10 @@ static UIImage *sdvLoadBootFrameworkImage(NSString *filename) {
     SDVPixelBadgeView *verPill = [SDVPixelBadgeView new];
     verPill.translatesAutoresizingMaskIntoConstraints = NO;
     UILabel *verPillLbl = [UILabel new];
-    verPillLbl.text = @"v" kSDVAppVersion @" · SMAPI 4.5.2";
+    NSString *effBootVer = sdvEffectiveAppVersion();
+    verPillLbl.text = [effBootVer isEqualToString:kSDVAppVersion]
+        ? (@"v" kSDVAppVersion @" · SMAPI 4.5.2")
+        : [NSString stringWithFormat:@"v%@ · SMAPI 4.5.2", effBootVer];
     verPillLbl.font = iosMonoDigits(10.5, UIFontWeightBold);
     verPillLbl.textColor = rgb(0xFFF0C4);
     verPillLbl.translatesAutoresizingMaskIntoConstraints = NO;
@@ -3021,6 +3024,8 @@ static void sdvExtSetGardenOpen(BOOL open);
     [self.bootPollTimer invalidate];
     self.bootPollTimer = nil;
     if (gSdvBootReadyPath[0]) unlink(gSdvBootReadyPath);
+    NSString *bootDocs = [fm() URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject.path;
+    if (bootDocs.length) sdvMarkHotPatchBootSucceeded(bootDocs);
 
     SDVPassThroughWindow *lw = self.loadingWindow;
     self.loadingWindow = nil;
@@ -3084,12 +3089,16 @@ static void sdvExtSetGardenOpen(BOOL open);
     NSDictionary *updToast = sdvAvailableLauncherUpdate(NO);
     NSTimeInterval holdSec = updToast ? 4.6 : 2.8;
     if (updToast) {
+        BOOL isHpToast = [updToast[@"canHotPatch"] boolValue];
         UIStackView *row = mkHStack(9);
-        UIImageView *ic = [[UIImageView alloc] initWithImage:sfIcon(@"arrow.down.circle.fill", 17, UIImageSymbolWeightSemibold)];
+        UIImageView *ic = [[UIImageView alloc] initWithImage:sfIcon(isHpToast ? @"bolt.circle.fill" : @"arrow.down.circle.fill", 17, UIImageSymbolWeightSemibold)];
         ic.tintColor = kTintGreen;
         [ic setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
         UIStackView *col = mkVStack(1.5);
-        UILabel *lbl1 = mkLabel([NSString stringWithFormat:@"Đã có Garden Launcher v%@ mới! (Chạm 3 ngón × 2 để xem)", updToast[@"version"]], 12.5, UIFontWeightSemibold, UIColor.whiteColor);
+        NSString *toastTitle = isHpToast
+            ? [NSString stringWithFormat:@"⚡ Đã có bản cập nhật nhanh v%@ (Không cần ký lại IPA · Chạm 3 ngón × 2)", updToast[@"version"]]
+            : [NSString stringWithFormat:@"Đã có Garden Launcher v%@ mới! (Chạm 3 ngón × 2 để xem)", updToast[@"version"]];
+        UILabel *lbl1 = mkLabel(toastTitle, 12.5, UIFontWeightSemibold, UIColor.whiteColor);
         lbl1.numberOfLines = 1;
         [col addArrangedSubview:lbl1];
         NSString *firstSum = [[(updToast[@"summary"] ?: @"") componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet] firstObject];
@@ -3863,9 +3872,11 @@ __attribute__((constructor)) static void startGardenControls(void) {
     @autoreleasepool {
         @try {
             NSString *docs = [fm() URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject.path;
+            NSString *hpBootNote = @"none";
             if (docs.length) {
                 // Migrate & hide all non-user game/runtime/config files BEFORE .NET GameHost initializes!
                 sdvMigrateDocumentsToHiddenLayout(docs);
+                hpBootNote = sdvInitHotPatchOnBoot(docs);
                 NSString *gdir = sdvHiddenGardenDir(docs);
                 snprintf(gSdvPauseFlagPath, sizeof(gSdvPauseFlagPath), "%s/sdv_pause_now.flag", gdir.UTF8String);
                 snprintf(gSdvHapticFlagPath, sizeof(gSdvHapticFlagPath), "%s/sdv_haptic_bite.flag", gdir.UTF8String);
@@ -3918,8 +3929,9 @@ __attribute__((constructor)) static void startGardenControls(void) {
             syncBundledLidgren(docs);
             NSString *smapiSyncNote = syncBundledSmapi(docs);
             syncBundledMobileControls(docs);
+            NSUInteger hpFiles = sdvDeployActiveHotPatchFiles(docs);
             NSUInteger cpFallbackLinked = syncContentPackLocaleFallbacks(docs);
-            sdvBootLogFmt([NSString stringWithFormat:@"[BOOT 2] Bundled Lidgren / SMAPI (%@) / SDVMobileControls synced (cpLocaleFallbacks=%lu)", smapiSyncNote ?: @"?", (unsigned long)cpFallbackLinked]);
+            sdvBootLogFmt([NSString stringWithFormat:@"[BOOT 2] Bundled Lidgren / SMAPI (%@) / SDVMobileControls synced (ver=%@, hotpatch=%@:%lu, cpLocaleFallbacks=%lu)", smapiSyncNote ?: @"?", sdvEffectiveAppVersion(), hpBootNote ?: @"none", (unsigned long)hpFiles, (unsigned long)cpFallbackLinked]);
             [SDVRamMonitor.shared startWithDocsPath:docs];
             sdvBootLog("[BOOT 3] SDVRamMonitor started");
         } @catch (NSException *ex) {

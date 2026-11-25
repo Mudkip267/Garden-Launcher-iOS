@@ -173,7 +173,9 @@ static NSData *sdvReadTrimmedLogUtf8(NSString *path, NSUInteger maxBytes) {
 
 // Builds a compact, privacy-sanitized ErrorLogs.zip plus structured system metadata for online report or Share Sheet export.
 static NSDictionary *sdvBuildBugReportBundle(NSString *docsPath) {
-    NSString *appVer = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"] ?: @"1.0.3";
+    NSString *ipaVer = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"] ?: kSDVAppVersion;
+    NSString *effVer = sdvEffectiveAppVersion();
+    NSString *appVer = [effVer isEqualToString:ipaVer] ? ipaVer : [NSString stringWithFormat:@"%@ (IPA %@)", effVer, ipaVer];
     NSString *iosVer = UIDevice.currentDevice.systemVersion ?: @"?";
     NSString *hwModel = sdvHardwareModelId();
     SDVRamSnapshot ram = [SDVRamMonitor.shared sample];

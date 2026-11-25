@@ -492,7 +492,7 @@ static BOOL sdvRumbleCreateMotorOnQueue(GCController *ctrl, GCHapticsLocality lo
         CHHapticEngine *eng = [ctrl.haptics createEngineWithLocality:locality];
         if (!eng) return NO;
         eng.playsHapticsOnly = YES;
-        eng.isAutoShutdownEnabled = NO;
+        eng.autoShutdownEnabled = NO;
         eng.resetHandler = ^{
             if (gRumbleQueue) {
                 dispatch_async(gRumbleQueue, ^{

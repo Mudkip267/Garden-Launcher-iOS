@@ -1580,7 +1580,7 @@ static UIImage *sdvLoadBootFrameworkImage(NSString *filename) {
     SDVPixelBadgeView *verPill = [SDVPixelBadgeView new];
     verPill.translatesAutoresizingMaskIntoConstraints = NO;
     UILabel *verPillLbl = [UILabel new];
-    verPillLbl.text = @"v1.0.2 · SMAPI 4.5.2";
+    verPillLbl.text = @"v" kSDVAppVersion @" · SMAPI 4.5.2";
     verPillLbl.font = iosMonoDigits(10.5, UIFontWeightBold);
     verPillLbl.textColor = rgb(0xFFF0C4);
     verPillLbl.translatesAutoresizingMaskIntoConstraints = NO;

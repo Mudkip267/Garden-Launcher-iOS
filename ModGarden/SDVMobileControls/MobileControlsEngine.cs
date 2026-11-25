@@ -4172,7 +4172,15 @@ namespace SDVMobileControls
                         }
                         if (_btnSaveRect.Contains(vpPt))
                         {
-                            OpenSaveMenu();
+                            if (Game1.eventUp)
+                            {
+                                ShowSaveToast("KHONG THE LUU TRONG SU KIEN / LE HOI", nowSec);
+                                try { Game1.playSound("cancel"); } catch { }
+                            }
+                            else
+                            {
+                                OpenSaveMenu();
+                            }
                             ClearPath();
                             ApplyToPad(pad, Vector2.Zero, false, false, false);
                             return;
@@ -5174,7 +5182,7 @@ namespace SDVMobileControls
 
         private void TryPeriodicAutoSave(PadBridge br, Vector2 stickVec, bool anyAction, double nowSec)
         {
-            if (_cfg.AutoSaveMinutes <= 0 || br == null || Game1.player == null || Game1.currentLocation == null)
+            if (_cfg.AutoSaveMinutes <= 0 || br == null || Game1.player == null || Game1.currentLocation == null || Game1.eventUp || Game1.dialogueUp)
                 return;
 
             // Initialize timer on first gameplay tick so it doesn't save immediately on load

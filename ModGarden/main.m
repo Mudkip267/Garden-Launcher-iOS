@@ -442,7 +442,7 @@ static NSString *sdvProbeLocalNetwork(void) {
     _navTitleLabel.numberOfLines = 1;
     [topBarRow addArrangedSubview:_navTitleLabel];
     [topBarRow addArrangedSubview:[UIView new]];
-    _verPillLabel = mkBadgePill(@"v1.0.2 · Native", [kTintBlue colorWithAlphaComponent:0.12], kTintBlue, 11);
+    _verPillLabel = mkBadgePill(@"v" kSDVAppVersion @" · Native", [kTintBlue colorWithAlphaComponent:0.12], kTintBlue, 11);
     [topBarRow addArrangedSubview:_verPillLabel];
     [topBar.contentView addSubview:topBarRow];
     pinInsets(topBarRow, topBar.contentView, UIEdgeInsetsMake(0, 16, 0, 16));
@@ -633,7 +633,7 @@ static NSString *sdvProbeLocalNetwork(void) {
             _verPillLabel.backgroundColor = [kTintGreen colorWithAlphaComponent:0.16];
             _verPillLabel.textColor = kTintGreen;
         } else {
-            _verPillLabel.text = @"  v1.0.2 · Native  ";
+            _verPillLabel.text = @"  v" kSDVAppVersion @" · Native  ";
             _verPillLabel.backgroundColor = [kTintBlue colorWithAlphaComponent:0.12];
             _verPillLabel.textColor = kTintBlue;
         }
@@ -2316,7 +2316,7 @@ static NSString *sdvProbeLocalNetwork(void) {
 }
 
 // ============================================================
-// TAB 4: HƯỚNG DẪN SỬ DỤNG (CẬP NHẬT v1.0.2)
+// TAB 4: HƯỚNG DẪN SỬ DỤNG (CẬP NHẬT v1.0.3)
 // ============================================================
 -(UIView *)mkGuideStep:(NSString *)num title:(NSString *)title body:(NSString *)body color:(UIColor *)col {
     UIStackView *row = mkHStack(11);

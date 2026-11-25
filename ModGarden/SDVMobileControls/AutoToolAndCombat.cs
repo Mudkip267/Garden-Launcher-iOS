@@ -951,6 +951,8 @@ namespace SDVMobileControls
 
             if (loc == null || who == null)
                 return new TileIntent { Kind = TileActionKind.None, PreferredToolSlot = -1 };
+            if (Game1.eventUp && (Game1.CurrentEvent == null || !Game1.CurrentEvent.canPlayerUseTool()))
+                return new TileIntent { Kind = TileActionKind.None, PreferredToolSlot = -1 };
 
             Vector2 tv = new Vector2(tile.X, tile.Y);
             int cheb = Math.Max(Math.Abs(who.TilePoint.X - tile.X), Math.Abs(who.TilePoint.Y - tile.Y));
@@ -1040,6 +1042,8 @@ namespace SDVMobileControls
             }
 
             if (loc == null || who == null || who.UsingTool || who.isRidingHorse() || who.swimming.Value || who.health <= 0)
+                return false;
+            if (Game1.eventUp && (Game1.CurrentEvent == null || !Game1.CurrentEvent.canPlayerUseTool()))
                 return false;
 
             Vector2 playerCenter = who.GetBoundingBox().Center.ToVector2();

@@ -821,19 +821,23 @@ namespace SDVMobileControls
                     Game1.playSound("throwDownITem");
                     return true;
                 }
-                if (rawMenu is MenuWithInventory mwi && mwi.heldItem != null && mwi.heldItem.canBeDropped() && mwi.AllowExitWithHeldItem)
+                if (rawMenu is MenuWithInventory mwi && mwi.heldItem != null && mwi.heldItem.canBeDropped())
                 {
                     if (singleItemOnly && mwi.heldItem.Stack > 1)
                     {
                         Item one = mwi.heldItem.getOne();
                         mwi.heldItem.Stack -= 1;
-                        Game1.createItemDebris(one, Game1.player.getStandingPosition(), Game1.player.FacingDirection);
+                        int dropDir = (rawMenu is ItemGrabMenu igmMus && igmMus.context is StardewValley.Locations.LibraryMuseum)
+                            ? 2
+                            : Game1.player.FacingDirection;
+                        Game1.createItemDebris(one, Game1.player.getStandingPosition(), dropDir);
+                        Game1.playSound("throwDownITem");
                     }
                     else
                     {
+                        // Note: MenuWithInventory.DropHeldItem() already plays "throwDownITem" internally!
                         mwi.DropHeldItem();
                     }
-                    Game1.playSound("throwDownITem");
                     return true;
                 }
             }
@@ -1241,26 +1245,33 @@ namespace SDVMobileControls
 
                     // C) Hold-A + Move (R-Stick / D-Pad / L-Stick) + Release-A single-motion Drag-and-Drop!
                     //    Coexists 100% with classic Console 2-press A pickup & swap!
+                    //    CRITICAL: Suppress Buttons.A on frames AFTER aRising so vanilla Game1.updateActiveMenu's
+                    //    650ms turbo-repeat (gamePadAButtonPolling) NEVER rapid-swaps items mid-drag!
                     if (SupportsHoldADrag(rawMenu))
                     {
+                        Point activeSlotUi = (!IsRightStickMenuCursorActive && curSnap != null && curSnap.myID != -99998 && curSnap.bounds.Width > 0)
+                            ? curSnap.bounds.Center
+                            : uiPt;
+
                         if (aRising && !SuppressGamepadAButtonThisFrame)
                         {
                             _gpDragTracking = true;
                             _gpDragMoved = false;
-                            _gpDragStartUi = uiPt;
+                            _gpDragStartUi = activeSlotUi;
                             _gpDragStartSnapId = IsRightStickMenuCursorActive ? int.MinValue : curSnapId;
                         }
                         else if (aNow && _gpDragTracking)
                         {
-                            int dxUi = uiPt.X - _gpDragStartUi.X;
-                            int dyUi = uiPt.Y - _gpDragStartUi.Y;
+                            SuppressGamepadAButtonThisFrame = true;
+                            int dxUi = activeSlotUi.X - _gpDragStartUi.X;
+                            int dyUi = activeSlotUi.Y - _gpDragStartUi.Y;
                             bool movedBySnap = !IsRightStickMenuCursorActive && _gpDragStartSnapId != int.MinValue && curSnapId != int.MinValue && curSnapId != _gpDragStartSnapId;
-                            bool movedByDist = (dxUi * dxUi + dyUi * dyUi) > 484; // >22 UI px
+                            bool movedByDist = IsRightStickMenuCursorActive && (dxUi * dxUi + dyUi * dyUi) > 484; // >22 UI px
                             if (movedBySnap || movedByDist)
                                 _gpDragMoved = true;
                             if (_gpDragMoved)
                             {
-                                try { rawMenu.leftClickHeld(uiPt.X, uiPt.Y); } catch { }
+                                try { rawMenu.performHoverAction(activeSlotUi.X, activeSlotUi.Y); } catch { }
                             }
                         }
                         else if (aFalling && _gpDragTracking)
@@ -1278,8 +1289,9 @@ namespace SDVMobileControls
                                 {
                                     try
                                     {
-                                        rawMenu.receiveLeftClick(uiPt.X, uiPt.Y, playSound: true);
-                                        rawMenu.releaseLeftClick(uiPt.X, uiPt.Y);
+                                        rawMenu.performHoverAction(activeSlotUi.X, activeSlotUi.Y);
+                                        rawMenu.receiveLeftClick(activeSlotUi.X, activeSlotUi.Y, playSound: true);
+                                        rawMenu.releaseLeftClick(activeSlotUi.X, activeSlotUi.Y);
                                     }
                                     catch { }
                                 }

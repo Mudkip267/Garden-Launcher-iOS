@@ -211,6 +211,7 @@ static void sdvMigrateDocumentsToHiddenLayout(NSString *docsPath) {
                 if (![fm() fileExistsAtPath:dst]) {
                     [fm() moveItemAtPath:src toPath:dst error:nil];
                 } else {
+                    chmod(src.fileSystemRepresentation, 0644);
                     [fm() removeItemAtPath:src error:nil];
                 }
             }
@@ -247,6 +248,7 @@ static void sdvMigrateDocumentsToHiddenLayout(NSString *docsPath) {
             }
             NSString *ext = item.pathExtension.lowercaseString;
             if (sdvIsUnusedGameRootJunk(low, ext)) {
+                chmod(src.fileSystemRepresentation, 0644);
                 [fm() removeItemAtPath:src error:nil];
                 continue;
             }
@@ -260,6 +262,7 @@ static void sdvMigrateDocumentsToHiddenLayout(NSString *docsPath) {
                 if (![fm() fileExistsAtPath:dst]) {
                     [fm() moveItemAtPath:src toPath:dst error:nil];
                 } else {
+                    chmod(src.fileSystemRepresentation, 0644);
                     [fm() removeItemAtPath:src error:nil];
                 }
             }
@@ -270,6 +273,7 @@ static void sdvMigrateDocumentsToHiddenLayout(NSString *docsPath) {
             NSString *gp = join(gameDir, gitem);
             if (dir(gp)) continue;
             if (sdvIsUnusedGameRootJunk(gitem.lowercaseString, gitem.pathExtension.lowercaseString)) {
+                chmod(gp.fileSystemRepresentation, 0644);
                 [fm() removeItemAtPath:gp error:nil];
             }
         }

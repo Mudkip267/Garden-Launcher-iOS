@@ -65,6 +65,10 @@ namespace SDVMobileControls
         private static int _lastMailboxDayKey = -1;
         private static bool _mfmResolved;
         private static MethodInfo _mfmShowLetterMethod;
+        private static readonly HashSet<string> _pendingPortraitKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private static bool _pendingReloadAllPortraits;
+        private static int _portraitSyncDelayTicks = -1;
+        private static string _portraitSyncReason;
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate void BootReportDelegate(
@@ -141,6 +145,7 @@ namespace SDVMobileControls
             InstallExternalInputHarmonyPatches("Entry");
 
             helper.Events.Content.AssetRequested += OnAssetRequestedMailGuard;
+            helper.Events.Content.AssetsInvalidated += OnAssetsInvalidatedPortraits;
             helper.Events.GameLoop.GameLaunched += OnGameLaunched;
             helper.Events.GameLoop.UpdateTicking += OnUpdateTicking;
             helper.Events.GameLoop.UpdateTicked += OnUpdateTicked;
@@ -249,6 +254,7 @@ namespace SDVMobileControls
         private void OnSaveLoaded(object sender, SaveLoadedEventArgs e)
         {
             try { RamOptimizer?.OnSaveLoaded(); } catch { }
+            SchedulePortraitSync(reloadAll: true, delayTicks: 4, reason: "SaveLoaded");
             // Automatically recover any missed Level 5 / Level 10 profession choices (#GL-LTQ82M)
             try
             {
@@ -271,6 +277,7 @@ namespace SDVMobileControls
         private void OnDayStarted(object sender, DayStartedEventArgs e)
         {
             try { RamOptimizer?.OnDayStarted(); } catch { }
+            SchedulePortraitSync(reloadAll: true, delayTicks: 4, reason: "DayStarted");
             ResetMailboxWatchdogSnapshot();
             LogMailDiagnostic("DayStarted");
         }
@@ -352,6 +359,74 @@ namespace SDVMobileControls
                 }
                 catch { }
             }, AssetEditPriority.Late);
+        }
+
+        private static void SchedulePortraitSync(bool reloadAll, int delayTicks, string reason)
+        {
+            if (reloadAll)
+                _pendingReloadAllPortraits = true;
+            if (_portraitSyncDelayTicks < 0 || delayTicks > _portraitSyncDelayTicks)
+                _portraitSyncDelayTicks = delayTicks;
+            if (string.IsNullOrEmpty(_portraitSyncReason) || reloadAll)
+                _portraitSyncReason = reason;
+        }
+
+        private void OnAssetsInvalidatedPortraits(object sender, AssetsInvalidatedEventArgs e)
+        {
+            if (!Context.IsWorldReady || e?.NamesWithoutLocale == null)
+                return;
+            try
+            {
+                foreach (IAssetName asset in e.NamesWithoutLocale)
+                {
+                    if (asset == null || string.IsNullOrEmpty(asset.Name))
+                        continue;
+                    if (asset.IsEquivalentTo("Data/Characters"))
+                    {
+                        SchedulePortraitSync(reloadAll: true, delayTicks: 1, reason: "Data/Characters");
+                        continue;
+                    }
+                    string raw = asset.Name;
+                    if (raw.StartsWith("Portraits/", StringComparison.OrdinalIgnoreCase) ||
+                        raw.StartsWith("Portraits\\", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string norm = MapRamOptimizer.NormalizePortraitKey(raw);
+                        if (!string.IsNullOrEmpty(norm))
+                        {
+                            _pendingPortraitKeys.Add(norm);
+                            SchedulePortraitSync(reloadAll: false, delayTicks: 1, reason: "AssetsInvalidated");
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private static void FlushPendingPortraitSync()
+        {
+            if (_portraitSyncDelayTicks < 0)
+                return;
+            if (!Context.IsWorldReady)
+            {
+                _portraitSyncDelayTicks = -1;
+                _pendingReloadAllPortraits = false;
+                _pendingPortraitKeys.Clear();
+                _portraitSyncReason = null;
+                return;
+            }
+            if (--_portraitSyncDelayTicks >= 0)
+                return;
+
+            bool reloadAll = _pendingReloadAllPortraits;
+            string reason = _portraitSyncReason ?? "Sync";
+            HashSet<string> keys = (!reloadAll && _pendingPortraitKeys.Count > 0)
+                ? new HashSet<string>(_pendingPortraitKeys, StringComparer.OrdinalIgnoreCase)
+                : null;
+            _pendingReloadAllPortraits = false;
+            _pendingPortraitKeys.Clear();
+            _portraitSyncReason = null;
+
+            try { RamOptimizer?.RefreshInvalidatedPortraits(keys, reloadAll, reason); } catch { }
         }
 
         private static void ResetMailboxWatchdogSnapshot()
@@ -523,11 +598,13 @@ namespace SDVMobileControls
                 {
                     ExternalInput.SetManagedSuppressed(Engine != null && Engine.IsUiOverlayBlockingExternalInput(null));
                     ExternalInput.PollFrame();
+                    ExternalInput.UpdateControllerRumble();
                 }
             }
             catch { }
             try { Engine?.OnUpdateTickedGlobal(); } catch { }
             try { RamOptimizer?.PollManualPruneFlag(); } catch { }
+            FlushPendingPortraitSync();
             PollMailboxWatchdog();
             if (!_audioDiagRanLaunch && ++_audioDiagTicks >= 120)
             {
@@ -1003,6 +1080,7 @@ namespace SDVMobileControls
                     // 1. GamePad (Priority.First = 800 -> always preempts SDViOSTouchControls [400] when physical gamepad is active!)
                     patchedNow += ApplyExtPatch(typeof(GamePad).GetMethod("GetState", any, null, new[] { typeof(PlayerIndex) }, null), nameof(PrefixExtGamePadState), 800, null, 400);
                     patchedNow += ApplyExtPatch(typeof(InputState).GetMethod("GetGamePadState", any, null, Type.EmptyTypes, null), nameof(PrefixExtGamePadState), 800, null, 400);
+                    patchedNow += ApplyExtPatch(typeof(GamePad).GetMethod("SetVibration", any, null, new[] { typeof(int), typeof(float), typeof(float), typeof(float), typeof(float) }, null), nameof(PrefixExtSetVibration), 800, null, 400);
 
                     // 2. Mouse (Priority.First = 800 -> full external mouse/hover/right-click/scroll + gamepad right-stick & menu cursor!)
                     patchedNow += ApplyExtPatch(typeof(Mouse).GetMethod("GetState", any, null, Type.EmptyTypes, null), nameof(PrefixExtMouseState), 800, null, 400);
@@ -1083,7 +1161,19 @@ namespace SDVMobileControls
             var ext = ExternalInput;
             if (ext != null && ext.IsPhysicalGamepadActive)
             {
-                __result = ext.CurrentGamePadState;
+                __result = ext.GetEffectiveGamePadStateForGame();
+                return false;
+            }
+            return true;
+        }
+
+        private static bool PrefixExtSetVibration(int index, float leftMotor, float rightMotor, ref bool __result)
+        {
+            var ext = ExternalInput;
+            if (ext != null && ext.IsPhysicalGamepadActive && index == 0)
+            {
+                ext.SetRumbleDirect(leftMotor, rightMotor);
+                __result = true;
                 return false;
             }
             return true;
@@ -1148,13 +1238,12 @@ namespace SDVMobileControls
                 // When ExternalInputBridge is directly steering the free gameplay cursor with the right stick,
                 // strip ThumbSticks.Right from the state passed into Game1.<UpdateControlInput>b__0 so Stardew
                 // never double-moves the cursor or teleports it via localMultiplayerWindow/lastMousePositionBeforeFade!
-                gamePadState = ext.IsRightStickSteeringGameplayCursor
-                    ? ExternalInputBridge.StripRightStick(ext.CurrentGamePadState)
-                    : ext.CurrentGamePadState;
-                Game1.lastCursorMotionWasMouse = false;
+                gamePadState = ext.GetEffectiveGamePadStateForGame();
+                if (!ext.SuppressGamepadAButtonThisFrame)
+                    Game1.lastCursorMotionWasMouse = false;
                 // Keep cursor visible in menus AND throughout the 4-second fade window after releasing R-stick
                 // so players can comfortably hover and read UI Info Suite 2 tooltips!
-                if (Game1.activeClickableMenu != null || Game1.timerUntilMouseFade > 0 || ext.IsRightStickSteeringGameplayCursor)
+                if (Game1.activeClickableMenu != null || Game1.timerUntilMouseFade > 0 || ext.IsRightStickSteeringGameplayCursor || ext.IsRightStickMenuCursorActive)
                     Game1.wasMouseVisibleThisFrame = true;
                 else
                     Game1.wasMouseVisibleThisFrame = false;
@@ -1255,11 +1344,10 @@ namespace SDVMobileControls
             {
                 ext.EnsureValidLocalMultiplayerWindow();
                 keyboardState = ext.BuildPhysicalKeyboardState();
-                gamePadState = ext.IsRightStickSteeringGameplayCursor
-                    ? ExternalInputBridge.StripRightStick(ext.CurrentGamePadState)
-                    : ext.CurrentGamePadState;
-                Game1.lastCursorMotionWasMouse = false;
-                if (Game1.activeClickableMenu != null || Game1.timerUntilMouseFade > 0 || ext.IsRightStickSteeringGameplayCursor)
+                gamePadState = ext.GetEffectiveGamePadStateForGame();
+                if (!ext.SuppressGamepadAButtonThisFrame)
+                    Game1.lastCursorMotionWasMouse = false;
+                if (Game1.activeClickableMenu != null || Game1.timerUntilMouseFade > 0 || ext.IsRightStickSteeringGameplayCursor || ext.IsRightStickMenuCursorActive)
                     Game1.wasMouseVisibleThisFrame = true;
                 else
                     Game1.wasMouseVisibleThisFrame = false;
@@ -1831,6 +1919,12 @@ namespace SDVMobileControls
                         ExternalInput.ApplyStardewGamepadMode();
                         return true;
                     }
+                    if (Engine.TryHandleSkipCutsceneTap(pad, fallbackTouches))
+                    {
+                        Engine.ResetVirtualPadForExternal(pad);
+                        ExternalInput.ApplyStardewGamepadMode();
+                        return true;
+                    }
                     ExternalInput.NotifyDirectTouch(activeTouchCnt);
                 }
 
@@ -1863,6 +1957,7 @@ namespace SDVMobileControls
                 }
                 if (Engine.ShouldAutoHideLegacyVirtualGamepad(pad))
                 {
+                    Engine.DrawSkipCutsceneButtonOnly(pad, spriteBatch);
                     return true;
                 }
                 return false;

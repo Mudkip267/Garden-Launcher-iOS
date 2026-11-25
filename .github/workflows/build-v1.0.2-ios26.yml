@@ -1,0 +1,219 @@
+name: Build Garden Launcher v1.0.2 Mobile UX + Rumble (iOS 26+ Apple Xcode)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Fork
+        uses: actions/checkout@v4
+
+      - name: Download Verified Base Garden-Launcher-1.0.2-iOS26-27.ipa
+        run: |
+          mkdir -p work/stage
+          curl -fsSL -o work/base-v1.0.2.ipa "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.2/Garden-Launcher-1.0.2-iOS26-27.ipa"
+          ACTUAL_SHA=$(shasum -a 256 work/base-v1.0.2.ipa | awk '{print tolower($1)}')
+          EXPECTED_SHA="cb6c13fc95496b6dbcce4fe45b631c9abc042771ac278aa05d42c0b7a71f02a0"
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            echo "SHA-256 mismatch: $ACTUAL_SHA != $EXPECTED_SHA"
+            exit 1
+          fi
+          unzip -q work/base-v1.0.2.ipa -d work/stage
+          ls -la work/stage/Payload/SDViOS.app
+
+      - name: Compile Updated SDVModGarden.framework (arm64 iOS + CoreHaptics Controller Rumble)
+        run: |
+          set -euo pipefail
+          IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          CLANG=$(xcrun --sdk iphoneos --find clang)
+          echo "Using SDK: $IOS_SDK"
+          mkdir -p work/native
+
+          "$CLANG" -arch arm64 -isysroot "$IOS_SDK" -miphoneos-version-min=16.0 \
+            -O2 -fvisibility=hidden -c ModGarden/vendor/miniz.c -o work/native/miniz.o
+
+          "$CLANG" -arch arm64 -isysroot "$IOS_SDK" -miphoneos-version-min=16.0 \
+            -O2 -fobjc-arc -fvisibility=hidden -IModGarden \
+            -Wno-deprecated-declarations \
+            -c ModGarden/Embedded.m -o work/native/Embedded.o
+
+          "$CLANG" -arch arm64 -isysroot "$IOS_SDK" -miphoneos-version-min=16.0 \
+            -dynamiclib -install_name @rpath/SDVModGarden.framework/SDVModGarden \
+            -Wl,-fixup_chains \
+            work/native/Embedded.o work/native/miniz.o \
+            -framework Foundation \
+            -framework CoreFoundation \
+            -framework CoreGraphics \
+            -framework UIKit \
+            -framework QuartzCore \
+            -framework AVFoundation \
+            -framework AVFAudio \
+            -framework PhotosUI \
+            -framework GameController \
+            -framework UniformTypeIdentifiers \
+            -weak_framework CoreHaptics \
+            -o work/native/SDVModGarden
+
+          echo "=== Exported symbols of rebuilt SDVModGarden ==="
+          nm -gU work/native/SDVModGarden | grep -E "_sdv_"
+          for sym in _sdv_ext_set_rumble _sdv_ext_poll_input _sdv_ext_set_mouse_norm _sdv_ext_get_direct_touch_count _sdv_boot_report _sdv_boot_on_log _sdv_kb_show _sdv_kb_poll _sdv_kb_is_active; do
+            if ! nm -gU work/native/SDVModGarden | grep -q "$sym"; then
+              echo "MISSING EXPORTED SYMBOL: $sym"
+              exit 1
+            fi
+          done
+          echo "=== Linked frameworks ==="
+          otool -L work/native/SDVModGarden
+
+          APP="work/stage/Payload/SDViOS.app"
+          cp -f work/native/SDVModGarden "$APP/Frameworks/SDVModGarden.framework/SDVModGarden"
+
+      - name: Inject Audited SDVMobileControls.dll & Verify v1.0.2 Audio Fix
+        run: |
+          APP="work/stage/Payload/SDViOS.app"
+          DST="$APP/Frameworks/SDVModGarden.framework/BundledMods/SDVMobileControls"
+          mkdir -p "$DST"
+          cp -f "ModGarden/SDVMobileControls/prebuilt/SDVMobileControls.dll" "$DST/SDVMobileControls.dll"
+          cp -f "ModGarden/SDVMobileControls/manifest.json" "$DST/manifest.json"
+          shasum -a 256 "$DST/SDVMobileControls.dll"
+
+      - name: Verify MonoGame SoundBank Audio IL
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $appDir = (Resolve-Path "work/stage/Payload/SDViOS.app").Path
+          $mgDll = Join-Path $appDir "MonoGame.Framework.dll"
+          $cecilDll = Join-Path $appDir "Mono.Cecil.dll"
+          Add-Type -Path $cecilDll
+          $asm = [Mono.Cecil.AssemblyDefinition]::ReadAssembly($mgDll)
+          try {
+              $sb = $asm.MainModule.GetType("Microsoft.Xna.Framework.Audio.SoundBank")
+              $ex = $sb.Methods | Where-Object { $_.Name -eq "Exists" -and $_.Parameters.Count -eq 1 } | Select-Object -First 1
+              if ($ex.Body.Instructions.Count -lt 10) {
+                  throw "MonoGame SoundBank.Exists is broken (ops=$($ex.Body.Instructions.Count))"
+              }
+              Write-Host "[AUDIO OK] SoundBank.Exists has $($ex.Body.Instructions.Count) IL ops"
+          } finally {
+              $asm.Dispose()
+          }
+
+      - name: Sign & Strictly Verify Entire App Bundle with Apple codesign
+        run: |
+          APP="work/stage/Payload/SDViOS.app"
+          rm -rf "$APP/_CodeSignature"
+          rm -rf "$APP/Frameworks/SDVModGarden.framework/_CodeSignature"
+          rm -rf "$APP/Frameworks/libSkiaSharp.framework/_CodeSignature"
+
+          chmod 755 "$APP/SDViOS"
+          chmod 755 "$APP/Frameworks/SDVModGarden.framework/SDVModGarden"
+          chmod 755 "$APP/Frameworks/libSkiaSharp.framework/libSkiaSharp"
+
+          codesign --force --sign - "$APP/Frameworks/libSkiaSharp.framework"
+          codesign --force --sign - "$APP/Frameworks/SDVModGarden.framework"
+          codesign --force --sign - "$APP"
+
+          echo "=== Verifying signatures strictly with Apple codesign ==="
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
+      - name: Package Clean IPA & Full Mach-O / Integrity Audit
+        run: |
+          cd work/stage
+          zip -r -y -q ../../Garden-Launcher-1.0.2-iOS26-27-MobileUX.ipa Payload
+          cd ../..
+          python3 - << 'EOF'
+          import zipfile, hashlib, pathlib, struct
+
+          def validate_macho(data, label, is_dylib=False):
+              magic, cputype, cpusub, filetype, ncmds, sizeofcmds, flags, _ = struct.unpack_from("<8I", data, 0)
+              assert magic == 0xfeedfacf, f"{label}: not 64-bit Mach-O"
+              assert filetype == (6 if is_dylib else 2), f"{label}: unexpected filetype {filetype}"
+              pos = 32
+              segs = []
+              has_chained = False
+              has_sig = False
+              for _ in range(ncmds):
+                  cmd, sz = struct.unpack_from("<II", data, pos)
+                  if cmd == 0xe and is_dylib:
+                      raise AssertionError(f"{label}: illegal LC_LOAD_DYLINKER in MH_DYLIB")
+                  if cmd == 0x80000034:
+                      has_chained = True
+                  if cmd == 0x1d:
+                      off, csz = struct.unpack_from("<2I", data, pos + 8)
+                      assert off + csz == len(data), f"{label}: LC_CODE_SIGNATURE end mismatch"
+                      has_sig = True
+                  if cmd == 0x19:
+                      seg = data[pos+8:pos+24].rstrip(b"\0").decode()
+                      va, vs, fo, fs = struct.unpack_from("<4Q", data, pos + 24)
+                      assert vs % 0x4000 == 0, f"{label}: segment {seg} vmsize not 16KB aligned"
+                      if seg not in ("__PAGEZERO", "__LINKEDIT"):
+                          assert fs % 0x4000 == 0, f"{label}: segment {seg} filesize not 16KB aligned"
+                          assert fs <= vs, f"{label}: segment {seg} filesize > vmsize"
+                          segs.append((seg, va, vs))
+                      elif seg == "__LINKEDIT":
+                          assert fo + fs == len(data), f"{label}: __LINKEDIT end mismatch"
+                          segs.append((seg, va, vs))
+                  pos += sz
+              for a, b in zip(segs, segs[1:]):
+                  assert a[1] + a[2] == b[1], f"{label}: VM gap between {a[0]} and {b[0]}"
+              assert has_chained, f"{label}: missing LC_DYLD_CHAINED_FIXUPS"
+              assert has_sig, f"{label}: missing LC_CODE_SIGNATURE"
+              assert bytes.fromhex("fade0cc0") in data, f"{label}: missing SuperBlob signature"
+              print(f"  [Mach-O OK] {label}: 16KB aligned + LC_DYLD_CHAINED_FIXUPS + Apple codesign ({len(data):,} bytes)")
+
+          ipa = pathlib.Path("Garden-Launcher-1.0.2-iOS26-27-MobileUX.ipa")
+          new_dll = pathlib.Path("ModGarden/SDVMobileControls/prebuilt/SDVMobileControls.dll").read_bytes()
+          target_rel = "Payload/SDViOS.app/Frameworks/SDVModGarden.framework/BundledMods/SDVMobileControls/SDVMobileControls.dll"
+          with zipfile.ZipFile(ipa, "r") as z:
+              assert z.testzip() is None, "Corrupt ZIP!"
+              for n in z.namelist():
+                  low = n.lower()
+                  assert "/bundledgame/" not in low and "/content/" not in low, f"Proprietary content found: {n}"
+                  assert pathlib.Path(n).name.lower() not in {"stardew valley.dll", "xtile.dll", "bmfont.dll", "stardewvalley.gamedata.dll"}, f"Proprietary DLL found: {n}"
+              assert hashlib.sha256(z.read(target_rel)).digest() == hashlib.sha256(new_dll).digest(), "SDVMobileControls.dll SHA-256 mismatch!"
+              assert "Payload/SDViOS.app/_CodeSignature/CodeResources" in z.NameToInfo
+              assert "Payload/SDViOS.app/Frameworks/SDVModGarden.framework/_CodeSignature/CodeResources" in z.NameToInfo
+              validate_macho(z.read("Payload/SDViOS.app/SDViOS"), "SDViOS", is_dylib=False)
+              mg_bin = z.read("Payload/SDViOS.app/Frameworks/SDVModGarden.framework/SDVModGarden")
+              validate_macho(mg_bin, "SDVModGarden", is_dylib=True)
+              assert b"_sdv_ext_set_rumble" in mg_bin, "SDVModGarden missing _sdv_ext_set_rumble!"
+          print(f"VERIFIED CLEAN IPA: {ipa} ({ipa.stat().st_size:,} bytes, sha256={hashlib.sha256(ipa.read_bytes()).hexdigest()})")
+          EOF
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Garden-Launcher-1.0.2-iOS26-27-MobileUX
+          path: Garden-Launcher-1.0.2-iOS26-27-MobileUX.ipa
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Garden-Launcher-1.0.2-iOS26-27-MobileUX.ipa
+          tag_name: v1.0.2-mobileux
+          name: Garden Launcher v1.0.2 Mobile UX + Controller Rumble (iOS / iPadOS 26–27+)
+          body: |
+            Bản nâng cấp toàn diện trên nền gốc mới nhất [`hanprm9-dot/Garden-Launcher-iOS@v1.0.2`](https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/tag/v1.0.2) (iOS / iPadOS 26–27+, biên dịch lại `SDVModGarden.framework` + `SDVMobileControls.dll` và ký kiểm định bằng Apple Xcode `codesign --verify --deep --strict`).
+
+            ### Các tính năng & bản sửa lỗi mới trên v1.0.2
+            1. **Nút Bỏ Qua Cutscene (`SKIP`) luôn hiển thị rõ & chống cắt viền bo tròn iPhone**:
+               - Đưa nút `SKIP` vào vùng an toàn sâu khỏi bo góc màn hình / Dynamic Island / Tai thỏ và không bị che bởi hộp thoại.
+               - Luôn hiển thị nút `SKIP` ngay cả khi đang dùng **tay cầm rời** (nơi game gốc ẩn nút Skip vì `SnappyMenus`) và ngay cả khi nhân vật đang hiện hộp thoại (`DialogueBox`) trong cutscene; bấm cảm ứng 1 chạm hoặc bấm nút `Back`/`View` trên tay cầm đều bỏ qua mượt mà.
+            2. **Tương tác bảng Lịch & Nhiệm vụ người dân của mod UI Info Suite 2 trong Inventory (cả Cảm ứng & Tay cầm)**:
+               - **Bản Cảm ứng**: Chạm trực tiếp vào biểu tượng Lịch / Bảng Nhiệm vụ người dân của UI Info Suite 2 (hoặc nút mod khác trên `InventoryPage` / bên hông `GameMenu`) sẽ gửi tín hiệu chuột trái SMAPI chuẩn (`SButton.MouseLeft`) để mở bảng ngay chỉ với 1 chạm mà không ảnh hưởng kéo thả vật phẩm.
+               - **Bản Tay cầm**: Đẩy **Joystick phải (R-Stick)** ngay trong Inventory để di chuyển con trỏ mượt mà tới biểu tượng của UI Info Suite 2 rồi nhấn **`A`** (hoặc **`R3`**) để mở bảng Lịch / Nhiệm vụ; đẩy Joystick trái hoặc D-Pad sẽ lập tức quay lại điều khiển ô đồ chuẩn console.
+            3. **Sửa lỗi mod Seasonal Anime Portrait chỉ load 1 số nhân vật**:
+               - Ngừng việc `MapRamOptimizer` tự ý đẩy `Portraits/*` ra khỏi bộ nhớ đệm và gọi `Dispose()` lên texture của gói Content Patcher chân dung/nhân vật.
+               - Thêm cơ chế đồng bộ chân dung Zero-Harmony (`PortraitSync`) khi `SaveLoaded`, `DayStarted`, hoặc khi Content Patcher cập nhật `Portraits/*` / `Data/Characters`: tự làm mới cache và gọi `NPC.ChooseAppearance()` trực tiếp cho mọi nhân vật (kể cả trong nhà/chuồng/sự kiện), vượt qua lỗi `Texture2D.CopyFromTexture` (`glReadPixels`) trên OpenGL ES iOS vốn bỏ sót các nhân vật đã nạp sớm.
+            4. **Chế độ Rung tay cầm (CoreHaptics / `GCController.haptics`) bám sát 100% `StardewValley.Rumble` chuẩn Console / Nintendo Switch**:
+               - Biên dịch nhân native CoreHaptics 2 mô-tơ (`LeftHandle` trầm mạnh / `RightHandle` sắc nét, tự fallback 1 mô-tơ cho Switch/MFi) trong `SDVModGarden.framework` (`sdv_ext_set_rumble`).
+               - Tự động kích hoạt đủ toàn bộ sự kiện rung chuẩn của `StardewValley.Rumble`: Nổ bom (mạnh nhất 1.0 + giảm dần), cá cắn câu (0.75–0.95), quăng cần (0.50), kéo thanh câu trúng cá (0.10 liên tục), đỡ đòn / nhận sát thương / ngất (0.75), đánh quái (0.10–0.225), cuốc/rìu/cúp (0.10–0.35), tiếng vó ngựa trên đất vs đá/gỗ (0.30 vs 0.10), mở cửa/chuyển cảnh (0.10–0.15) — tự tôn trọng mục **Rumble (Rung)** trong Cài đặt game và tự ngắt tức thì khi tạm dừng / ngắt tay cầm / chuyển sang cảm ứng.
+          draft: false
+          prerelease: false
+          make_latest: true

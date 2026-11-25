@@ -6,6 +6,7 @@ using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Input;
 using StardewModdingAPI;
 using StardewValley;
+using StardewValley.Menus;
 
 namespace SDVMobileControls
 {
@@ -61,6 +62,9 @@ namespace SDVMobileControls
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate int GetDirectTouchCountDelegate();
 
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate void SetRumbleDelegate(float leftMotor, float rightMotor);
+
         [DllImport("/usr/lib/libSystem.dylib", EntryPoint = "dlsym")]
         private static extern IntPtr DarwinDlsym(IntPtr handle, [MarshalAs(UnmanagedType.LPStr)] string symbol);
 
@@ -89,11 +93,23 @@ namespace SDVMobileControls
         private static FieldInfo _windowMouseStateField;
         private static bool _windowMouseMemberResolved;
 
+        // Cached reflection handles for StardewValley.Rumble (100% Zero-Harmony console/Switch rumble mirror!)
+        private static bool _rumbleFieldsResolved;
+        private static FieldInfo _fRumbleIsRumbling;
+        private static FieldInfo _fRumbleStrength;
+        private static FieldInfo _fRumbleTimerCurrent;
+        private static FieldInfo _fRumbleTimerMax;
+        private static FieldInfo _fRumbleFade;
+        private static FieldInfo _fRumbleDuringFade;
+
         private readonly IMonitor _monitor;
         private readonly IntPtr _snapBuf;
         private PollInputDelegate _nativePoll;
         private SetMouseNormDelegate _nativeSetMouseNorm;
         private GetDirectTouchCountDelegate _nativeDirectTouches;
+        private SetRumbleDelegate _nativeSetRumble;
+        private float _lastSentRumbleL;
+        private float _lastSentRumbleR;
         private bool _nativeResolved;
         private bool _nativeAvailable;
         private bool _abiMismatchLogged;
@@ -121,6 +137,11 @@ namespace SDVMobileControls
         private bool _gamepadCursorInit;
         private long _lastRightStickStepMs;
         public bool IsRightStickSteeringGameplayCursor { get; private set; }
+        public bool IsRightStickMenuCursorActive { get; private set; }
+        public bool SuppressGamepadAButtonThisFrame { get; private set; }
+        private bool _prevGamepadAButtonDown;
+        private bool _prevGamepadR3ButtonDown;
+        private int _menuSyntheticLeftClickFrames;
 
         private static readonly List<Keys> EmptyKeysList = new List<Keys>(0);
         private readonly List<Keys> _physicalKeys = new List<Keys>(32);
@@ -161,6 +182,7 @@ namespace SDVMobileControls
                 IntPtr pPoll = IntPtr.Zero;
                 IntPtr pSetMouse = IntPtr.Zero;
                 IntPtr pDirectTouch = IntPtr.Zero;
+                IntPtr pSetRumble = IntPtr.Zero;
 
                 string[] libNames =
                 {
@@ -175,6 +197,7 @@ namespace SDVMobileControls
                         NativeLibrary.TryGetExport(h, "sdv_ext_poll_input", out pPoll);
                         NativeLibrary.TryGetExport(h, "sdv_ext_set_mouse_norm", out pSetMouse);
                         NativeLibrary.TryGetExport(h, "sdv_ext_get_direct_touch_count", out pDirectTouch);
+                        NativeLibrary.TryGetExport(h, "sdv_ext_set_rumble", out pSetRumble);
                         if (pPoll != IntPtr.Zero) break;
                     }
                 }
@@ -186,8 +209,13 @@ namespace SDVMobileControls
                         pPoll = DarwinDlsym(RTLD_DEFAULT, "sdv_ext_poll_input");
                         pSetMouse = DarwinDlsym(RTLD_DEFAULT, "sdv_ext_set_mouse_norm");
                         pDirectTouch = DarwinDlsym(RTLD_DEFAULT, "sdv_ext_get_direct_touch_count");
+                        pSetRumble = DarwinDlsym(RTLD_DEFAULT, "sdv_ext_set_rumble");
                     }
                     catch { }
+                }
+                else if (pSetRumble == IntPtr.Zero)
+                {
+                    try { pSetRumble = DarwinDlsym(RTLD_DEFAULT, "sdv_ext_set_rumble"); } catch { }
                 }
 
                 if (pPoll != IntPtr.Zero)
@@ -197,8 +225,10 @@ namespace SDVMobileControls
                         _nativeSetMouseNorm = Marshal.GetDelegateForFunctionPointer<SetMouseNormDelegate>(pSetMouse);
                     if (pDirectTouch != IntPtr.Zero)
                         _nativeDirectTouches = Marshal.GetDelegateForFunctionPointer<GetDirectTouchCountDelegate>(pDirectTouch);
+                    if (pSetRumble != IntPtr.Zero)
+                        _nativeSetRumble = Marshal.GetDelegateForFunctionPointer<SetRumbleDelegate>(pSetRumble);
                     _nativeAvailable = true;
-                    _monitor?.Log("[ExternalInput] Bound native iOS GameController bridge (Gamepad + Keyboard + Mouse).", LogLevel.Info);
+                    _monitor?.Log($"[ExternalInput] Bound native iOS GameController bridge (Gamepad + Keyboard + Mouse + CoreHapticsRumble={_nativeSetRumble != null}).", LogLevel.Info);
                 }
                 else
                 {
@@ -256,6 +286,8 @@ namespace SDVMobileControls
 
         private void OnSuppressionTransition(bool wasSuppressed, bool nowSuppressed)
         {
+            if (nowSuppressed)
+                PushRumbleToNative(0f, 0f);
             CurrentGamePadState = default;
             _physicalKeys.Clear();
             _prevSpecialKeys.Clear();
@@ -342,7 +374,11 @@ namespace SDVMobileControls
             if (next != ExternalInputMode.Gamepad)
             {
                 IsRightStickSteeringGameplayCursor = false;
+                IsRightStickMenuCursorActive = false;
+                SuppressGamepadAButtonThisFrame = false;
+                _menuSyntheticLeftClickFrames = 0;
                 _lastRightStickStepMs = 0;
+                PushRumbleToNative(0f, 0f);
             }
 
             // Clear any stale touch-simulated WASD keys when switching into or out of Gamepad mode
@@ -394,6 +430,9 @@ namespace SDVMobileControls
                         Game1.options.gamepadMode = Options.GamepadModes.ForceOn;
                     if (!Game1.options.gamepadControls)
                         Game1.options.gamepadControls = true;
+                    // CRITICAL for StardewValley.Rumble.update(): if playerOneIndex == -1, Rumble returns early before SetVibration!
+                    if ((int)Game1.playerOneIndex < 0)
+                        Game1.playerOneIndex = PlayerIndex.One;
                 }
                 else
                 {
@@ -435,6 +474,98 @@ namespace SDVMobileControls
                 gs.DPad);
         }
 
+        public GamePadState GetEffectiveGamePadStateForGame()
+        {
+            GamePadState gs = CurrentGamePadState;
+            bool stripR = IsRightStickSteeringGameplayCursor || IsRightStickMenuCursorActive;
+            bool stripA = SuppressGamepadAButtonThisFrame;
+            if (!stripR && !stripA)
+                return gs;
+
+            GamePadButtons btns = gs.Buttons;
+            if (stripA)
+            {
+                Buttons mask = 0;
+                if (gs.Buttons.B == ButtonState.Pressed) mask |= Buttons.B;
+                if (gs.Buttons.X == ButtonState.Pressed) mask |= Buttons.X;
+                if (gs.Buttons.Y == ButtonState.Pressed) mask |= Buttons.Y;
+                if (gs.Buttons.LeftShoulder == ButtonState.Pressed) mask |= Buttons.LeftShoulder;
+                if (gs.Buttons.RightShoulder == ButtonState.Pressed) mask |= Buttons.RightShoulder;
+                if (gs.Buttons.Start == ButtonState.Pressed) mask |= Buttons.Start;
+                if (gs.Buttons.Back == ButtonState.Pressed) mask |= Buttons.Back;
+                if (gs.Buttons.BigButton == ButtonState.Pressed) mask |= Buttons.BigButton;
+                if (gs.Buttons.LeftStick == ButtonState.Pressed) mask |= Buttons.LeftStick;
+                if (gs.Buttons.RightStick == ButtonState.Pressed) mask |= Buttons.RightStick;
+                if (gs.DPad.Up == ButtonState.Pressed) mask |= Buttons.DPadUp;
+                if (gs.DPad.Down == ButtonState.Pressed) mask |= Buttons.DPadDown;
+                if (gs.DPad.Left == ButtonState.Pressed) mask |= Buttons.DPadLeft;
+                if (gs.DPad.Right == ButtonState.Pressed) mask |= Buttons.DPadRight;
+                if (gs.Triggers.Left > 0.35f) mask |= Buttons.LeftTrigger;
+                if (gs.Triggers.Right > 0.35f) mask |= Buttons.RightTrigger;
+                btns = new GamePadButtons(mask);
+            }
+
+            return new GamePadState(
+                new GamePadThumbSticks(gs.ThumbSticks.Left, stripR ? Vector2.Zero : gs.ThumbSticks.Right),
+                gs.Triggers,
+                btns,
+                gs.DPad);
+        }
+
+        public static bool IsPointOnVanillaInventoryControl(GameMenu gm, Point ui)
+        {
+            if (gm == null) return false;
+            try
+            {
+                if (gm.upperRightCloseButton != null && gm.upperRightCloseButton.containsPoint(ui.X, ui.Y))
+                    return true;
+                if (gm.tabs != null)
+                {
+                    for (int i = 0; i < gm.tabs.Count; i++)
+                    {
+                        var t = gm.tabs[i];
+                        if (t != null && t.containsPoint(ui.X, ui.Y))
+                            return true;
+                    }
+                }
+                if (gm.GetCurrentPage() is InventoryPage inv)
+                {
+                    if (inv.inventory?.inventory != null)
+                    {
+                        for (int i = 0; i < inv.inventory.inventory.Count; i++)
+                        {
+                            var cc = inv.inventory.inventory[i];
+                            if (cc != null && cc.containsPoint(ui.X, ui.Y))
+                                return true;
+                        }
+                    }
+                    if (inv.equipmentIcons != null)
+                    {
+                        for (int i = 0; i < inv.equipmentIcons.Count; i++)
+                        {
+                            var eq = inv.equipmentIcons[i];
+                            if (eq != null && eq.containsPoint(ui.X, ui.Y))
+                                return true;
+                        }
+                    }
+                    if (inv.organizeButton != null && inv.organizeButton.containsPoint(ui.X, ui.Y)) return true;
+                    if (inv.trashCan != null && inv.trashCan.containsPoint(ui.X, ui.Y)) return true;
+                    if (inv.junimoNoteIcon != null && inv.junimoNoteIcon.containsPoint(ui.X, ui.Y)) return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private static Point RawToUiPoint(int rawX, int rawY, int bw, int bh)
+        {
+            int uiW = Game1.uiViewport.Width;
+            int uiH = Game1.uiViewport.Height;
+            if (uiW <= 0 || uiH <= 0 || bw <= 0 || bh <= 0)
+                return new Point(rawX, rawY);
+            return new Point((int)((long)rawX * uiW / bw), (int)((long)rawY * uiH / bh));
+        }
+
         private void StepGamepadRightStickCursor(float rx, float ry, int bw, int bh)
         {
             EnsureValidLocalMultiplayerWindow(bw, bh);
@@ -447,10 +578,40 @@ namespace SDVMobileControls
                 _gamepadCursorInit = true;
             }
 
-            // During free gameplay (no modal menu / minigame / emote wheel), drive smooth analog
-            // right-stick cursor movement directly in backbuffer coordinates so players can freely
-            // glide the cursor over UI Info Suite 2 icons and world tiles without pressing anything else.
-            bool canFreeCursor = Game1.activeClickableMenu == null && Game1.currentMinigame == null && Game1.emoteMenu == null;
+            SuppressGamepadAButtonThisFrame = false;
+
+            GameMenu gmInv = Game1.activeClickableMenu as GameMenu;
+            bool isInventoryPage = false;
+            if (gmInv != null)
+            {
+                try { isInventoryPage = gmInv.GetCurrentPage() is InventoryPage; } catch { }
+            }
+
+            if (!isInventoryPage)
+            {
+                IsRightStickMenuCursorActive = false;
+                _menuSyntheticLeftClickFrames = 0;
+            }
+            else
+            {
+                // If user navigates inventory with Left Stick or D-Pad, hand back to SnappyMenus cleanly
+                Vector2 ls = CurrentGamePadState.ThumbSticks.Left;
+                bool navUsed = (ls.X * ls.X + ls.Y * ls.Y > 0.09f) ||
+                    CurrentGamePadState.DPad.Up == ButtonState.Pressed ||
+                    CurrentGamePadState.DPad.Down == ButtonState.Pressed ||
+                    CurrentGamePadState.DPad.Left == ButtonState.Pressed ||
+                    CurrentGamePadState.DPad.Right == ButtonState.Pressed;
+                if (navUsed)
+                {
+                    IsRightStickMenuCursorActive = false;
+                    _menuSyntheticLeftClickFrames = 0;
+                }
+            }
+
+            // Allow smooth analog Right-Stick cursor BOTH during free gameplay (HUD icons / UI Info Suite 2)
+            // AND inside GameMenu -> InventoryPage (so controller players can steer onto UI Info Suite 2's
+            // Calendar & Help Wanted Quest icons and click A or R3 to open them!).
+            bool canFreeCursor = (Game1.activeClickableMenu == null && Game1.currentMinigame == null && Game1.emoteMenu == null) || isInventoryPage;
             float magSq = rx * rx + ry * ry;
             if (canFreeCursor && magSq > 0.0001f)
             {
@@ -480,6 +641,8 @@ namespace SDVMobileControls
                 _gamepadCursorX = (int)Math.Round(_gamepadCursorXf);
                 _gamepadCursorY = (int)Math.Round(_gamepadCursorYf);
                 IsRightStickSteeringGameplayCursor = true;
+                if (isInventoryPage)
+                    IsRightStickMenuCursorActive = true;
 
                 try
                 {
@@ -502,9 +665,182 @@ namespace SDVMobileControls
                 _gamepadCursorYf = _gamepadCursorY;
             }
 
+            bool aNow = CurrentGamePadState.Buttons.A == ButtonState.Pressed;
+            bool r3Now = CurrentGamePadState.Buttons.RightStick == ButtonState.Pressed;
+            bool aRising = aNow && !_prevGamepadAButtonDown;
+            bool r3Rising = r3Now && !_prevGamepadR3ButtonDown;
+            _prevGamepadAButtonDown = aNow;
+            _prevGamepadR3ButtonDown = r3Now;
+
+            if (isInventoryPage && IsRightStickMenuCursorActive)
+            {
+                try
+                {
+                    Game1.timerUntilMouseFade = 4000;
+                    Game1.mouseCursorTransparency = 1f;
+                    Game1.wasMouseVisibleThisFrame = true;
+                }
+                catch { }
+
+                Point uiPt = RawToUiPoint(_gamepadCursorX, _gamepadCursorY, bw, bh);
+                bool onVanillaInvCtrl = IsPointOnVanillaInventoryControl(gmInv, uiPt);
+                if (r3Rising || (aRising && !onVanillaInvCtrl))
+                {
+                    // Fire a clean 2-frame MouseLeft press at the R-stick cursor so SMAPI mods like
+                    // UI Info Suite 2 (Calendar / Help Wanted Quest icons) receive SButton.MouseLeft!
+                    _menuSyntheticLeftClickFrames = 2;
+                    SuppressGamepadAButtonThisFrame = true;
+                    try
+                    {
+                        Game1.lastCursorMotionWasMouse = true;
+                        Game1.input?.SetMousePosition(_gamepadCursorX, _gamepadCursorY);
+                    }
+                    catch { }
+                }
+            }
+
+            ButtonState synthLeft = ButtonState.Released;
+            if (_menuSyntheticLeftClickFrames > 0)
+            {
+                _menuSyntheticLeftClickFrames--;
+                synthLeft = ButtonState.Pressed;
+            }
+
             CurrentMouseState = new MouseState(
                 _gamepadCursorX, _gamepadCursorY, _scrollWheelValue,
-                ButtonState.Released, ButtonState.Released, ButtonState.Released, ButtonState.Released, ButtonState.Released);
+                synthLeft, ButtonState.Released, ButtonState.Released, ButtonState.Released, ButtonState.Released);
+        }
+
+        private static void EnsureRumbleFieldsResolved()
+        {
+            if (_rumbleFieldsResolved) return;
+            _rumbleFieldsResolved = true;
+            try
+            {
+                const BindingFlags stat = BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public;
+                Type rt = typeof(Rumble);
+                _fRumbleIsRumbling = rt.GetField("isRumbling", stat);
+                _fRumbleStrength = rt.GetField("rumbleStrength", stat);
+                _fRumbleTimerCurrent = rt.GetField("rumbleTimerCurrent", stat);
+                _fRumbleTimerMax = rt.GetField("rumbleTimerMax", stat);
+                _fRumbleFade = rt.GetField("fade", stat);
+                _fRumbleDuringFade = rt.GetField("rumbleDuringFade", stat);
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// Direct vibration entrypoint (called by Harmony GamePad.SetVibration prefix when JIT/Harmony is active,
+        /// or by our Zero-Harmony StardewValley.Rumble mirror on 0% JIT iOS).
+        /// </summary>
+        public void SetRumbleDirect(float leftMotor, float rightMotor)
+        {
+            if (!IsPhysicalGamepadActive || IsSuppressed || Game1.options == null || !Game1.options.rumble || Game1.paused)
+            {
+                PushRumbleToNative(0f, 0f);
+                return;
+            }
+            ShapeAndPushConsoleRumble(leftMotor, rightMotor);
+        }
+
+        /// <summary>
+        /// Zero-Harmony frame driver mirroring StardewValley.Rumble's exact live console/Switch vibration state
+        /// (explosions, fish bite, casting, bobber reel, sword parry, damage/KO, monster hits, heavy tools,
+        /// horse footsteps on dirt vs stone, doors/warps) straight into iOS CoreHaptics GCController.haptics!
+        /// </summary>
+        public void UpdateControllerRumble()
+        {
+            if (_nativeSetRumble == null)
+                return;
+
+            if (!IsPhysicalGamepadActive || IsSuppressed || Game1.options == null || !Game1.options.rumble || Game1.paused)
+            {
+                PushRumbleToNative(0f, 0f);
+                return;
+            }
+
+            EnsureRumbleFieldsResolved();
+            if (_fRumbleIsRumbling == null)
+                return;
+
+            try
+            {
+                bool active = (bool)_fRumbleIsRumbling.GetValue(null);
+                float strength = 0f;
+                if (active)
+                {
+                    float tCur = _fRumbleTimerCurrent != null ? (float)_fRumbleTimerCurrent.GetValue(null) : 0f;
+                    float tMax = _fRumbleTimerMax != null ? (float)_fRumbleTimerMax.GetValue(null) : 0f;
+                    if (tCur <= tMax)
+                    {
+                        bool fading = _fRumbleFade != null && (bool)_fRumbleFade.GetValue(null);
+                        strength = fading
+                            ? (_fRumbleDuringFade != null ? (float)_fRumbleDuringFade.GetValue(null) : 0f)
+                            : (_fRumbleStrength != null ? (float)_fRumbleStrength.GetValue(null) : 0f);
+                    }
+                }
+                strength = Math.Clamp(strength, 0f, 1f);
+                ShapeAndPushConsoleRumble(strength, strength);
+            }
+            catch
+            {
+                PushRumbleToNative(0f, 0f);
+            }
+        }
+
+        private void ShapeAndPushConsoleRumble(float rawLeft, float rawRight)
+        {
+            float l = Math.Clamp(rawLeft, 0f, 1f);
+            float r = Math.Clamp(rawRight, 0f, 1f);
+            float peak = Math.Max(l, r);
+            if (peak <= 0.005f)
+            {
+                PushRumbleToNative(0f, 0f);
+                return;
+            }
+
+            // Dual-motor console/Switch HD-rumble shaping:
+            // - Strong impacts (>=0.60: explosions, fish bite, damage/KO): deep left heavy motor + punchy right
+            // - Medium actions (0.25..0.60: casting, horse dirt gallop, heavy axe/pickaxe): balanced dual motor
+            // - Subtle cues (<0.25: fishing reel 0.10, monster hits 0.10-0.225, doors, wood/stone footsteps):
+            //   crisp high-frequency right handle lift so subtle 0.10 Switch-style tactile feedback is clearly felt!
+            float outL, outR;
+            if (peak >= 0.60f)
+            {
+                outL = l;
+                outR = r * 0.85f;
+            }
+            else if (peak >= 0.25f)
+            {
+                outL = l;
+                outR = r * 0.92f;
+            }
+            else
+            {
+                outL = l * 0.72f;
+                outR = Math.Clamp(Math.Max(r * 1.28f, 0.15f), 0f, 1f);
+            }
+            PushRumbleToNative(outL, outR);
+        }
+
+        private void PushRumbleToNative(float left, float right)
+        {
+            if (_nativeSetRumble == null)
+                return;
+            left = Math.Clamp(left, 0f, 1f);
+            right = Math.Clamp(right, 0f, 1f);
+            bool activeNow = left > 0.005f || right > 0.005f;
+            bool activePrev = _lastSentRumbleL > 0.005f || _lastSentRumbleR > 0.005f;
+            if (!activeNow && !activePrev)
+                return;
+            if (activeNow == activePrev &&
+                Math.Abs(left - _lastSentRumbleL) < 0.015f &&
+                Math.Abs(right - _lastSentRumbleR) < 0.015f)
+                return;
+
+            _lastSentRumbleL = left;
+            _lastSentRumbleR = right;
+            try { _nativeSetRumble(left, right); } catch { }
         }
 
         public void OnGameSetMousePositionRaw(int x, int y)
@@ -745,9 +1081,7 @@ namespace SDVMobileControls
                 }
                 if (IsPhysicalGamepadActive && Game1.input != null && InputCurrentGamepadField != null)
                 {
-                    GamePadState gps = IsRightStickSteeringGameplayCursor
-                        ? StripRightStick(CurrentGamePadState)
-                        : CurrentGamePadState;
+                    GamePadState gps = GetEffectiveGamePadStateForGame();
                     InputCurrentGamepadField.SetValue(Game1.input, gps);
                 }
             }

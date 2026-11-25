@@ -237,6 +237,8 @@ namespace SDVMobileControls
         private bool _nativeKbActive;
         private int _titleClickPulseFrames;
         private Point? _titleClickRawPos;
+        private int _gameMenuModClickPulseFrames;
+        private Point? _gameMenuModClickRawPos;
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate int NativeKbShowDelegate(
@@ -829,15 +831,68 @@ namespace SDVMobileControls
             try { return menu.GetType().Assembly != typeof(Game1).Assembly; } catch { return false; }
         }
 
-        private static bool IsSkippableCutsceneActive()
+        public static bool IsSkippableCutsceneActive()
         {
-            if (!Game1.eventUp || Game1.activeClickableMenu != null) return false;
+            if (!Game1.eventUp) return false;
+            if (Game1.activeClickableMenu != null && !(Game1.activeClickableMenu is DialogueBox))
+                return false;
             try
             {
                 var ev = Game1.CurrentEvent;
-                return ev != null && ev.skippable && !ev.skipped;
+                return ev != null && ev.skippable && !ev.skipped && !ev.isFestival;
             }
             catch { return false; }
+        }
+
+        private static void ExecuteCutsceneSkip()
+        {
+            try
+            {
+                var ev = Game1.CurrentEvent;
+                if (ev != null && ev.skippable && !ev.skipped)
+                {
+                    ev.skipped = true;
+                    ev.skipEvent();
+                    Game1.freezeControls = false;
+                }
+            }
+            catch { }
+            try { Game1.playSound("bigDeSelect"); } catch { }
+        }
+
+        public bool TryHandleSkipCutsceneTap(object pad, TouchCollection touches)
+        {
+            if (!IsSkippableCutsceneActive() || touches.Count == 0 || !RefreshViewport())
+                return false;
+            ComputeLayout();
+            for (int i = 0; i < touches.Count; i++)
+            {
+                TouchLocation tl = touches[i];
+                if (tl.State == TouchLocationState.Pressed)
+                {
+                    Vector2 vp = MapRawToViewport(tl.Position);
+                    if (_btnSkipEventRect.Contains((int)vp.X, (int)vp.Y))
+                    {
+                        ExecuteCutsceneSkip();
+                        _ctxTouchId = tl.Id;
+                        ResetMenuTapState();
+                        ApplyToPad(pad, Vector2.Zero, false, false, false);
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        public void DrawSkipCutsceneButtonOnly(object pad, SpriteBatch sb)
+        {
+            if (sb == null || sb.GraphicsDevice == null || !IsSkippableCutsceneActive())
+                return;
+            EnsureTextures(sb.GraphicsDevice);
+            if (!RefreshViewport()) return;
+            ComputeLayout();
+            PixelUi.GlobalOpacity = Math.Max(_cfg.PixelOpacity, 0.85f);
+            PixelUi.DrawPixelPill(sb, _pixel, EnsureBridge(pad), _btnSkipEventRect, "SKIP", PixelRole.Special, false, _vpH, -1, 0.96f);
         }
 
         private void ClearCustomButtonTouches()
@@ -2100,6 +2155,8 @@ namespace SDVMobileControls
                 _lastMenuMouseRaw = null;
                 _simMouseLeftPulseFrames = 0;
                 _simMouseRightPulseFrames = 0;
+                _gameMenuModClickPulseFrames = 0;
+                _gameMenuModClickRawPos = null;
                 return false;
             }
 
@@ -2122,6 +2179,8 @@ namespace SDVMobileControls
                 _lastMenuMouseRaw = null;
                 _hasCarpenterPreview = false;
 
+                _gameMenuModClickPulseFrames = 0;
+                _gameMenuModClickRawPos = null;
                 if (IsSkippableCutsceneActive() && RefreshViewport())
                 {
                     ComputeLayout();
@@ -2142,8 +2201,8 @@ namespace SDVMobileControls
                         Point pt = new Point((int)vp.X, (int)vp.Y);
                         if (tl.State == TouchLocationState.Pressed && _btnSkipEventRect.Contains(pt))
                         {
-                            try { Game1.CurrentEvent?.skipEvent(); } catch { }
-                            try { Game1.playSound("bigDeSelect"); } catch { }
+                            ExecuteCutsceneSkip();
+                            _ctxTouchId = tl.Id;
                             ApplyToPad(pad, Vector2.Zero, false, false, false);
                             return true;
                         }
@@ -2233,6 +2292,27 @@ namespace SDVMobileControls
             // Single TouchPanel.GetState() read per frame — from here on, ALWAYS return true!
             TouchCollection touches = TouchPanel.GetState();
             int activeMenuTouches = CountActiveTouches(touches);
+            // Allow 1-tap SKIP cutscene even while a DialogueBox is on screen (and even while using a gamepad!)
+            if (activeMenuTouches > 0 && IsSkippableCutsceneActive())
+            {
+                for (int i = 0; i < touches.Count; i++)
+                {
+                    TouchLocation tl = touches[i];
+                    if (tl.State == TouchLocationState.Pressed)
+                    {
+                        Vector2 vp = MapRawToViewport(tl.Position);
+                        if (_btnSkipEventRect.Contains((int)vp.X, (int)vp.Y))
+                        {
+                            ExecuteCutsceneSkip();
+                            _ctxTouchId = tl.Id;
+                            ResetMenuTapState();
+                            _invShop.Reset();
+                            ApplyToPad(pad, Vector2.Zero, false, false, false);
+                            return true;
+                        }
+                    }
+                }
+            }
             PollGamepadAutoHide(activeMenuTouches);
             if (ModEntry.ExternalInput != null && ModEntry.ExternalInput.IsExternalDeviceActive && activeMenuTouches == 0)
             {
@@ -2480,6 +2560,17 @@ namespace SDVMobileControls
             if (touches.Count == 0)
             {
                 ResetMenuTapState();
+                if (_gameMenuModClickPulseFrames > 0)
+                {
+                    _gameMenuModClickPulseFrames--;
+                    Point? pulsePos = _gameMenuModClickRawPos ?? _lastMenuMouseRaw;
+                    if (pulsePos.HasValue)
+                    {
+                        try { Game1.lastCursorMotionWasMouse = true; } catch { }
+                    }
+                    EnsureBridge(pad)?.ApplyInputWithMouse(pad, Vector2.Zero, false, false, false, pulsePos, true, false, _rawW, _rawH);
+                    return true;
+                }
                 // Keep simulated mouse position at last tapped point in RAW BackBuffer pixels (LeftDown=false) so Carpenter/Museum/Tooltips stay aligned!
                 EnsureBridge(pad)?.ApplyInputWithMouse(pad, Vector2.Zero, false, false, false, _lastMenuMouseRaw, false, false, _rawW, _rawH);
                 return true;
@@ -2678,6 +2769,26 @@ namespace SDVMobileControls
                         {
                             // 1-tap recovery on SkillsPage when a Level 5/10 profession bar has name == "-1" (#GL-LTQ82M)!
                         }
+                        else if (topMenu is GameMenu gmModTap && ShouldRouteGameMenuTapToSmapiMouse(gmModTap, ui))
+                        {
+                            // Route non-vanilla GameMenu taps (e.g. UI Info Suite 2 Calendar & Help Wanted Quest icons
+                            // inside InventoryPage or beside GameMenu!) through a true 2-frame Simulated MouseLeft click
+                            // so SMAPI Events.Input.ButtonPressed(SButton.MouseLeft) fires cleanly just like PC!
+                            _junimoHoverMenu = null;
+                            _junimoHoveredSlot = null;
+                            _dlgHoverMenu = null;
+                            _dlgHoveredIdx = -1;
+                            _hasCarpenterPreview = false;
+                            Point clickRaw = ViewportToRaw(vp);
+                            _lastMenuMouseRaw = clickRaw;
+                            _gameMenuModClickRawPos = clickRaw;
+                            _gameMenuModClickPulseFrames = 1;
+                            try { Game1.lastCursorMotionWasMouse = true; } catch { }
+                            try { topMenu.performHoverAction(ui.X, ui.Y); } catch { }
+                            ResetMenuTapState();
+                            EnsureBridge(pad)?.ApplyInputWithMouse(pad, Vector2.Zero, false, false, false, clickRaw, true, false, _rawW, _rawH);
+                            return true;
+                        }
                         else
                         {
                             _junimoHoverMenu = null;
@@ -2783,6 +2894,41 @@ namespace SDVMobileControls
                 if (_ctxQuestEscRect.Contains((int)vp.X, (int)vp.Y))
                     return true;
             }
+            return false;
+        }
+
+        private static bool ShouldRouteGameMenuTapToSmapiMouse(GameMenu gm, Point ui)
+        {
+            if (gm == null)
+                return false;
+            try
+            {
+                if (gm.upperRightCloseButton != null && gm.upperRightCloseButton.containsPoint(ui.X, ui.Y))
+                    return false;
+                if (gm.tabs != null)
+                {
+                    for (int i = 0; i < gm.tabs.Count; i++)
+                    {
+                        var t = gm.tabs[i];
+                        if (t != null && t.containsPoint(ui.X, ui.Y))
+                            return false;
+                    }
+                }
+                IClickableMenu curPage = gm.GetCurrentPage();
+                if (curPage is InventoryPage)
+                {
+                    // Any tap inside InventoryPage that is NOT a vanilla slot/equipment/organize/trash/junimo button
+                    // (e.g. UI Info Suite 2 Calendar & Help Wanted Quest buttons!) fires real SMAPI MouseLeft!
+                    return !ExternalInputBridge.IsPointOnVanillaInventoryControl(gm, ui);
+                }
+                // On other GameMenu tabs, route taps OUTSIDE the main menu frame (sidebars/overlays added by mods)
+                if (ui.X < gm.xPositionOnScreen || ui.X > gm.xPositionOnScreen + gm.width ||
+                    ui.Y < gm.yPositionOnScreen || ui.Y > gm.yPositionOnScreen + gm.height)
+                {
+                    return true;
+                }
+            }
+            catch { }
             return false;
         }
 
@@ -3491,23 +3637,21 @@ namespace SDVMobileControls
         {
             if (sb == null || sb.GraphicsDevice == null)
                 return;
+
+            // ALWAYS draw the crisp safe-area SKIP pill during skippable cutscenes — BOTH with Touch AND with
+            // an external Gamepad (where vanilla Stardew hides its Skip button due to SnappyMenus!) AND even
+            // while a DialogueBox is open!
+            if (IsSkippableCutsceneActive())
+            {
+                DrawSkipCutsceneButtonOnly(pad, sb);
+            }
+
             if (_gamepadHideHud)
                 return;
 
             IClickableMenu rawMenu = Game1.activeClickableMenu;
             if (rawMenu == null)
-            {
-                // Draw crisp pixel SKIP pill during skippable cutscenes (clear of Notch/Dynamic Island & Home Bar!)
-                if (IsSkippableCutsceneActive())
-                {
-                    EnsureTextures(sb.GraphicsDevice);
-                    if (!RefreshViewport()) return;
-                    ComputeLayout();
-                    PixelUi.GlobalOpacity = _cfg.PixelOpacity;
-                    PixelUi.DrawPixelPill(sb, _pixel, EnsureBridge(pad), _btnSkipEventRect, "SKIP", PixelRole.Special, false, _vpH, -1, 0.92f);
-                }
                 return;
-            }
 
             IClickableMenu topMenu = GetTopmostMenu(rawMenu);
             bool isThirdParty = IsThirdPartyModMenu(topMenu);
@@ -6969,9 +7113,11 @@ namespace SDVMobileControls
             int rightEdgePad = Math.Max(_safeRightPx + 12, Math.Max(16, (int)(_vpW * 0.025f)));
             _btnRotateRect = new Rectangle(_vpW - rotW - rightEdgePad, (int)(_vpH * 0.34f), rotW, rotH);
             _btnSpecRect = new Rectangle(_vpW - rotW - rightEdgePad, (int)(_vpH * 0.34f), rotW, rotH);
-            int skipH = (int)Math.Clamp(unit * 0.068f, 34f, 60f);
-            int skipW = (int)(skipH * 2.15f);
-            _btnSkipEventRect = new Rectangle(_vpW - skipW - rightEdgePad, (int)Math.Max(unit * 0.028f, 16f), skipW, skipH);
+            int skipH = (int)Math.Clamp(unit * 0.072f, 36f, 62f);
+            int skipW = (int)(skipH * 2.35f);
+            int skipRightPad = Math.Max(_safeRightPx + 24, Math.Max(36, (int)(_vpW * 0.055f)));
+            int skipTopPad = Math.Max(38, (int)(_vpH * 0.085f));
+            _btnSkipEventRect = new Rectangle(_vpW - skipW - skipRightPad, skipTopPad, skipW, skipH);
 
             // 1-Tap Left-Handed Mirror Layout (WYSIWYG in both Gameplay AND Edit Layout!)
             if (_cfg.LeftHandedMobile)

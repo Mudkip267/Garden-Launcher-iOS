@@ -130,6 +130,161 @@ namespace SDVMobileControls
             RunPrune(keepRecentOffscreen: 0, runGc: true, reason: reason ?? "HighRAM");
         }
 
+        /// <summary>
+        /// Safely refreshes stale or Content Patcher-invalidated NPC portraits without relying on
+        /// MonoGame iOS Texture2D.CopyFromTexture() (which uses OpenGL ES FBO + glReadPixels and
+        /// silently swallows failures, leaving early-loaded villagers stuck on vanilla portraits
+        /// while lazy-loaded villagers show Seasonal Anime Portraits).
+        /// </summary>
+        public int RefreshInvalidatedPortraits(HashSet<string> invalidatedNormKeys, bool reloadAll, string reason)
+        {
+            if (!Context.IsWorldReady || Game1.content == null)
+                return 0;
+            if (!EnsureReflection(Game1.content) || _fNpcPortrait == null)
+                return 0;
+
+            int unlinkedCacheKeys = 0;
+            int refreshedNpcs = 0;
+            int eagerReloaded = 0;
+            try
+            {
+                object coordinator = _fCoordinator.GetValue(Game1.content);
+                var mgrListObj = coordinator != null ? (_fContentManagers.GetValue(coordinator) as IEnumerable) : null;
+
+                // 1. Unlink ONLY stale/invalidated Portraits/* entries from GameContentManagers (never Dispose!)
+                //    so the next Game1.content.Load<Texture2D>() creates a fresh Texture2D straight from Content Patcher.
+                if (mgrListObj != null)
+                {
+                    var gameManagers = new List<object>(8);
+                    foreach (object m in mgrListObj)
+                    {
+                        if (m != null && m.GetType().Name.IndexOf("GameContentManager", StringComparison.Ordinal) >= 0)
+                            gameManagers.Add(m);
+                    }
+
+                    var unlinkedTex = new HashSet<Texture2D>(ReferenceComparer.Instance);
+                    foreach (object gm in gameManagers)
+                    {
+                        var dict = GetCacheDict(gm);
+                        if (dict == null || dict.Count == 0) continue;
+                        List<string> rmKeys = null;
+                        foreach (var kv in dict)
+                        {
+                            if (!(kv.Value is Texture2D tex))
+                                continue;
+                            string norm = NormalizeAssetKey(kv.Key);
+                            if (!norm.StartsWith("portraits/", StringComparison.OrdinalIgnoreCase))
+                                continue;
+                            if (reloadAll || (invalidatedNormKeys != null && invalidatedNormKeys.Contains(norm)))
+                            {
+                                if (rmKeys == null) rmKeys = new List<string>(16);
+                                rmKeys.Add(kv.Key);
+                                unlinkedTex.Add(tex);
+                            }
+                        }
+                        if (rmKeys != null)
+                        {
+                            for (int i = 0; i < rmKeys.Count; i++)
+                            {
+                                if (dict.TryGetValue(rmKeys[i], out object v) && v is Texture2D t)
+                                    RemoveFromBaseDisposables(gm, t);
+                                dict.Remove(rmKeys[i]);
+                                unlinkedCacheKeys++;
+                            }
+                        }
+                    }
+
+                    if (unlinkedTex.Count > 0)
+                        PurgeFromMonoGameContentManager(_fVanillaContentMgr?.GetValue(coordinator), unlinkedTex);
+                }
+
+                // 2. Refresh every NPC (top-level locations + all building interiors + active event actors)
+                var currentLoc = Game1.currentLocation;
+                void RefreshNpc(NPC ch, bool isLocalOrEvent)
+                {
+                    if (ch == null || ch.portraitOverridden)
+                        return;
+
+                    Texture2D curTex = _fNpcPortrait.GetValue(ch) as Texture2D;
+                    bool shouldRefresh = reloadAll;
+                    if (!shouldRefresh && invalidatedNormKeys != null && invalidatedNormKeys.Count > 0)
+                    {
+                        string curNorm = curTex != null ? NormalizeAssetKey(curTex.Name) : null;
+                        if (!string.IsNullOrEmpty(curNorm) && invalidatedNormKeys.Contains(curNorm))
+                            shouldRefresh = true;
+                        else if (!string.IsNullOrEmpty(ch.Name))
+                        {
+                            string baseKey = "portraits/" + ch.Name.ToLowerInvariant();
+                            if (invalidatedNormKeys.Contains(baseKey))
+                                shouldRefresh = true;
+                            else
+                            {
+                                // Match seasonal/beach variants like portraits/abigail_winter or portraits/abigail_spring
+                                string prefix = baseKey + "_";
+                                foreach (string ik in invalidatedNormKeys)
+                                {
+                                    if (ik.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        shouldRefresh = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (!shouldRefresh)
+                        return;
+
+                    // Only touch villagers (or NPCs that already had a loaded portrait)
+                    if (!ch.IsVillager && curTex == null)
+                        return;
+
+                    _fNpcPortrait.SetValue(ch, null);
+                    if (reloadAll)
+                    {
+                        try { ch.LastAppearanceId = null; } catch { }
+                    }
+                    refreshedNpcs++;
+
+                    if (isLocalOrEvent || ReferenceEquals(ch.currentLocation, currentLoc))
+                    {
+                        try
+                        {
+                            ch.ChooseAppearance(null);
+                            eagerReloaded++;
+                        }
+                        catch { }
+                    }
+                }
+
+                Utility.ForEachCharacter(ch =>
+                {
+                    RefreshNpc(ch, isLocalOrEvent: false);
+                    return true;
+                });
+
+                var evActors = Game1.CurrentEvent?.actors;
+                if (evActors != null)
+                {
+                    for (int i = 0; i < evActors.Count; i++)
+                        RefreshNpc(evActors[i], isLocalOrEvent: true);
+                }
+
+                if (refreshedNpcs > 0 || unlinkedCacheKeys > 0)
+                {
+                    _monitor?.Log($"[PortraitSync:{reason}] Refreshed {refreshedNpcs} NPCs ({eagerReloaded} local eager, {unlinkedCacheKeys} cached Portraits/* reset for fresh Content Patcher load).", LogLevel.Info);
+                }
+            }
+            catch (Exception ex)
+            {
+                _monitor?.Log($"[PortraitSync:{reason}] Error: {ex.Message}", LogLevel.Trace);
+            }
+            return refreshedNpcs;
+        }
+
+        public static string NormalizePortraitKey(string raw) => NormalizeAssetKey(raw);
+
         private void ScanContentPatcherPacks()
         {
             if (_cpPacksScanned || _helper?.ModRegistry == null)
@@ -356,37 +511,32 @@ namespace SDVMobileControls
                     catch { }
                 }
 
-                // Protect portraits of NPCs in the current location or with custom overridden portraits
-                bool prunePortraits = (_fNpcPortrait != null && Game1.activeClickableMenu == null && !Game1.dialogueUp);
-                if (prunePortraits)
+                // Protect ALL villager/NPC portraits across every location, building interior, and active event.
+                // Never evict Portraits/* during RAM pruning — all portraits combined are small (~6-8 MB),
+                // and evicting them breaks Content Patcher Seasonal Anime Portrait propagation on iOS!
+                bool prunePortraits = false;
+                if (_fNpcPortrait != null)
                 {
                     try
                     {
-                        if (Game1.currentLocation?.characters != null)
+                        Utility.ForEachCharacter(ch =>
                         {
-                            for (int i = 0; i < Game1.currentLocation.characters.Count; i++)
+                            if (ch != null && _fNpcPortrait.GetValue(ch) is Texture2D pt && !pt.IsDisposed)
+                                protectedTex.Add(pt);
+                            return true;
+                        });
+                        var evActors = Game1.CurrentEvent?.actors;
+                        if (evActors != null)
+                        {
+                            for (int i = 0; i < evActors.Count; i++)
                             {
-                                NPC ch = Game1.currentLocation.characters[i];
-                                if (ch != null && _fNpcPortrait.GetValue(ch) is Texture2D pt)
+                                NPC ch = evActors[i];
+                                if (ch != null && _fNpcPortrait.GetValue(ch) is Texture2D pt && !pt.IsDisposed)
                                     protectedTex.Add(pt);
                             }
                         }
-                        if (Game1.locations != null)
-                        {
-                            for (int l = 0; l < Game1.locations.Count; l++)
-                            {
-                                var loc = Game1.locations[l];
-                                if (loc?.characters == null) continue;
-                                for (int c = 0; c < loc.characters.Count; c++)
-                                {
-                                    NPC ch = loc.characters[c];
-                                    if (ch != null && (ch.portraitOverridden || !ch.IsVillager) && _fNpcPortrait.GetValue(ch) is Texture2D pt)
-                                        protectedTex.Add(pt);
-                                }
-                            }
-                        }
                     }
-                    catch { prunePortraits = false; }
+                    catch { }
                 }
 
                 // Protect non-evictable textures in ALL GameContentManagers (in case a texture is shared under a protected key)
@@ -514,10 +664,16 @@ namespace SDVMobileControls
                         bool shouldEvict = toUnlink.Contains(mtex);
                         if (!shouldEvict && isCpPack && !mtex.IsDisposed && !allLiveGameTex.Contains(mtex))
                         {
-                            // Pure Content Patcher pack texture not referenced by any GameContentManager or Game1
-                            shouldEvict = true;
-                            toUnlink.Add(mtex);
-                            toImmediateDispose.Add(mtex);
+                            string mNorm = NormalizeAssetKey(kv.Key);
+                            // Never eagerly dispose Portrait or Character pack textures — Seasonal Anime Portrait
+                            // packs reuse them across seasons/weather/appearances and indoor/outdoor transitions.
+                            if (mNorm.IndexOf("portrait", StringComparison.OrdinalIgnoreCase) < 0 &&
+                                mNorm.IndexOf("character", StringComparison.OrdinalIgnoreCase) < 0)
+                            {
+                                shouldEvict = true;
+                                toUnlink.Add(mtex);
+                                toImmediateDispose.Add(mtex);
+                            }
                         }
 
                         if (shouldEvict)

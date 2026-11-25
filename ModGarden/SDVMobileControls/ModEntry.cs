@@ -14,7 +14,9 @@ using StardewModdingAPI;
 using StardewModdingAPI.Events;
 using StardewModdingAPI.Utilities;
 using StardewValley;
+using StardewValley.BellsAndWhistles;
 using StardewValley.Extensions;
+using StardewValley.Locations;
 using StardewValley.Menus;
 using StardewValley.Mods;
 using StardewValley.Tools;
@@ -56,6 +58,7 @@ namespace SDVMobileControls
         internal static bool SynthesizingTapAction;
         private static readonly List<HUDMessage> _stashedHudMessages = new List<HUDMessage>(8);
         private static bool _hudMessagesStashed;
+        private static bool _mineFloorRelocateSuppressed;
         private static FieldInfo _soundBankSoundsField;
         private static FieldInfo _game1HooksField;
         private static bool _gardenHooksInstalled;
@@ -526,9 +529,40 @@ namespace SDVMobileControls
             }
         }
 
+        private static void RestoreMineFloorRelocateIfNeeded()
+        {
+            if (!_mineFloorRelocateSuppressed)
+                return;
+            _mineFloorRelocateSuppressed = false;
+            try
+            {
+                if (Game1.game1 != null)
+                    Game1.game1.takingMapScreenshot = false;
+            }
+            catch { }
+        }
+
         private void OnRenderingStepHudRelocate(object sender, RenderingStepEventArgs e)
         {
-            if (e == null || e.Step != RenderSteps.HUD || Engine == null || (Game1.game1 != null && Game1.game1.takingMapScreenshot))
+            if (e == null || Engine == null)
+                return;
+
+            // 1. Relocate MineShaft (Mines / Skull Cavern) & VolcanoDungeon floor number safely below iPhone rounded corner!
+            if (e.Step == RenderSteps.World_AlwaysFront)
+            {
+                if (!Context.IsWorldReady || Game1.game1 == null || Game1.game1.takingMapScreenshot)
+                    return;
+                var loc = Game1.currentLocation;
+                bool relocateMine = (loc is MineShaft ms && !ms.isSideBranch()) || (loc is VolcanoDungeon vd && vd.level.Value > 0);
+                if (relocateMine)
+                {
+                    Game1.game1.takingMapScreenshot = true;
+                    _mineFloorRelocateSuppressed = true;
+                }
+                return;
+            }
+
+            if (e.Step != RenderSteps.HUD || (Game1.game1 != null && Game1.game1.takingMapScreenshot))
                 return;
             try
             {
@@ -553,7 +587,57 @@ namespace SDVMobileControls
 
         private void OnRenderedStepHudRelocate(object sender, RenderedStepEventArgs e)
         {
-            if (e == null || e.Step != RenderSteps.HUD || !_hudMessagesStashed)
+            if (e == null)
+                return;
+
+            if (e.Step == RenderSteps.World_AlwaysFront && _mineFloorRelocateSuppressed)
+            {
+                RestoreMineFloorRelocateIfNeeded();
+                try
+                {
+                    if (e.SpriteBatch == null || Engine == null || !Context.IsWorldReady)
+                        return;
+                    Rectangle tsarea = Game1.graphics.GraphicsDevice.Viewport.GetTitleSafeArea();
+                    if (!Engine.TryGetMineFloorSafePosition(tsarea, out int fx, out int fy))
+                        return;
+
+                    if (Game1.currentLocation is MineShaft ms && !ms.isSideBranch())
+                    {
+                        int area = ms.getMineArea(-1);
+                        Color color = (area == 0 || (ms.isDarkArea() && area != 121)) ? SpriteText.color_White
+                            : area == 10 ? SpriteText.color_Green
+                            : area == 40 ? SpriteText.color_Cyan
+                            : area == 80 ? SpriteText.color_Red
+                            : SpriteText.color_Purple;
+                        string levelStr = (ms.mineLevel + (area == 121 ? -120 : 0)).ToString();
+                        int height = SpriteText.getHeightOfString(levelStr);
+                        SpriteText.drawString(e.SpriteBatch, levelStr, fx, fy, 999999, -1, height, 1f, 1f, false, 2, "", color);
+                        if (ms.mustKillAllMonstersToAdvance() && Game1.mouseCursors != null && !Game1.mouseCursors.IsDisposed)
+                        {
+                            int width = SpriteText.getWidthOfString(levelStr);
+                            e.SpriteBatch.Draw(
+                                Game1.mouseCursors,
+                                new Vector2(fx + width + 16, fy) + new Vector2(4f, 6f) * 4f,
+                                new Rectangle(192, 324, 7, 10),
+                                Color.White,
+                                0f,
+                                new Vector2(3f, 5f),
+                                4f + Game1.dialogueButtonScale / 25f,
+                                SpriteEffects.None,
+                                1f);
+                        }
+                    }
+                    else if (Game1.currentLocation is VolcanoDungeon vd && vd.level.Value > 0)
+                    {
+                        string levelStr = vd.level.Value.ToString();
+                        SpriteText.drawString(e.SpriteBatch, levelStr, fx, fy, 999999, -1, 999999, 1f, 1f, false, 2, "", SpriteText.color_Red);
+                    }
+                }
+                catch { }
+                return;
+            }
+
+            if (e.Step != RenderSteps.HUD || !_hudMessagesStashed)
                 return;
 
             RestoreStashedHudMessagesIfNeeded();
@@ -576,6 +660,7 @@ namespace SDVMobileControls
 
         private void OnUpdateTicking(object sender, UpdateTickingEventArgs e)
         {
+            RestoreMineFloorRelocateIfNeeded();
             try
             {
                 if (!_gardenHooksInstalled)
@@ -583,7 +668,9 @@ namespace SDVMobileControls
                 if (ExternalInput != null)
                 {
                     ExternalInput.SetManagedSuppressed(Engine != null && Engine.IsUiOverlayBlockingExternalInput(null));
-                    ExternalInput.ApplyStardewGamepadMode();
+                    // CRITICAL: Poll & push SInputState.<ControllerState>k__BackingField AFTER SInputState.TrueUpdate()
+                    // and BEFORE Game1._update() -> Game1.updateActiveMenu() so Gamepad UI menus work 100% on 0% JIT!
+                    ExternalInput.PollFrame();
                 }
             }
             catch { }
@@ -591,6 +678,7 @@ namespace SDVMobileControls
 
         private void OnUpdateTicked(object sender, UpdateTickedEventArgs e)
         {
+            RestoreMineFloorRelocateIfNeeded();
             RestoreStashedHudMessagesIfNeeded();
             try
             {
@@ -1182,7 +1270,7 @@ namespace SDVMobileControls
         private static bool PrefixExtMouseState(ref MouseState __result)
         {
             var ext = ExternalInput;
-            if (ext != null && ext.ShouldOverrideMouse)
+            if (ext != null && ext.ShouldPushMouseStateNow)
             {
                 __result = ext.CurrentMouseState;
                 return false;
@@ -1196,6 +1284,11 @@ namespace SDVMobileControls
             if (ext != null && ext.ShouldOverrideMouse)
             {
                 ext.OnGameSetMousePositionRaw(x, y);
+                if (!ext.ShouldPushMouseStateNow)
+                {
+                    // Allow Stardew native Game1.setMousePositionRaw to run unimpeded for SnappyMenus!
+                    return true;
+                }
                 try
                 {
                     Game1.input?.SetMousePosition(x, y);

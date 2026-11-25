@@ -49,6 +49,7 @@ namespace SDVMobileControls
         private readonly Dictionary<string, long> _lastUsedSeq = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         private long _warpSeq;
         private int _flagPollCounter;
+        private long _lastWarpPruneMs;
 
         // Cached reflection handles (initialized lazily on first prune)
         private bool _reflReady;
@@ -92,9 +93,13 @@ namespace SDVMobileControls
             if (!Context.IsWorldReady || newLocation == null)
                 return;
             RecordLocationTileSheets(newLocation);
-            // Keep up to 2 most recently visited off-screen tilesheets so stepping in/out of
-            // FarmHouse/Coop/Barn/Shops stays instant while evicting older maps!
-            RunPrune(keepRecentOffscreen: 2, runGc: false, reason: "Warp:" + (newLocation.NameOrUniqueName ?? "?"));
+            // Cooldown prevents hitching when stepping rapidly between FarmHouse/Coop/Barn/Shops
+            long nowMs = Environment.TickCount64;
+            if (nowMs - _lastWarpPruneMs < 12000L)
+                return;
+            _lastWarpPruneMs = nowMs;
+            // Keep up to 2 most recently visited off-screen tilesheets so stepping in/out stays instant while evicting older maps!
+            RunPrune(keepRecentOffscreen: 2, runGc: false, blockingGc: false, reason: "Warp:" + (newLocation.NameOrUniqueName ?? "?"));
         }
 
         public void OnDayStarted()
@@ -102,23 +107,26 @@ namespace SDVMobileControls
             if (!Context.IsWorldReady)
                 return;
             RecordCurrentMapTileSheets();
-            // New day (or season change): flush all off-screen map tilesheets cleanly
-            RunPrune(keepRecentOffscreen: 0, runGc: true, reason: "DayStarted");
+            // New day (or season change): flush all off-screen map tilesheets cleanly (blocking Gen2 OK during fade-in!)
+            RunPrune(keepRecentOffscreen: 0, runGc: true, blockingGc: true, reason: "DayStarted");
         }
 
         public void PollManualPruneFlag()
         {
             if (!Context.IsWorldReady)
                 return;
-            if (++_flagPollCounter < 45)
+            if (++_flagPollCounter < 60)
                 return;
             _flagPollCounter = 0;
             try
             {
                 if (!File.Exists(_pruneFlagPath))
                     return;
+                string mode = "";
+                try { mode = File.ReadAllText(_pruneFlagPath)?.Trim() ?? ""; } catch { }
                 File.Delete(_pruneFlagPath);
-                RunPrune(keepRecentOffscreen: 0, runGc: true, reason: "ManualGC");
+                bool critical = string.Equals(mode, "CRIT", StringComparison.OrdinalIgnoreCase);
+                RunPrune(keepRecentOffscreen: 0, runGc: true, blockingGc: critical, reason: critical ? "AutoCritGC" : "ManualGC");
             }
             catch { }
         }
@@ -127,7 +135,8 @@ namespace SDVMobileControls
         {
             if (!Context.IsWorldReady)
                 return;
-            RunPrune(keepRecentOffscreen: 0, runGc: true, reason: reason ?? "HighRAM");
+            bool isCrit = reason != null && reason.IndexOf("90", StringComparison.Ordinal) >= 0;
+            RunPrune(keepRecentOffscreen: 0, runGc: true, blockingGc: isCrit, reason: reason ?? "HighRAM");
         }
 
         /// <summary>
@@ -404,7 +413,7 @@ namespace SDVMobileControls
             return _fCoordinator != null && _fCacheObj != null && _fCacheDict != null && _fContentManagers != null;
         }
 
-        private void RunPrune(int keepRecentOffscreen, bool runGc, string reason)
+        private void RunPrune(int keepRecentOffscreen, bool runGc, bool blockingGc, string reason)
         {
             // Never prune while actively saving, mid-event, or inside title/minigame
             if (Game1.content == null || Game1.currentLocation == null || Game1.eventUp || Game1.currentMinigame != null)
@@ -804,7 +813,7 @@ namespace SDVMobileControls
                         double mbGc = bytesGcCandidate / (1024.0 * 1024.0);
                         _monitor?.Log($"[MapRamOptimizer] ({reason}) Freed {disposedCount} CP textures ({mbImm:F1} MB) + unlinked {unlinkedCount} off-screen textures ({mbGc:F1} MB GC-safe).", LogLevel.Info);
 
-                        if (runGc)
+                        if (runGc && blockingGc)
                         {
                             try
                             {
@@ -812,7 +821,7 @@ namespace SDVMobileControls
                             }
                             catch { }
                         }
-                        else if ((bytesImmediate + bytesGcCandidate) >= 24L * 1024L * 1024L)
+                        else if (runGc || (bytesImmediate + bytesGcCandidate) >= 24L * 1024L * 1024L)
                         {
                             try
                             {

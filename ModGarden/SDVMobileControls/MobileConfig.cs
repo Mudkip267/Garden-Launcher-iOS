@@ -228,7 +228,7 @@ namespace SDVMobileControls
 
         public bool ConsumeEditLayoutFlag()
         {
-            if (++_flagCounter < 8)
+            if (++_flagCounter < 25)
                 return false;
             _flagCounter = 0;
             try
@@ -267,7 +267,7 @@ namespace SDVMobileControls
 
         public bool ConsumePauseFlag()
         {
-            if (++_pauseCounter < 6)
+            if (++_pauseCounter < 20)
                 return false;
             _pauseCounter = 0;
             try
@@ -311,7 +311,7 @@ namespace SDVMobileControls
         public void PollReload()
         {
             PollNativeSafeArea(force: false);
-            if (++_pollCounter < 25)
+            if (++_pollCounter < 60)
                 return;
             _pollCounter = 0;
             Reload(force: false);

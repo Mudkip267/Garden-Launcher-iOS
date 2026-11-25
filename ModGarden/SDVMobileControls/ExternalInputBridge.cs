@@ -92,6 +92,9 @@ namespace SDVMobileControls
         private static PropertyInfo _windowMouseStateProp;
         private static FieldInfo _windowMouseStateField;
         private static bool _windowMouseMemberResolved;
+        private static FieldInfo _sInputControllerField;
+        private static FieldInfo _sInputMouseField;
+        private static bool _sInputFieldsResolved;
 
         // Cached reflection handles for StardewValley.Rumble (100% Zero-Harmony console/Switch rumble mirror!)
         private static bool _rumbleFieldsResolved;
@@ -144,7 +147,9 @@ namespace SDVMobileControls
         private int _menuSyntheticLeftClickFrames;
 
         private static readonly List<Keys> EmptyKeysList = new List<Keys>(0);
+        private static readonly object[] EmptyKeysArg = new object[] { EmptyKeysList };
         private readonly List<Keys> _physicalKeys = new List<Keys>(32);
+        private readonly object[] _kbSetKeysArg = new object[1];
         private readonly HashSet<Keys> _prevSpecialKeys = new HashSet<Keys>();
         private readonly HashSet<Keys> _currSpecialKeys = new HashSet<Keys>();
         private readonly List<Keys> _mergeScratch = new List<Keys>(48);
@@ -579,13 +584,23 @@ namespace SDVMobileControls
             ly = 0;
             try
             {
-                if (Game1.input != null && InputCurrentMouseField != null &&
-                    InputCurrentMouseField.GetValue(Game1.input) is MouseState liveMs &&
-                    liveMs.X >= 0 && liveMs.X < bw && liveMs.Y >= 0 && liveMs.Y < bh)
+                if (Game1.input != null)
                 {
-                    lx = liveMs.X;
-                    ly = liveMs.Y;
-                    return true;
+                    MouseState liveMs = Game1.input.GetMouseState();
+                    if (liveMs.X >= 0 && liveMs.X < bw && liveMs.Y >= 0 && liveMs.Y < bh && (liveMs.X != 0 || liveMs.Y != 0))
+                    {
+                        lx = liveMs.X;
+                        ly = liveMs.Y;
+                        return true;
+                    }
+                    if (InputCurrentMouseField != null &&
+                        InputCurrentMouseField.GetValue(Game1.input) is MouseState baseMs &&
+                        baseMs.X >= 0 && baseMs.X < bw && baseMs.Y >= 0 && baseMs.Y < bh && (baseMs.X != 0 || baseMs.Y != 0))
+                    {
+                        lx = baseMs.X;
+                        ly = baseMs.Y;
+                        return true;
+                    }
                 }
             }
             catch { }
@@ -662,7 +677,9 @@ namespace SDVMobileControls
             // Calendar & Help Wanted Quest icons and click A or R3 to open them!).
             bool canFreeCursor = (Game1.activeClickableMenu == null && Game1.currentMinigame == null && Game1.emoteMenu == null) || isInventoryPage;
             float magSq = rx * rx + ry * ry;
-            if (canFreeCursor && magSq > 0.0001f)
+            // Inside InventoryPage, require deliberate R-stick tilt (>0.25) to enter free-cursor mode so tiny stick drift never steals SnappyMenus!
+            float entryThresholdSq = (isInventoryPage && !IsRightStickMenuCursorActive) ? 0.0625f : 0.0001f;
+            if (canFreeCursor && magSq > entryThresholdSq)
             {
                 long nowMs = Environment.TickCount64;
                 float dt = (_lastRightStickStepMs > 0) ? (nowMs - _lastRightStickStepMs) / 1000f : (1f / 60f);
@@ -927,7 +944,7 @@ namespace SDVMobileControls
             }
             int tick = Game1.ticks;
             long nowMs = Environment.TickCount64;
-            if (tick == _lastPollTick && nowMs - _lastPollMs < 6)
+            if (tick == _lastPollTick && nowMs - _lastPollMs < 3)
             {
                 if (directTouchCount > 0) NotifyDirectTouch(directTouchCount);
                 // Always restore Game1.options.gamepadControls & push live gamepad state even on fast frames
@@ -1100,15 +1117,38 @@ namespace SDVMobileControls
         /// Xbox/PS/MFi controllers, R-stick cursor, and external mice work 100% even on 0% JIT where
         /// 0Harmony.dll is a no-op stub.
         /// </summary>
+        private static void EnsureSInputFieldsResolved(InputState inp)
+        {
+            if (_sInputFieldsResolved || inp == null) return;
+            _sInputFieldsResolved = true;
+            try
+            {
+                const BindingFlags instAny = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+                Type t = inp.GetType();
+                _sInputControllerField = t.GetField("<ControllerState>k__BackingField", instAny);
+                _sInputMouseField = t.GetField("<MouseState>k__BackingField", instAny);
+            }
+            catch { }
+        }
+
         public void SyncDirectZeroHarmonyInputStates()
         {
             try
             {
+                InputState inp = Game1.input;
+                if (inp != null)
+                    EnsureSInputFieldsResolved(inp);
+
                 if (ShouldPushMouseStateNow)
                 {
                     MouseState ms = CurrentMouseState;
-                    if (Game1.input != null && InputCurrentMouseField != null)
-                        InputCurrentMouseField.SetValue(Game1.input, ms);
+                    if (inp != null)
+                    {
+                        if (InputCurrentMouseField != null)
+                            InputCurrentMouseField.SetValue(inp, ms);
+                        if (_sInputMouseField != null)
+                            _sInputMouseField.SetValue(inp, ms);
+                    }
                     if (MousePrimaryWindowField != null)
                     {
                         object win = MousePrimaryWindowField.GetValue(null);
@@ -1129,10 +1169,15 @@ namespace SDVMobileControls
                         }
                     }
                 }
-                if (IsPhysicalGamepadActive && Game1.input != null && InputCurrentGamepadField != null)
+                if (IsPhysicalGamepadActive && inp != null)
                 {
+                    // CRITICAL for 0% JIT iOS UI menus: Game1.updateActiveMenu() calls Game1.input.GetGamePadState()
+                    // which in SMAPI's SInputState returns <ControllerState>k__BackingField (NOT base _currentGamepadState)!
                     GamePadState gps = GetEffectiveGamePadStateForGame();
-                    InputCurrentGamepadField.SetValue(Game1.input, gps);
+                    if (InputCurrentGamepadField != null)
+                        InputCurrentGamepadField.SetValue(inp, gps);
+                    if (_sInputControllerField != null)
+                        _sInputControllerField.SetValue(inp, gps);
                 }
             }
             catch { }
@@ -1246,12 +1291,13 @@ namespace SDVMobileControls
             {
                 if (!forceClear && _physicalKeys.Count > 0)
                 {
-                    KeyboardSetKeysMethod.Invoke(null, new object[] { _physicalKeys });
+                    _kbSetKeysArg[0] = _physicalKeys;
+                    KeyboardSetKeysMethod.Invoke(null, _kbSetKeysArg);
                     _syncedEmptyMonoGameKeys = false;
                 }
                 else if (forceClear || !_syncedEmptyMonoGameKeys)
                 {
-                    KeyboardSetKeysMethod.Invoke(null, new object[] { EmptyKeysList });
+                    KeyboardSetKeysMethod.Invoke(null, EmptyKeysArg);
                     _syncedEmptyMonoGameKeys = true;
                 }
             }

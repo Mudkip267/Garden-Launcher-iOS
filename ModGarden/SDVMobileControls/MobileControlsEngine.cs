@@ -724,6 +724,53 @@ namespace SDVMobileControls
             }
         }
 
+        /// <summary>
+        /// Computes safe top-left coordinates for MineShaft / Skull Cavern / VolcanoDungeon floor numbers
+        /// shifted cleanly downward &amp; inward out of iPhone rounded corners (and clear of top utility bar / left vertical toolbar).
+        /// </summary>
+        public bool TryGetMineFloorSafePosition(Rectangle tsarea, out int targetX, out int targetY)
+        {
+            targetX = tsarea.Left + 24;
+            targetY = tsarea.Top + 64;
+            try
+            {
+                if (tsarea.Width < 320 || tsarea.Height < 200)
+                    return false;
+                RefreshViewport();
+                int vw = Math.Max(320, _vpW);
+                int vh = Math.Max(200, _vpH);
+
+                // Safe top margin: push cleanly below iPhone top-left rounded corner (~9.5% of height, min 58px)
+                float topFrac = Math.Max(0.095f, 58f / vh);
+                bool touchHudVisible = IsMobileModeActive && !_guiHidden && !_gamepadHideHud;
+                if (touchHudVisible && _cfg.ShowTopUtility && !_btnBagRect.IsEmpty && _btnBagRect.Top < vh * 0.28f)
+                {
+                    float belowTopBar = (_btnBagRect.Bottom + 10f) / vh;
+                    if (belowTopBar > topFrac)
+                        topFrac = belowTopBar;
+                }
+                topFrac = Math.Clamp(topFrac, 0.085f, 0.24f);
+
+                // Safe left margin: clear iPhone notch/Dynamic Island + rounded corner + left Vertical Toolbar if active
+                float leftFrac = Math.Max((_safeLeftPx + 22f) / vw, 0.032f);
+                if (touchHudVisible && _cfg.VerticalToolbar && _cfg.ToolbarSide == 0 && !_verticalToolbar.Bounds.IsEmpty)
+                {
+                    float rightOfTb = (_verticalToolbar.Bounds.Right + 14f) / vw;
+                    if (rightOfTb > leftFrac)
+                        leftFrac = rightOfTb;
+                }
+                leftFrac = Math.Clamp(leftFrac, 0.025f, 0.35f);
+
+                targetX = tsarea.Left + (int)Math.Round(leftFrac * tsarea.Width);
+                targetY = tsarea.Top + (int)Math.Round(topFrac * tsarea.Height);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         public bool IsFishingCastButtonHeld()
         {
             if (!Context.IsWorldReady || Game1.player == null ||
@@ -891,6 +938,17 @@ namespace SDVMobileControls
             EnsureTextures(sb.GraphicsDevice);
             if (!RefreshViewport()) return;
             ComputeLayout();
+            // Draw Stardew's native Skip Cutscene sprite from Game1.mouseCursors (205, 406, 22, 15)
+            // so UI theme packs like Cat Valley UI / Overgrown Flowery Interface render their EXACT native Skip button!
+            Texture2D cursors = Game1.mouseCursors;
+            if (cursors != null && !cursors.IsDisposed)
+            {
+                Rectangle src = new Rectangle(205, 406, 22, 15);
+                Rectangle shadow = new Rectangle(_btnSkipEventRect.X + 3, _btnSkipEventRect.Y + 3, _btnSkipEventRect.Width, _btnSkipEventRect.Height);
+                sb.Draw(cursors, shadow, src, Color.Black * 0.32f);
+                sb.Draw(cursors, _btnSkipEventRect, src, Color.White);
+                return;
+            }
             PixelUi.GlobalOpacity = Math.Max(_cfg.PixelOpacity, 0.85f);
             PixelUi.DrawPixelPill(sb, _pixel, EnsureBridge(pad), _btnSkipEventRect, "SKIP", PixelRole.Special, false, _vpH, -1, 0.96f);
         }
@@ -7113,8 +7171,10 @@ namespace SDVMobileControls
             int rightEdgePad = Math.Max(_safeRightPx + 12, Math.Max(16, (int)(_vpW * 0.025f)));
             _btnRotateRect = new Rectangle(_vpW - rotW - rightEdgePad, (int)(_vpH * 0.34f), rotW, rotH);
             _btnSpecRect = new Rectangle(_vpW - rotW - rightEdgePad, (int)(_vpH * 0.34f), rotW, rotH);
-            int skipH = (int)Math.Clamp(unit * 0.072f, 36f, 62f);
-            int skipW = (int)(skipH * 2.35f);
+            // Exact 22:15 pixel-perfect integer scale matching vanilla/Cat Valley UI Skip sprite (Game1.mouseCursors 205,406,22,15)
+            int skipScale = Math.Clamp((int)Math.Round(unit * 0.0068f), 3, 6);
+            int skipW = 22 * skipScale;
+            int skipH = 15 * skipScale;
             int skipRightPad = Math.Max(_safeRightPx + 24, Math.Max(36, (int)(_vpW * 0.055f)));
             int skipTopPad = Math.Max(38, (int)(_vpH * 0.085f));
             _btnSkipEventRect = new Rectangle(_vpW - skipW - skipRightPad, skipTopPad, skipW, skipH);

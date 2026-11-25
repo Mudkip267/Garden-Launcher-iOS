@@ -2370,6 +2370,7 @@ static UIImage *sdvLoadBootFrameworkImage(NSString *filename) {
 @property(nonatomic, strong) SDVPassThroughWindow *toastWindow;
 @property(nonatomic, assign) BOOL shownStartupToast;
 @property(nonatomic, assign) BOOL autoOpenedSetup;
+@property(nonatomic, assign) BOOL gameDataReadyCached;
 @property(nonatomic, strong) NSTimer *hapticTimer;
 -(BOOL)isGardenOpen;
 -(void)attachToGameWindows;
@@ -2693,6 +2694,14 @@ static void sdvExtSetGardenOpen(BOOL open);
 
 -(void)attachToGameWindows {
     @try {
+        // Fast-path once boot has completed, toast has shown, Mod Garden is closed, and active game window is already attached:
+        // avoids redundant main-thread UIKit scans & disk gameDataStatus() checks every few seconds during gameplay!
+        if (self.gameDataReadyCached && self.bootLoadingDismissed && self.shownStartupToast && ![self isGardenOpen]) {
+            UIWindow *gw = [self gameWindow];
+            if (gw && [self.attachedWindows containsObject:gw]) {
+                return;
+            }
+        }
         // Ensure any detached AppDelegate.window (created before scene connected) is linked to the active UIWindowScene!
         UIWindowScene *activeScene = [self primaryWindowScene];
         if (activeScene) {
@@ -2747,7 +2756,12 @@ static void sdvExtSetGardenOpen(BOOL open);
         [self syncRamHudVisibility];
 
         BOOL hasWindow = ([self gameWindow] != nil);
-        if (!self.autoOpenedSetup && hasWindow && ![gameDataStatus([self docsPath])[@"ready"] boolValue]) {
+        BOOL dataReady = self.gameDataReadyCached;
+        if (hasWindow && !dataReady) {
+            dataReady = [gameDataStatus([self docsPath])[@"ready"] boolValue];
+            if (dataReady) self.gameDataReadyCached = YES;
+        }
+        if (!self.autoOpenedSetup && hasWindow && !dataReady) {
             self.autoOpenedSetup = YES;
             self.shownStartupToast = YES;
             self.bootLoadingDismissed = YES;
@@ -2758,7 +2772,7 @@ static void sdvExtSetGardenOpen(BOOL open);
                     [self openGarden];
                 }
             });
-        } else if (hasWindow && [gameDataStatus([self docsPath])[@"ready"] boolValue]) {
+        } else if (hasWindow && dataReady) {
             if (!self.bootLoadingDismissed) {
                 [self showBootLoadingOverlayIfNeeded];
             } else if (!self.shownStartupToast) {
@@ -3924,7 +3938,7 @@ __attribute__((constructor)) static void startGardenControls(void) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 [gSdvGardenHost attachToGameWindows];
             });
-            [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer *t) {
+            [NSTimer scheduledTimerWithTimeInterval:4.0 repeats:YES block:^(NSTimer *t) {
                 (void)t;
                 [gSdvGardenHost attachToGameWindows];
             }];

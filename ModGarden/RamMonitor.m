@@ -76,6 +76,7 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
     NSTimeInterval _lastAutoGcTime;
     NSTimeInterval _lastWarn85Time;
     NSTimeInterval _lastCrit90Time;
+    dispatch_queue_t _ioQueue;
 }
 
 +(instancetype)shared {
@@ -181,39 +182,60 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
     [s writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 
--(void)triggerManualGCInDocs:(NSString *)docsPath {
+-(dispatch_queue_t)ioQueue {
+    if (!_ioQueue) {
+        dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0);
+        _ioQueue = dispatch_queue_create("com.garden.rammonitor.io", attr);
+    }
+    return _ioQueue;
+}
+
+-(void)triggerPruneInDocs:(NSString *)docsPath critical:(BOOL)critical {
     if (!docsPath.length) return;
-    NSString *gd = sdvHiddenGardenDir(docsPath);
-    NSString *flag = [gd stringByAppendingPathComponent:@"sdv_gc_now.flag"];
-    [@"1" writeToFile:flag atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    NSString *pruneFlag = [gd stringByAppendingPathComponent:@"sdv_prune_now.flag"];
-    [@"1" writeToFile:pruneFlag atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    NSString *docsCopy = [docsPath copy];
+    dispatch_async([self ioQueue], ^{
+        NSString *gd = sdvHiddenGardenDir(docsCopy);
+        if (critical) {
+            NSString *flag = [gd stringByAppendingPathComponent:@"sdv_gc_now.flag"];
+            [@"1" writeToFile:flag atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        }
+        NSString *pruneFlag = [gd stringByAppendingPathComponent:@"sdv_prune_now.flag"];
+        [(critical ? @"CRIT" : @"1") writeToFile:pruneFlag atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    });
+}
+
+-(void)triggerManualGCInDocs:(NSString *)docsPath {
+    [self triggerPruneInDocs:docsPath critical:YES];
 }
 
 -(void)appendLogLine:(NSString *)line {
-    if (!_logPath.length) return;
+    if (!_logPath.length || !line.length) return;
+    NSString *pathCopy = [_logPath copy];
     NSData *data = [[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
     if (!data.length) return;
-    NSFileManager *f = NSFileManager.defaultManager;
-    if (![f fileExistsAtPath:_logPath]) {
-        [f createDirectoryAtPath:_logPath.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
-        [data writeToFile:_logPath atomically:YES];
-        return;
-    }
-    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:_logPath];
-    if (fh) {
-        @try {
-            [fh seekToEndOfFile];
-            [fh writeData:data];
-        } @catch (NSException *ex) { }
-        [fh closeFile];
-    }
+    dispatch_async([self ioQueue], ^{
+        NSFileManager *f = NSFileManager.defaultManager;
+        if (![f fileExistsAtPath:pathCopy]) {
+            [f createDirectoryAtPath:pathCopy.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+            [data writeToFile:pathCopy atomically:YES];
+            return;
+        }
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:pathCopy];
+        if (fh) {
+            @try {
+                [fh seekToEndOfFile];
+                [fh writeData:data];
+            } @catch (NSException *ex) { }
+            [fh closeFile];
+        }
+    });
 }
 
 -(void)startWithDocsPath:(NSString *)docsPath {
     if (_started) return;
     _started = YES;
     _docsPath = [docsPath copy];
+    (void)[self ioQueue];
 
     if (docsPath.length) {
         BOOL trimLogs = [self trimLogsEnabledForDocs:docsPath];
@@ -243,9 +265,9 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
 -(void)tick {
     SDVRamSnapshot s = [self sample];
     _tickCount++;
-    BOOL bigPeakJump = (s.peakBytes >= _lastLoggedPeak + 24ULL * 1024 * 1024);
-    BOOL highWarn = (s.usagePct >= 85.0 && (_tickCount % 2 == 0));
-    if (_tickCount % 5 == 0 || bigPeakJump || highWarn) {
+    BOOL bigPeakJump = (s.peakBytes >= _lastLoggedPeak + 32ULL * 1024 * 1024);
+    BOOL highWarn = (s.usagePct >= 88.0 && (_tickCount % 5 == 0));
+    if (_tickCount % 15 == 0 || bigPeakJump || highWarn) {
         if (bigPeakJump) _lastLoggedPeak = s.peakBytes;
         static NSDateFormatter *fmt;
         static dispatch_once_t once;
@@ -265,12 +287,14 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
         BOOL isWarn85 = (!isCrit90 && s.usagePct >= 85.0);
         if (isCrit90 || isWarn85) {
             NSTimeInterval now = NSDate.date.timeIntervalSinceReferenceDate;
-            // 1. Auto-trigger tilesheet pruning & Mono Gen2 compacting GC
-            if (_docsPath.length && (now - _lastAutoGcTime >= (isCrit90 ? 10.0 : 18.0))) {
+            // 1. Auto-trigger lightweight tilesheet pruning at 85-90.9% (every 45s, zero blocking freeze),
+            //    and critical Gen2 compacting GC ONLY at >=91% RAM (every 25s) to prevent gameplay stutters!
+            BOOL isCritGc = (s.usagePct >= 91.0);
+            if (_docsPath.length && (now - _lastAutoGcTime >= (isCritGc ? 25.0 : 45.0))) {
                 _lastAutoGcTime = now;
-                [self triggerManualGCInDocs:_docsPath];
-                [self appendLogLine:[NSString stringWithFormat:@"[AUTO-GC] Triggered at %.1f%% (Avail=%@)",
-                    s.usagePct, sdvFmtMemMB(s.availBytes)]];
+                [self triggerPruneInDocs:_docsPath critical:isCritGc];
+                [self appendLogLine:[NSString stringWithFormat:@"[AUTO-GC] Triggered (%@) at %.1f%% (Avail=%@)",
+                    isCritGc ? @"CRIT" : @"LIGHT", s.usagePct, sdvFmtMemMB(s.availBytes)]];
             }
             // 2. Tier 2 (90%+): Strong Critical Alert (fires immediately when crossing 90%, repeats every 20s)
             if (isCrit90 && [self ramAlertEnabled] && (now - _lastCrit90Time >= 20.0)) {
@@ -279,8 +303,11 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
                 if (_docsPath.length) {
                     NSString *inGameMsg = [NSString stringWithFormat:@"CRIT|NGUY HIEM RAM %.0f%% (Du %@)! BAM SAVE LUU GAME NGAY LAP TUC!",
                         s.usagePct, sdvFmtMemCompact(s.availBytes)];
-                    NSString *alertFile = [sdvHiddenGardenDir(_docsPath) stringByAppendingPathComponent:@"sdv_ram_alert.txt"];
-                    [inGameMsg writeToFile:alertFile atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                    NSString *docsCopy = [_docsPath copy];
+                    dispatch_async([self ioQueue], ^{
+                        NSString *alertFile = [sdvHiddenGardenDir(docsCopy) stringByAppendingPathComponent:@"sdv_ram_alert.txt"];
+                        [inGameMsg writeToFile:alertFile atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                    });
                 }
                 NSString *bannerMsg = [NSString stringWithFormat:@"🚨 CẢNH BÁO MẠNH: RAM ĐẠT %.0f%% (%@ / %@ · Dư %@)\nSẮP TRÀN RAM VĂNG GAME! HÃY BẤM SAVE LƯU GAME NGAY LẬP TỨC!",
                     s.usagePct, sdvFmtMemCompact(s.usedBytes), sdvFmtMemCompact(s.budgetBytes), sdvFmtMemCompact(s.availBytes)];
@@ -294,8 +321,11 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
                 if (_docsPath.length) {
                     NSString *inGameMsg = [NSString stringWithFormat:@"WARN|CANH BAO RAM CAO %.0f%% (Du %@)! Hay bam SAVE luu game!",
                         s.usagePct, sdvFmtMemCompact(s.availBytes)];
-                    NSString *alertFile = [sdvHiddenGardenDir(_docsPath) stringByAppendingPathComponent:@"sdv_ram_alert.txt"];
-                    [inGameMsg writeToFile:alertFile atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                    NSString *docsCopy = [_docsPath copy];
+                    dispatch_async([self ioQueue], ^{
+                        NSString *alertFile = [sdvHiddenGardenDir(docsCopy) stringByAppendingPathComponent:@"sdv_ram_alert.txt"];
+                        [inGameMsg writeToFile:alertFile atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                    });
                 }
                 NSString *bannerMsg = [NSString stringWithFormat:@"⚠️ CẢNH BÁO RAM CAO: %.0f%% (%@ / %@ · Dư %@)\nĐã tự dọn RAM — Hãy bấm SAVE để lưu game tránh văng!",
                     s.usagePct, sdvFmtMemCompact(s.usedBytes), sdvFmtMemCompact(s.budgetBytes), sdvFmtMemCompact(s.availBytes)];

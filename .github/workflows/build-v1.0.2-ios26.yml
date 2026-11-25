@@ -128,8 +128,17 @@ jobs:
                   $valAttrs = [Mono.Cecil.FieldAttributes]([int][Mono.Cecil.FieldAttributes]::Public -bor [int][Mono.Cecil.FieldAttributes]::SpecialName -bor [int][Mono.Cecil.FieldAttributes]::RTSpecialName)
                   $lb.Fields.Add((New-Object Mono.Cecil.FieldDefinition("value__", $valAttrs, $tInt32)))
                   $constAttrs = [Mono.Cecil.FieldAttributes]([int][Mono.Cecil.FieldAttributes]::Public -bor [int][Mono.Cecil.FieldAttributes]::Static -bor [int][Mono.Cecil.FieldAttributes]::Literal -bor [int][Mono.Cecil.FieldAttributes]::HasDefault)
-                  $fFail = New-Object Mono.Cecil.FieldDefinition("FailToPlay", $constAttrs, $lb); $fFail.Constant = [int]0; $lb.Fields.Add($fFail)
-                  $fRepl = New-Object Mono.Cecil.FieldDefinition("ReplaceOldest", $constAttrs, $lb); $fRepl.Constant = [int]2; $lb.Fields.Add($fRepl)
+                  foreach ($kv in @(
+                      @("FailToPlay", 0),
+                      @("Queue", 1),
+                      @("ReplaceOldest", 2),
+                      @("ReplaceLowestPriority", 3),
+                      @("ReplaceQuiet", 4)
+                  )) {
+                      $ef = New-Object Mono.Cecil.FieldDefinition($kv[0], $constAttrs, $lb)
+                      $ef.Constant = [int]$kv[1]
+                      $lb.Fields.Add($ef)
+                  }
                   $cd.NestedTypes.Add($lb)
               }
 
@@ -141,10 +150,13 @@ jobs:
               }
 
               $optParam = [Mono.Cecil.ParameterAttributes]([int][Mono.Cecil.ParameterAttributes]::Optional -bor [int][Mono.Cecil.ParameterAttributes]::HasDefault)
-              $hasSingleSetSound = $cd.Methods | Where-Object {
+              $arrSetSound = $cd.Methods | Where-Object {
+                  $_.Name -eq "SetSound" -and $_.Parameters.Count -eq 4 -and $_.Parameters[0].ParameterType.FullName -eq "Microsoft.Xna.Framework.Audio.SoundEffect[]"
+              } | Select-Object -First 1
+              $singleSetSound = $cd.Methods | Where-Object {
                   $_.Name -eq "SetSound" -and $_.Parameters.Count -eq 4 -and $_.Parameters[0].ParameterType.FullName -eq "Microsoft.Xna.Framework.Audio.SoundEffect"
-              }
-              if (-not $hasSingleSetSound) {
+              } | Select-Object -First 1
+              if (-not $singleSetSound) {
                   $mAttrs = [Mono.Cecil.MethodAttributes]([int][Mono.Cecil.MethodAttributes]::Public -bor [int][Mono.Cecil.MethodAttributes]::HideBySig)
                   $mSet = New-Object Mono.Cecil.MethodDefinition("SetSound", $mAttrs, $tVoid)
                   $mSet.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition("sound_effect", [Mono.Cecil.ParameterAttributes]::None, $tSoundEffect)))
@@ -152,8 +164,23 @@ jobs:
                   $pLoop = New-Object Mono.Cecil.ParameterDefinition("loop", $optParam, $tBool); $pLoop.Constant = $false; $mSet.Parameters.Add($pLoop)
                   $pRev = New-Object Mono.Cecil.ParameterDefinition("use_reverb", $optParam, $tBool); $pRev.Constant = $false; $mSet.Parameters.Add($pRev)
                   $il = $mSet.Body.GetILProcessor()
+                  if ($arrSetSound) {
+                      # Forward to CueDefinition.SetSound(new SoundEffect[] { sound_effect }, category_id, loop, use_reverb) so mod sounds actually play!
+                      $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+                      $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_1))
+                      $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Newarr, $tSoundEffect))
+                      $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Dup))
+                      $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0))
+                      $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
+                      $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Stelem_Ref))
+                      $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_2))
+                      $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_3))
+                      $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_S, $pRev))
+                      $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Call, [Mono.Cecil.MethodReference]$arrSetSound))
+                  }
                   $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ret))
                   $cd.Methods.Add($mSet)
+                  $singleSetSound = $mSet
               }
 
               $defCtor = $cd.Methods | Where-Object { $_.Name -eq ".ctor" -and $_.Parameters.Count -eq 0 } | Select-Object -First 1
@@ -177,6 +204,15 @@ jobs:
                       $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
                       $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
                       $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Stfld, $fName))
+                      $targetSet = if ($sndType -eq $tSoundEffect) { $singleSetSound } else { $arrSetSound }
+                      if ($targetSet) {
+                          $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+                          $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_2))
+                          $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_3))
+                          $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_S, $pL))
+                          $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_S, $pR))
+                          $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Call, [Mono.Cecil.MethodReference]$targetSet))
+                      }
                       $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ret))
                       $cd.Methods.Add($ctor)
                   }

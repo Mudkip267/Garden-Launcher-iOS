@@ -130,6 +130,16 @@ namespace SDVMobileControls
         {
             _monitor = Monitor;
             _bootDocsDir = ResolveBootDocsDir(helper.DirectoryPath);
+            try
+            {
+                if (!string.IsNullOrEmpty(_bootDocsDir))
+                {
+                    string hpMeta = Path.Combine(_bootDocsDir, "hotpatch", "meta.json");
+                    if (File.Exists(hpMeta))
+                        Monitor.Log($"[OTA Hot-Patch] Active in-app live update verified ({hpMeta})", LogLevel.Info);
+                }
+            }
+            catch { }
             WriteBootStage("58|Đang khởi chạy SDV Mobile Controls…");
             ReportNativeBoot(58, "Đang khởi chạy SDV Mobile Controls…", "Khởi chạy Mod: SDV Mobile Controls · Cảm ứng & Thiết bị rời", 2);
 

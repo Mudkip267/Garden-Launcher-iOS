@@ -69,7 +69,11 @@ def main() -> int:
 
     if mc_manifest.is_file():
         mf_obj = json.loads(mc_manifest.read_text(encoding="utf-8-sig"))
-        mf_obj["Version"] = args.version
+        raw_core = args.version.lstrip("vV").split("-")[0].split("+")[0]
+        parts = [p for p in raw_core.split(".") if p.isdigit()]
+        while len(parts) < 3:
+            parts.append("0")
+        mf_obj["Version"] = ".".join(parts[:3])
         staged["Mods/SDVMobileControls/manifest.json"] = (json.dumps(mf_obj, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
 
     if args.include_touch:

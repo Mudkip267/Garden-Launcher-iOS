@@ -285,6 +285,19 @@ namespace SDVMobileControls
             catch { }
         }
 
+        public void OnReturnedToTitle()
+        {
+            PushRumbleToNative(0f, 0f);
+            IsRightStickSteeringGameplayCursor = false;
+            IsRightStickMenuCursorActive = false;
+            SuppressGamepadAButtonThisFrame = false;
+            _menuSyntheticLeftClickFrames = 0;
+            _lastRightStickStepMs = 0;
+            _prevGamepadAButtonDown = false;
+            _prevGamepadR3ButtonDown = false;
+            ApplyStardewGamepadMode();
+        }
+
         public void SetManagedSuppressed(bool suppressed)
         {
             if (_managedSuppressed == suppressed) return;

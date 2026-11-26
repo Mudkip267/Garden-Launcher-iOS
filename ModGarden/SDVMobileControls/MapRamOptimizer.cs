@@ -82,6 +82,14 @@ namespace SDVMobileControls
             ScanContentPatcherPacks();
         }
 
+        public void OnReturnedToTitle()
+        {
+            _knownTileSheetKeys.Clear();
+            _lastUsedSeq.Clear();
+            _warpSeq = 0;
+            _lastWarpPruneMs = 0;
+        }
+
         public void OnSaveLoaded()
         {
             ScanContentPatcherPacks();

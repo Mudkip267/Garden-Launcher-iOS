@@ -158,6 +158,7 @@ namespace SDVMobileControls
             helper.Events.GameLoop.Saved += OnSaved;
             helper.Events.GameLoop.SaveLoaded += OnSaveLoaded;
             helper.Events.GameLoop.DayStarted += OnDayStarted;
+            helper.Events.GameLoop.ReturnedToTitle += OnReturnedToTitle;
             helper.Events.Player.Warped += OnWarped;
         }
 
@@ -282,6 +283,21 @@ namespace SDVMobileControls
             try { RamOptimizer?.OnDayStarted(); } catch { }
             SchedulePortraitSync(reloadAll: true, delayTicks: 35, reason: "DayStarted");
             ResetMailboxWatchdogSnapshot();
+        }
+
+        private void OnReturnedToTitle(object sender, ReturnedToTitleEventArgs e)
+        {
+            RestoreMineFloorRelocateIfNeeded();
+            RestoreStashedHudMessagesIfNeeded();
+            _portraitSyncDelayTicks = -1;
+            _pendingReloadAllPortraits = false;
+            _pendingPortraitKeys.Clear();
+            _portraitSyncReason = null;
+            _lastMailboxSnapshot.Clear();
+            _lastMailboxDayKey = -1;
+            try { RamOptimizer?.OnReturnedToTitle(); } catch { }
+            try { ExternalInput?.OnReturnedToTitle(); } catch { }
+            try { Engine?.OnReturnedToTitle(); } catch { }
         }
 
         private void LogMailDiagnostic(string phase)

@@ -658,6 +658,25 @@ namespace SDVMobileControls
             }
         }
 
+        public void OnReturnedToTitle()
+        {
+            _editMode = false;
+            _saveMenuOpen = false;
+            _keyPickerOpen = false;
+            _wasInMenu = false;
+            ResetGameplayState();
+            ResetMenuTapState();
+            ClearCustomButtonTouches();
+            _invShop.Reset();
+            _lastMenuMouseRaw = null;
+            _hasCarpenterPreview = false;
+            _simMouseLeftPulseFrames = 0;
+            _simMouseRightPulseFrames = 0;
+            _gameMenuModClickPulseFrames = 0;
+            _gameMenuModClickRawPos = null;
+            try { EnsureBridge(_lastPadObj)?.ResetVirtualPad(_lastPadObj); } catch { }
+        }
+
         public void TrackPadReference(object pad)
         {
             if (pad != null)

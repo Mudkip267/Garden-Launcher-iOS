@@ -242,6 +242,72 @@ jobs:
               $vAsm.Dispose()
           }
 
+          # Fix permanent AB-BA Exit-to-Title deadlock on iOS:
+          # SDViOSTouchControls.ModEntry.PurgeNonCoreAssets & MemoryWatchdog.ForceCollect call GC.WaitForPendingFinalizers()
+          # on the Main UI Thread right as RenderTarget2D.Finalize() calls Threading.BlockOnUIThread() on the Finalizer Thread!
+          # Replacing WaitForPendingFinalizers() with Nop lets GC free memory cleanly while Threading.Run() drains GPU disposals.
+          $tcDir = Join-Path $appDir "Mods/SDViOSTouchControls"
+          $tcResolver = New-Object Mono.Cecil.DefaultAssemblyResolver
+          $tcResolver.AddSearchDirectory($appDir)
+          $tcResolver.AddSearchDirectory($tcDir)
+          $tcResolver.AddSearchDirectory([System.IO.Path]::GetDirectoryName([object].Assembly.Location))
+          $tcRp = New-Object Mono.Cecil.ReaderParameters
+          $tcRp.AssemblyResolver = $tcResolver
+          $tcRp.ReadWrite = $false
+
+          $totalDeadlocksPatched = 0
+          foreach ($dllName in @("SDViOSTouchControls.dll", "SDViOSTouchControlsMod.dll")) {
+              $tcPath = Join-Path $tcDir $dllName
+              if (-not (Test-Path $tcPath)) { continue }
+              $tmpTc = "$tcPath.patched.tmp"
+              $tAsm = [Mono.Cecil.AssemblyDefinition]::ReadAssembly($tcPath, $tcRp)
+              $patched = 0
+              try {
+                  foreach ($t in $tAsm.MainModule.GetTypes()) {
+                      foreach ($m in $t.Methods) {
+                          if (-not $m.HasBody) { continue }
+                          foreach ($ins in $m.Body.Instructions) {
+                              if ($ins.Operand -ne $null -and $ins.Operand.ToString() -eq "System.Void System.GC::WaitForPendingFinalizers()") {
+                                  $ins.OpCode = [Mono.Cecil.Cil.OpCodes]::Nop
+                                  $ins.Operand = $null
+                                  $patched++
+                              }
+                          }
+                      }
+                  }
+                  if ($patched -gt 0) {
+                      $tAsm.Write($tmpTc)
+                  }
+              } finally {
+                  $tAsm.Dispose()
+              }
+              if ($patched -gt 0) {
+                  Move-Item -Force $tmpTc $tcPath
+                  $totalDeadlocksPatched += $patched
+              }
+
+              # Strict readback verification: 0 WaitForPendingFinalizers calls must remain!
+              $vTc = [Mono.Cecil.AssemblyDefinition]::ReadAssembly($tcPath, $tcRp)
+              try {
+                  $rem = 0
+                  foreach ($t in $vTc.MainModule.GetTypes()) {
+                      foreach ($m in $t.Methods) {
+                          if (-not $m.HasBody) { continue }
+                          foreach ($ins in $m.Body.Instructions) {
+                              if ($ins.Operand -ne $null -and $ins.Operand.ToString() -match "WaitForPendingFinalizers") { $rem++ }
+                          }
+                      }
+                  }
+                  if ($rem -ne 0) { throw "Deadlock patch readback failed on ${dllName}: $rem WaitForPendingFinalizers calls remain!" }
+                  Write-Host "[EXIT-TO-TITLE DEADLOCK FIX OK] ${dllName}: patched $patched WaitForPendingFinalizers -> Nop (remaining=0)"
+              } finally {
+                  $vTc.Dispose()
+              }
+          }
+          if ($totalDeadlocksPatched -lt 2) {
+              throw "Expected at least 2 WaitForPendingFinalizers calls patched in SDViOSTouchControls, got $totalDeadlocksPatched"
+          }
+
       - name: Sign & Strictly Verify Entire App Bundle with Apple codesign
         run: |
           APP="work/stage/Payload/SDViOS.app"

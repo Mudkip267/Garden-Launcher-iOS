@@ -243,6 +243,783 @@ static NSString *sdvProbeLocalNetwork(void) {
 }
 @end
 
+// ============================================================================
+// ANIMATED DISCORD COMMUNITY COMPONENTS (Aurora Mesh · Vector Clyde · Sparkles)
+// ============================================================================
+static UIBezierPath *sdvDiscordClydePath(CGRect box) {
+    CGFloat ox = box.origin.x;
+    CGFloat oy = box.origin.y;
+    CGFloat sx = box.size.width / 24.0;
+    CGFloat sy = box.size.height / 24.0;
+    UIBezierPath *p = [UIBezierPath bezierPath];
+    p.usesEvenOddFillRule = YES;
+    #define DCP(px, py) CGPointMake(ox + (px) * sx, oy + (py) * sy)
+    [p moveToPoint:DCP(20.3170, 4.3698)];
+    [p addCurveToPoint:DCP(15.4319, 2.8546) controlPoint1:DCP(18.7610, 3.6556) controlPoint2:DCP(17.1189, 3.1462)];
+    [p addCurveToPoint:DCP(15.3534, 2.8917) controlPoint1:DCP(15.4006, 2.8488) controlPoint2:DCP(15.3688, 2.8638)];
+    [p addCurveToPoint:DCP(14.7451, 4.1412) controlPoint1:DCP(15.1424, 3.2670) controlPoint2:DCP(14.9087, 3.7565)];
+    [p addCurveToPoint:DCP(9.2583, 4.1412) controlPoint1:DCP(12.9004, 3.8650) controlPoint2:DCP(11.0651, 3.8650)];
+    [p addCurveToPoint:DCP(8.6406, 2.8917) controlPoint1:DCP(9.0947, 3.7479) controlPoint2:DCP(8.8525, 3.2670)];
+    [p addCurveToPoint:DCP(8.5621, 2.8547) controlPoint1:DCP(8.6246, 2.8645) controlPoint2:DCP(8.5933, 2.8497)];
+    [p addCurveToPoint:DCP(3.6769, 4.3697) controlPoint1:DCP(6.8749, 3.1457) controlPoint2:DCP(5.2327, 3.6549)];
+    [p addCurveToPoint:DCP(3.6448, 4.3974) controlPoint1:DCP(3.6636, 4.3754) controlPoint2:DCP(3.6524, 4.3851)];
+    [p addCurveToPoint:DCP(0.0992, 18.0578) controlPoint1:DCP(0.5334, 9.0458) controlPoint2:DCP(-0.3190, 13.5799)];
+    [p addCurveToPoint:DCP(0.1304, 18.1139) controlPoint1:DCP(0.1016, 18.0799) controlPoint2:DCP(0.1129, 18.1002)];
+    [p addCurveToPoint:DCP(6.1233, 21.1433) controlPoint1:DCP(2.1832, 19.6215) controlPoint2:DCP(4.1717, 20.5367)];
+    [p addCurveToPoint:DCP(6.2075, 21.1157) controlPoint1:DCP(6.1543, 21.1526) controlPoint2:DCP(6.1880, 21.1415)];
+    [p addCurveToPoint:DCP(7.4335, 19.1215) controlPoint1:DCP(6.6691, 20.4853) controlPoint2:DCP(7.0806, 19.8205)];
+    [p addCurveToPoint:DCP(7.4364, 19.0593) controlPoint1:DCP(7.4433, 19.1021) controlPoint2:DCP(7.4444, 19.0795)];
+    [p addCurveToPoint:DCP(7.3919, 19.0158) controlPoint1:DCP(7.4285, 19.0391) controlPoint2:DCP(7.4123, 19.0233)];
+    [p addCurveToPoint:DCP(5.5197, 18.1235) controlPoint1:DCP(6.7391, 18.7682) controlPoint2:DCP(6.1176, 18.4663)];
+    [p addCurveToPoint:DCP(5.4818, 18.0617) controlPoint1:DCP(5.4976, 18.1105) controlPoint2:DCP(5.4834, 18.0873)];
+    [p addCurveToPoint:DCP(5.5121, 17.9958) controlPoint1:DCP(5.4803, 18.0361) controlPoint2:DCP(5.4917, 18.0113)];
+    [p addCurveToPoint:DCP(5.8839, 17.7044) controlPoint1:DCP(5.6379, 17.9015) controlPoint2:DCP(5.7638, 17.8035)];
+    [p addCurveToPoint:DCP(5.9615, 17.6939) controlPoint1:DCP(5.9056, 17.6865) controlPoint2:DCP(5.9358, 17.6824)];
+    [p addCurveToPoint:DCP(18.0229, 17.6939) controlPoint1:DCP(9.8893, 19.4872) controlPoint2:DCP(14.1415, 19.4872)];
+    [p addCurveToPoint:DCP(18.1014, 17.7034) controlPoint1:DCP(18.0487, 17.6816) controlPoint2:DCP(18.0793, 17.6854)];
+    [p addCurveToPoint:DCP(18.4742, 17.9958) controlPoint1:DCP(18.2216, 17.8024) controlPoint2:DCP(18.3474, 17.9015)];
+    [p addCurveToPoint:DCP(18.5049, 18.0614) controlPoint1:DCP(18.4947, 18.0112) controlPoint2:DCP(18.5062, 18.0358)];
+    [p addCurveToPoint:DCP(18.4676, 18.1234) controlPoint1:DCP(18.5035, 18.0869) controlPoint2:DCP(18.4896, 18.1102)];
+    [p addCurveToPoint:DCP(16.5946, 19.0148) controlPoint1:DCP(17.8695, 18.4727) controlPoint2:DCP(17.2429, 18.7709)];
+    [p addCurveToPoint:DCP(16.5504, 19.0590) controlPoint1:DCP(16.5742, 19.0226) controlPoint2:DCP(16.5582, 19.0387)];
+    [p addCurveToPoint:DCP(16.5539, 19.1215) controlPoint1:DCP(16.5426, 19.0794) controlPoint2:DCP(16.5439, 19.1021)];
+    [p addCurveToPoint:DCP(17.7789, 21.1147) controlPoint1:DCP(16.9143, 19.8195) controlPoint2:DCP(17.3258, 20.4843)];
+    [p addCurveToPoint:DCP(17.8631, 21.1433) controlPoint1:DCP(17.7978, 21.1413) controlPoint2:DCP(17.8319, 21.1529)];
+    [p addCurveToPoint:DCP(23.8654, 18.1139) controlPoint1:DCP(19.8241, 20.5366) controlPoint2:DCP(21.8126, 19.6214)];
+    [p addCurveToPoint:DCP(23.8967, 18.0587) controlPoint1:DCP(23.8833, 18.1009) controlPoint2:DCP(23.8947, 18.0807)];
+    [p addCurveToPoint:DCP(20.3482, 4.3983) controlPoint1:DCP(24.3971, 12.8817) controlPoint2:DCP(23.0585, 8.3848)];
+    [p addCurveToPoint:DCP(20.3170, 4.3697) controlPoint1:DCP(20.3415, 4.3854) controlPoint2:DCP(20.3305, 4.3752)];
+    [p closePath];
+    // Left eye cutout
+    [p moveToPoint:DCP(8.0200, 15.3312)];
+    [p addCurveToPoint:DCP(5.8631, 12.9122) controlPoint1:DCP(6.8375, 15.3312) controlPoint2:DCP(5.8631, 14.2455)];
+    [p addCurveToPoint:DCP(8.0201, 10.4933) controlPoint1:DCP(5.8631, 11.5790) controlPoint2:DCP(6.8186, 10.4933)];
+    [p addCurveToPoint:DCP(10.1769, 12.9123) controlPoint1:DCP(9.2309, 10.4933) controlPoint2:DCP(10.1958, 11.5885)];
+    [p addCurveToPoint:DCP(8.0200, 15.3312) controlPoint1:DCP(10.1769, 14.2455) controlPoint2:DCP(9.2214, 15.3312)];
+    [p closePath];
+    // Right eye cutout
+    [p moveToPoint:DCP(15.9948, 15.3312)];
+    [p addCurveToPoint:DCP(13.8379, 12.9122) controlPoint1:DCP(14.8123, 15.3312) controlPoint2:DCP(13.8379, 14.2455)];
+    [p addCurveToPoint:DCP(15.9948, 10.4933) controlPoint1:DCP(13.8379, 11.5790) controlPoint2:DCP(14.7933, 10.4933)];
+    [p addCurveToPoint:DCP(18.1516, 12.9123) controlPoint1:DCP(17.2056, 10.4933) controlPoint2:DCP(18.1705, 11.5885)];
+    [p addCurveToPoint:DCP(15.9948, 15.3312) controlPoint1:DCP(18.1516, 14.2455) controlPoint2:DCP(17.2056, 15.3312)];
+    [p closePath];
+    #undef DCP
+    return p;
+}
+
+static UIImage *sdvDiscordClydeImage(CGFloat ptSize, UIColor *fillColor) {
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
+    fmt.opaque = NO;
+    UIGraphicsImageRenderer *ren = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(ptSize, ptSize) format:fmt];
+    return [ren imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        (void)ctx;
+        [(fillColor ?: UIColor.whiteColor) setFill];
+        [sdvDiscordClydePath(CGRectMake(0, 0, ptSize, ptSize)) fill];
+    }];
+}
+
+static UIBezierPath *sdvFourPointStarPath(CGFloat r) {
+    UIBezierPath *p = [UIBezierPath bezierPath];
+    CGFloat c = r * 0.22;
+    [p moveToPoint:CGPointMake(0, -r)];
+    [p addQuadCurveToPoint:CGPointMake(r, 0) controlPoint:CGPointMake(c, -c)];
+    [p addQuadCurveToPoint:CGPointMake(0, r) controlPoint:CGPointMake(c, c)];
+    [p addQuadCurveToPoint:CGPointMake(-r, 0) controlPoint:CGPointMake(-c, c)];
+    [p addQuadCurveToPoint:CGPointMake(0, -r) controlPoint:CGPointMake(-c, -c)];
+    [p closePath];
+    return p;
+}
+
+static void sdvSpawnDiscordSparkleBurst(UIView *hostView, CGPoint origin, CGFloat maxDist) {
+    if (!hostView || UIAccessibilityIsReduceMotionEnabled()) return;
+    NSArray<UIColor *> *palette = @[
+        UIColor.whiteColor,
+        rgb(0xFDE047), // Stardew Gold
+        rgb(0x34D399), // Live Emerald
+        rgb(0x67E8F9), // Crystal Cyan
+        rgb(0xC084FC)  // Amethyst Violet
+    ];
+    NSInteger count = 14;
+    for (NSInteger i = 0; i < count; i++) {
+        CAShapeLayer *sp = [CAShapeLayer layer];
+        BOOL isStar = (i % 2 == 0);
+        CGFloat sz = isStar ? (5.2 + (i % 3) * 1.4) : (2.6 + (i % 2) * 1.0);
+        sp.path = isStar ? sdvFourPointStarPath(sz).CGPath : [UIBezierPath bezierPathWithOvalInRect:CGRectMake(-sz, -sz, sz * 2.0, sz * 2.0)].CGPath;
+        sp.fillColor = palette[(NSUInteger)i % palette.count].CGColor;
+        sp.position = origin;
+        [hostView.layer addSublayer:sp];
+
+        CGFloat baseAng = ((CGFloat)i / (CGFloat)count) * (CGFloat)(M_PI * 2.0) + ((i % 3) - 1) * 0.11;
+        CGFloat dist = maxDist * (0.58 + (CGFloat)((i * 37) % 45) / 100.0);
+        CGPoint dst = CGPointMake(origin.x + cos(baseAng) * dist, origin.y + sin(baseAng) * dist);
+
+        CABasicAnimation *posAnim = [CABasicAnimation animationWithKeyPath:@"position"];
+        posAnim.fromValue = [NSValue valueWithCGPoint:origin];
+        posAnim.toValue = [NSValue valueWithCGPoint:dst];
+        posAnim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+
+        CAKeyframeAnimation *scAnim = [CAKeyframeAnimation animationWithKeyPath:@"transform.scale"];
+        scAnim.values = @[@(0.25), @(1.25), @(0.85), @(0.05)];
+        scAnim.keyTimes = @[@(0.0), @(0.28), @(0.72), @(1.0)];
+
+        CABasicAnimation *rotAnim = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
+        rotAnim.fromValue = @(0.0);
+        rotAnim.toValue = @((i % 2 == 0 ? 1.0 : -1.0) * M_PI * 0.85);
+
+        CAKeyframeAnimation *opAnim = [CAKeyframeAnimation animationWithKeyPath:@"opacity"];
+        opAnim.values = @[@(1.0), @(1.0), @(0.0)];
+        opAnim.keyTimes = @[@(0.0), @(0.55), @(1.0)];
+
+        CAAnimationGroup *grp = [CAAnimationGroup animation];
+        grp.animations = @[posAnim, scAnim, rotAnim, opAnim];
+        grp.duration = 0.56;
+        grp.fillMode = kCAFillModeForwards;
+        grp.removedOnCompletion = NO;
+        [sp addAnimation:grp forKey:@"sdvSparkleBurst"];
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.60 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [sp removeFromSuperlayer];
+        });
+    }
+}
+
+// Compact Animated Top-Bar Pill (visible across all 9 tabs!)
+@interface SDVDiscordPillControl : UIControl
+-(void)playTapCelebration;
+@end
+
+@implementation SDVDiscordPillControl {
+    CAGradientLayer *_bgGrad;
+    CAGradientLayer *_sheenGrad;
+    UIImageView *_clydeView;
+    UILabel *_titleLbl;
+    UIView *_dotWrap;
+    CAShapeLayer *_radarRing;
+}
+
+-(instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.layer.cornerRadius = 13.5;
+        self.layer.cornerCurve = kCACornerCurveContinuous;
+        self.layer.borderWidth = 0.75;
+        self.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.30].CGColor;
+        self.clipsToBounds = YES;
+        self.translatesAutoresizingMaskIntoConstraints = NO;
+        [self.heightAnchor constraintEqualToConstant:27.0].active = YES;
+        [self setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        [self setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+
+        _bgGrad = [CAGradientLayer layer];
+        _bgGrad.colors = @[
+            (id)rgb(0x4F46E5).CGColor,
+            (id)rgb(0x5865F2).CGColor,
+            (id)rgb(0x7C3AED).CGColor
+        ];
+        _bgGrad.startPoint = CGPointMake(0.0, 0.15);
+        _bgGrad.endPoint = CGPointMake(1.0, 0.85);
+        [self.layer addSublayer:_bgGrad];
+
+        _sheenGrad = [CAGradientLayer layer];
+        _sheenGrad.colors = @[
+            (id)[UIColor colorWithWhite:1.0 alpha:0.0].CGColor,
+            (id)[UIColor colorWithWhite:1.0 alpha:0.28].CGColor,
+            (id)[UIColor colorWithWhite:1.0 alpha:0.0].CGColor
+        ];
+        _sheenGrad.startPoint = CGPointMake(0.0, 0.0);
+        _sheenGrad.endPoint = CGPointMake(1.0, 0.35);
+        _sheenGrad.locations = @[@(-0.8), @(-0.4), @(0.0)];
+        [self.layer addSublayer:_sheenGrad];
+
+        UIStackView *row = mkHStack(5.5);
+        row.userInteractionEnabled = NO;
+
+        _clydeView = [[UIImageView alloc] initWithImage:sdvDiscordClydeImage(14.5, UIColor.whiteColor)];
+        _clydeView.contentMode = UIViewContentModeScaleAspectFit;
+        _clydeView.translatesAutoresizingMaskIntoConstraints = NO;
+        [_clydeView.widthAnchor constraintEqualToConstant:14.5].active = YES;
+        [_clydeView.heightAnchor constraintEqualToConstant:14.5].active = YES;
+
+        _titleLbl = mkLabel(@"Discord", 11.5, UIFontWeightBold, UIColor.whiteColor);
+        _titleLbl.numberOfLines = 1;
+
+        _dotWrap = [UIView new];
+        _dotWrap.translatesAutoresizingMaskIntoConstraints = NO;
+        [_dotWrap.widthAnchor constraintEqualToConstant:8.0].active = YES;
+        [_dotWrap.heightAnchor constraintEqualToConstant:8.0].active = YES;
+
+        _radarRing = [CAShapeLayer layer];
+        _radarRing.path = [UIBezierPath bezierPathWithOvalInRect:CGRectMake(1.0, 1.0, 6.0, 6.0)].CGPath;
+        _radarRing.fillColor = rgb(0x4ADE80).CGColor;
+        _radarRing.frame = CGRectMake(0, 0, 8.0, 8.0);
+        [_dotWrap.layer addSublayer:_radarRing];
+
+        UIView *coreDot = [[UIView alloc] initWithFrame:CGRectMake(1.0, 1.0, 6.0, 6.0)];
+        coreDot.backgroundColor = rgb(0x22C55E);
+        coreDot.layer.cornerRadius = 3.0;
+        coreDot.layer.borderWidth = 0.75;
+        coreDot.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.85].CGColor;
+        [_dotWrap addSubview:coreDot];
+
+        [row addArrangedSubview:_clydeView];
+        [row addArrangedSubview:_titleLbl];
+        [row addArrangedSubview:_dotWrap];
+        [self addSubview:row];
+        pinInsets(row, self, UIEdgeInsetsMake(4, 10, 4, 9));
+
+        [self updateStatsLabelAnimated:NO];
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onStatsUpdated:) name:kSDVDiscordStatsNotification object:nil];
+    }
+    return self;
+}
+
+-(void)dealloc {
+    [NSNotificationCenter.defaultCenter removeObserver:self];
+}
+
+-(void)didMoveToWindow {
+    [super didMoveToWindow];
+    if (self.window) [self startAmbientAnimations];
+}
+
+-(void)layoutSubviews {
+    [super layoutSubviews];
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _bgGrad.frame = self.bounds;
+    _sheenGrad.frame = CGRectInset(self.bounds, -16.0, 0);
+    [CATransaction commit];
+}
+
+-(void)onStatsUpdated:(NSNotification *)n {
+    (void)n;
+    [self updateStatsLabelAnimated:YES];
+}
+
+-(void)updateStatsLabelAnimated:(BOOL)animated {
+    NSInteger on = sdvDiscordOnlineCount();
+    NSString *txt = (on > 0) ? [NSString stringWithFormat:@"Discord · %ld", (long)on] : @"Discord";
+    if ([_titleLbl.text isEqualToString:txt]) return;
+    if (animated && !UIAccessibilityIsReduceMotionEnabled()) {
+        [UIView transitionWithView:_titleLbl duration:0.22 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
+            self->_titleLbl.text = txt;
+        } completion:nil];
+    } else {
+        _titleLbl.text = txt;
+    }
+}
+
+-(void)startAmbientAnimations {
+    if (UIAccessibilityIsReduceMotionEnabled()) return;
+    if (![_sheenGrad animationForKey:@"sdvPillSheen"]) {
+        CABasicAnimation *sh = [CABasicAnimation animationWithKeyPath:@"locations"];
+        sh.fromValue = @[@(-0.85), @(-0.42), @(0.0)];
+        sh.toValue = @[@(1.0), @(1.42), @(1.85)];
+        sh.duration = 3.6;
+        sh.repeatCount = HUGE_VALF;
+        sh.removedOnCompletion = NO;
+        [_sheenGrad addAnimation:sh forKey:@"sdvPillSheen"];
+    }
+    if (![_radarRing animationForKey:@"sdvPillRadar"]) {
+        CABasicAnimation *sc = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
+        sc.fromValue = @(1.0);
+        sc.toValue = @(2.35);
+        CABasicAnimation *op = [CABasicAnimation animationWithKeyPath:@"opacity"];
+        op.fromValue = @(0.85);
+        op.toValue = @(0.0);
+        CAAnimationGroup *g = [CAAnimationGroup animation];
+        g.animations = @[sc, op];
+        g.duration = 1.85;
+        g.repeatCount = HUGE_VALF;
+        g.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+        g.removedOnCompletion = NO;
+        [_radarRing addAnimation:g forKey:@"sdvPillRadar"];
+    }
+    if (![_clydeView.layer animationForKey:@"sdvPillBob"]) {
+        CABasicAnimation *bob = [CABasicAnimation animationWithKeyPath:@"transform.translation.y"];
+        bob.fromValue = @(-0.9);
+        bob.toValue = @(0.9);
+        bob.duration = 1.6;
+        bob.autoreverses = YES;
+        bob.repeatCount = HUGE_VALF;
+        bob.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        bob.removedOnCompletion = NO;
+        [_clydeView.layer addAnimation:bob forKey:@"sdvPillBob"];
+    }
+}
+
+-(void)setHighlighted:(BOOL)highlighted {
+    [super setHighlighted:highlighted];
+    if (highlighted) {
+        [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+    }
+    [UIView animateWithDuration:(highlighted ? 0.11 : 0.36)
+                          delay:0
+         usingSpringWithDamping:(highlighted ? 1.0 : 0.52)
+          initialSpringVelocity:(highlighted ? 0.0 : 0.85)
+                        options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{
+        self.transform = highlighted ? CGAffineTransformMakeScale(0.92, 0.92) : CGAffineTransformIdentity;
+        self.alpha = highlighted ? 0.88 : 1.0;
+    } completion:nil];
+}
+
+-(void)playTapCelebration {
+    if (!UIAccessibilityIsReduceMotionEnabled()) {
+        CAKeyframeAnimation *spin = [CAKeyframeAnimation animationWithKeyPath:@"transform.rotation.z"];
+        spin.values = @[@(0.0), @(-0.22), @(M_PI * 2.0)];
+        spin.keyTimes = @[@(0.0), @(0.18), @(1.0)];
+        spin.duration = 0.45;
+        spin.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [_clydeView.layer addAnimation:spin forKey:@"sdvTapSpin"];
+
+        if (self.superview) {
+            CGPoint pt = [self.superview convertPoint:CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMidY(self.bounds)) fromView:self];
+            sdvSpawnDiscordSparkleBurst(self.superview, pt, 34.0);
+        }
+    }
+}
+@end
+
+// Full Interactive Hero Discord Community Card (Tab 0 Setup/Install, Tab 4 Co-op, Tab 7 Credit)
+@interface SDVDiscordHeroCard : UIControl
+-(instancetype)initWithCustomSubtitle:(NSString *)customSubtitle;
+-(void)playTapCelebration;
+@end
+
+@implementation SDVDiscordHeroCard {
+    CAGradientLayer *_auroraGrad;
+    CAGradientLayer *_orbCyan;
+    CAGradientLayer *_orbViolet;
+    CAGradientLayer *_sheenGrad;
+    UIView *_mascotBox;
+    UIImageView *_clydeView;
+    NSArray<CAShapeLayer *> *_starLayers;
+    CAShapeLayer *_liveRadarRing;
+    UILabel *_liveStatsLbl;
+    UIView *_ctaPill;
+    UIImageView *_ctaArrow;
+}
+
+-(instancetype)initWithCustomSubtitle:(NSString *)customSubtitle {
+    self = [super initWithFrame:CGRectZero];
+    if (self) {
+        self.layer.cornerRadius = 16.0;
+        self.layer.cornerCurve = kCACornerCurveContinuous;
+        self.layer.borderWidth = 1.0;
+        self.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.26].CGColor;
+        self.clipsToBounds = YES;
+
+        // 1. Deep Cosmic Blurple -> Indigo -> Amethyst Aurora Gradient
+        _auroraGrad = [CAGradientLayer layer];
+        _auroraGrad.colors = @[
+            (id)rgb(0x312E81).CGColor,
+            (id)rgb(0x4F46E5).CGColor,
+            (id)rgb(0x5865F2).CGColor,
+            (id)rgb(0x7C3AED).CGColor
+        ];
+        _auroraGrad.locations = @[@(0.0), @(0.35), @(0.70), @(1.0)];
+        _auroraGrad.startPoint = CGPointMake(0.0, 0.0);
+        _auroraGrad.endPoint = CGPointMake(1.0, 1.0);
+        [self.layer addSublayer:_auroraGrad];
+
+        // 2. Soft Drifting Radial Glow Orbs
+        _orbCyan = [CAGradientLayer layer];
+        _orbCyan.type = kCAGradientLayerRadial;
+        _orbCyan.colors = @[
+            (id)[rgb(0x38BDF8) colorWithAlphaComponent:0.32].CGColor,
+            (id)[rgb(0x38BDF8) colorWithAlphaComponent:0.0].CGColor
+        ];
+        _orbCyan.startPoint = CGPointMake(0.5, 0.5);
+        _orbCyan.endPoint = CGPointMake(1.0, 1.0);
+        [self.layer addSublayer:_orbCyan];
+
+        _orbViolet = [CAGradientLayer layer];
+        _orbViolet.type = kCAGradientLayerRadial;
+        _orbViolet.colors = @[
+            (id)[rgb(0xE879F9) colorWithAlphaComponent:0.28].CGColor,
+            (id)[rgb(0xE879F9) colorWithAlphaComponent:0.0].CGColor
+        ];
+        _orbViolet.startPoint = CGPointMake(0.5, 0.5);
+        _orbViolet.endPoint = CGPointMake(1.0, 1.0);
+        [self.layer addSublayer:_orbViolet];
+
+        // 3. Holographic Diagonal Shimmer Sweep
+        _sheenGrad = [CAGradientLayer layer];
+        _sheenGrad.colors = @[
+            (id)[UIColor colorWithWhite:1.0 alpha:0.0].CGColor,
+            (id)[UIColor colorWithWhite:1.0 alpha:0.18].CGColor,
+            (id)[UIColor colorWithWhite:1.0 alpha:0.0].CGColor
+        ];
+        _sheenGrad.startPoint = CGPointMake(0.0, 0.0);
+        _sheenGrad.endPoint = CGPointMake(1.0, 0.42);
+        _sheenGrad.locations = @[@(-0.7), @(-0.35), @(0.0)];
+        [self.layer addSublayer:_sheenGrad];
+
+        // 4. Content Row (non-interactive subviews so whole card acts as responsive UIControl)
+        UIStackView *mainRow = mkHStack(13.0);
+        mainRow.userInteractionEnabled = NO;
+
+        // Left Mascot Stage (54x54) with Frosted Squircle + Levitating Clyde + 4 Twinkling Stars
+        UIView *stage = [UIView new];
+        stage.translatesAutoresizingMaskIntoConstraints = NO;
+        [stage.widthAnchor constraintEqualToConstant:54.0].active = YES;
+        [stage.heightAnchor constraintEqualToConstant:54.0].active = YES;
+        [stage setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        [stage setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+
+        _mascotBox = [UIView new];
+        _mascotBox.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.17];
+        _mascotBox.layer.cornerRadius = 14.5;
+        _mascotBox.layer.cornerCurve = kCACornerCurveContinuous;
+        _mascotBox.layer.borderWidth = 1.0;
+        _mascotBox.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.36].CGColor;
+        _mascotBox.translatesAutoresizingMaskIntoConstraints = NO;
+        [stage addSubview:_mascotBox];
+        [NSLayoutConstraint activateConstraints:@[
+            [_mascotBox.centerXAnchor constraintEqualToAnchor:stage.centerXAnchor],
+            [_mascotBox.centerYAnchor constraintEqualToAnchor:stage.centerYAnchor],
+            [_mascotBox.widthAnchor constraintEqualToConstant:48.0],
+            [_mascotBox.heightAnchor constraintEqualToConstant:48.0]
+        ]];
+
+        _clydeView = [[UIImageView alloc] initWithImage:sdvDiscordClydeImage(27.0, UIColor.whiteColor)];
+        _clydeView.contentMode = UIViewContentModeScaleAspectFit;
+        _clydeView.translatesAutoresizingMaskIntoConstraints = NO;
+        [_mascotBox addSubview:_clydeView];
+        [NSLayoutConstraint activateConstraints:@[
+            [_clydeView.centerXAnchor constraintEqualToAnchor:_mascotBox.centerXAnchor],
+            [_clydeView.centerYAnchor constraintEqualToAnchor:_mascotBox.centerYAnchor],
+            [_clydeView.widthAnchor constraintEqualToConstant:27.0],
+            [_clydeView.heightAnchor constraintEqualToConstant:27.0]
+        ]];
+
+        NSArray<NSValue *> *starPts = @[
+            [NSValue valueWithCGPoint:CGPointMake(5.0, 6.0)],
+            [NSValue valueWithCGPoint:CGPointMake(49.5, 8.0)],
+            [NSValue valueWithCGPoint:CGPointMake(48.0, 47.5)],
+            [NSValue valueWithCGPoint:CGPointMake(6.5, 46.5)]
+        ];
+        NSArray<UIColor *> *starCols = @[rgb(0xFDE047), rgb(0x67E8F9), rgb(0x6EE7B7), UIColor.whiteColor];
+        NSArray<NSNumber *> *starRadii = @[@(4.8), @(3.8), @(4.2), @(3.4)];
+        NSMutableArray<CAShapeLayer *> *sLayers = [NSMutableArray array];
+        for (NSUInteger i = 0; i < starPts.count; i++) {
+            CAShapeLayer *st = [CAShapeLayer layer];
+            st.path = sdvFourPointStarPath(starRadii[i].doubleValue).CGPath;
+            st.fillColor = starCols[i].CGColor;
+            st.position = starPts[i].CGPointValue;
+            [stage.layer addSublayer:st];
+            [sLayers addObject:st];
+        }
+        _starLayers = sLayers;
+
+        // Center Text Column
+        UIStackView *midCol = mkVStack(3.5);
+
+        UIStackView *badgeRow = mkHStack(6.0);
+        UILabel *tagPill = mkBadgePill(@"DISCORD CHÍNH THỨC", [UIColor colorWithWhite:1.0 alpha:0.17], rgb(0xE0E7FF), 9.5);
+
+        UIView *livePill = [UIView new];
+        livePill.backgroundColor = [rgb(0x052E16) colorWithAlphaComponent:0.52];
+        livePill.layer.cornerRadius = 7.5;
+        livePill.layer.cornerCurve = kCACornerCurveContinuous;
+        livePill.layer.borderWidth = 0.75;
+        livePill.layer.borderColor = [rgb(0x4ADE80) colorWithAlphaComponent:0.48].CGColor;
+        UIStackView *liveInner = mkHStack(4.5);
+        UIView *liveDotBox = [UIView new];
+        liveDotBox.translatesAutoresizingMaskIntoConstraints = NO;
+        [liveDotBox.widthAnchor constraintEqualToConstant:7.5].active = YES;
+        [liveDotBox.heightAnchor constraintEqualToConstant:7.5].active = YES;
+
+        _liveRadarRing = [CAShapeLayer layer];
+        _liveRadarRing.path = [UIBezierPath bezierPathWithOvalInRect:CGRectMake(0.75, 0.75, 6.0, 6.0)].CGPath;
+        _liveRadarRing.fillColor = rgb(0x4ADE80).CGColor;
+        _liveRadarRing.frame = CGRectMake(0, 0, 7.5, 7.5);
+        [liveDotBox.layer addSublayer:_liveRadarRing];
+
+        UIView *liveCore = [[UIView alloc] initWithFrame:CGRectMake(0.75, 0.75, 6.0, 6.0)];
+        liveCore.backgroundColor = rgb(0x22C55E);
+        liveCore.layer.cornerRadius = 3.0;
+        [liveDotBox addSubview:liveCore];
+
+        _liveStatsLbl = mkLabel(@"TRỰC TUYẾN", 9.5, UIFontWeightBold, rgb(0x86EFAC));
+        _liveStatsLbl.numberOfLines = 1;
+        [liveInner addArrangedSubview:liveDotBox];
+        [liveInner addArrangedSubview:_liveStatsLbl];
+        [livePill addSubview:liveInner];
+        pinInsets(liveInner, livePill, UIEdgeInsetsMake(2.5, 6.5, 2.5, 7.0));
+
+        [badgeRow addArrangedSubview:tagPill];
+        [badgeRow addArrangedSubview:livePill];
+        [badgeRow addArrangedSubview:[UIView new]];
+
+        UILabel *titleLbl = mkLabel(@"Vườn Bách Thú 🦖 · Garden Launcher", 15.0, UIFontWeightBold, UIColor.whiteColor);
+        titleLbl.numberOfLines = 1;
+        titleLbl.adjustsFontSizeToFitWidth = YES;
+        titleLbl.minimumScaleFactor = 0.82;
+
+        NSString *subText = customSubtitle.length
+            ? customSubtitle
+            : @"Giao lưu Co-op, kho Mod & Việt hóa 1.6, hỏi đáp Haley AI 🌻, nhận bản cập nhật sớm & hỗ trợ sửa lỗi trực tiếp.";
+        UILabel *subLbl = mkLabel(subText, 12.0, UIFontWeightRegular, [UIColor colorWithWhite:1.0 alpha:0.90]);
+        subLbl.numberOfLines = 3;
+
+        [midCol addArrangedSubview:badgeRow];
+        [midCol addArrangedSubview:titleLbl];
+        [midCol addArrangedSubview:subLbl];
+
+        // Right Glossy White CTA Pill ("Tham gia ↗")
+        _ctaPill = [UIView new];
+        _ctaPill.backgroundColor = UIColor.whiteColor;
+        _ctaPill.layer.cornerRadius = 17.0;
+        _ctaPill.layer.cornerCurve = kCACornerCurveContinuous;
+        _ctaPill.translatesAutoresizingMaskIntoConstraints = NO;
+        [_ctaPill.heightAnchor constraintEqualToConstant:34.0].active = YES;
+        [_ctaPill setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        [_ctaPill setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+
+        UIStackView *ctaRow = mkHStack(4.5);
+        UILabel *ctaLbl = mkLabel(@"Tham gia", 12.5, UIFontWeightBold, rgb(0x4338CA));
+        ctaLbl.numberOfLines = 1;
+        _ctaArrow = [[UIImageView alloc] initWithImage:sfIcon(@"arrow.up.right", 11.5, UIImageSymbolWeightBold)];
+        _ctaArrow.tintColor = rgb(0x4F46E5);
+        [ctaRow addArrangedSubview:ctaLbl];
+        [ctaRow addArrangedSubview:_ctaArrow];
+        [_ctaPill addSubview:ctaRow];
+        pinInsets(ctaRow, _ctaPill, UIEdgeInsetsMake(6, 13, 6, 12));
+
+        [mainRow addArrangedSubview:stage];
+        [mainRow addArrangedSubview:midCol];
+        [mainRow addArrangedSubview:_ctaPill];
+        [self addSubview:mainRow];
+        pinInsets(mainRow, self, UIEdgeInsetsMake(13, 14, 13, 14));
+
+        [self updateStatsBadgeAnimated:NO];
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onStatsChanged:) name:kSDVDiscordStatsNotification object:nil];
+    }
+    return self;
+}
+
+-(void)dealloc {
+    [NSNotificationCenter.defaultCenter removeObserver:self];
+}
+
+-(void)didMoveToWindow {
+    [super didMoveToWindow];
+    if (self.window) [self startHeroAnimations];
+}
+
+-(void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat w = self.bounds.size.width;
+    CGFloat h = self.bounds.size.height;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _auroraGrad.frame = self.bounds;
+    _orbCyan.frame = CGRectMake(w - 140.0, -55.0, 210.0, 210.0);
+    _orbViolet.frame = CGRectMake(-50.0, h - 115.0, 190.0, 190.0);
+    _sheenGrad.frame = CGRectInset(self.bounds, -40.0, 0);
+    [CATransaction commit];
+}
+
+-(void)onStatsChanged:(NSNotification *)n {
+    (void)n;
+    [self updateStatsBadgeAnimated:YES];
+}
+
+-(void)updateStatsBadgeAnimated:(BOOL)animated {
+    NSInteger on = sdvDiscordOnlineCount();
+    NSInteger mem = sdvDiscordMemberCount();
+    NSString *txt = (on > 0 && mem > 0)
+        ? [NSString stringWithFormat:@"%ld ONLINE · %ld THÀNH VIÊN", (long)on, (long)mem]
+        : ((on > 0) ? [NSString stringWithFormat:@"%ld ĐANG ONLINE", (long)on] : @"TRỰC TUYẾN 24/7");
+    if ([_liveStatsLbl.text isEqualToString:txt]) return;
+    if (animated && !UIAccessibilityIsReduceMotionEnabled()) {
+        [UIView transitionWithView:_liveStatsLbl duration:0.25 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
+            self->_liveStatsLbl.text = txt;
+        } completion:nil];
+    } else {
+        _liveStatsLbl.text = txt;
+    }
+}
+
+-(void)startHeroAnimations {
+    if (UIAccessibilityIsReduceMotionEnabled()) return;
+
+    // 1. Slow breathing Aurora color/angle shift
+    if (![_auroraGrad animationForKey:@"sdvAuroraShift"]) {
+        CABasicAnimation *sp = [CABasicAnimation animationWithKeyPath:@"startPoint"];
+        sp.fromValue = [NSValue valueWithCGPoint:CGPointMake(0.0, 0.0)];
+        sp.toValue = [NSValue valueWithCGPoint:CGPointMake(0.25, 0.85)];
+        CABasicAnimation *ep = [CABasicAnimation animationWithKeyPath:@"endPoint"];
+        ep.fromValue = [NSValue valueWithCGPoint:CGPointMake(1.0, 1.0)];
+        ep.toValue = [NSValue valueWithCGPoint:CGPointMake(0.80, 0.15)];
+        CAAnimationGroup *ag = [CAAnimationGroup animation];
+        ag.animations = @[sp, ep];
+        ag.duration = 5.4;
+        ag.autoreverses = YES;
+        ag.repeatCount = HUGE_VALF;
+        ag.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        ag.removedOnCompletion = NO;
+        [_auroraGrad addAnimation:ag forKey:@"sdvAuroraShift"];
+    }
+
+    // 2. Gentle ambient orb drift
+    if (![_orbCyan animationForKey:@"sdvOrbDrift"]) {
+        CABasicAnimation *dx = [CABasicAnimation animationWithKeyPath:@"transform.translation.x"];
+        dx.fromValue = @(-18.0);
+        dx.toValue = @(18.0);
+        dx.duration = 4.6;
+        dx.autoreverses = YES;
+        dx.repeatCount = HUGE_VALF;
+        dx.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        dx.removedOnCompletion = NO;
+        [_orbCyan addAnimation:dx forKey:@"sdvOrbDrift"];
+    }
+    if (![_orbViolet animationForKey:@"sdvOrbDrift2"]) {
+        CABasicAnimation *dy = [CABasicAnimation animationWithKeyPath:@"transform.translation.x"];
+        dy.fromValue = @(16.0);
+        dy.toValue = @(-16.0);
+        dy.duration = 5.2;
+        dy.autoreverses = YES;
+        dy.repeatCount = HUGE_VALF;
+        dy.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        dy.removedOnCompletion = NO;
+        [_orbViolet addAnimation:dy forKey:@"sdvOrbDrift2"];
+    }
+
+    // 3. Holographic diagonal sheen sweep
+    if (![_sheenGrad animationForKey:@"sdvHeroSheen"]) {
+        CABasicAnimation *sh = [CABasicAnimation animationWithKeyPath:@"locations"];
+        sh.fromValue = @[@(-0.75), @(-0.37), @(0.0)];
+        sh.toValue = @[@(1.0), @(1.37), @(1.75)];
+        sh.duration = 4.3;
+        sh.repeatCount = HUGE_VALF;
+        sh.removedOnCompletion = NO;
+        [_sheenGrad addAnimation:sh forKey:@"sdvHeroSheen"];
+    }
+
+    // 4. Floating & gently rocking Clyde mascot
+    if (![_clydeView.layer animationForKey:@"sdvClydeFloat"]) {
+        CABasicAnimation *fl = [CABasicAnimation animationWithKeyPath:@"transform.translation.y"];
+        fl.fromValue = @(-2.6);
+        fl.toValue = @(2.6);
+        fl.duration = 2.1;
+        fl.autoreverses = YES;
+        fl.repeatCount = HUGE_VALF;
+        fl.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        fl.removedOnCompletion = NO;
+        [_clydeView.layer addAnimation:fl forKey:@"sdvClydeFloat"];
+
+        CABasicAnimation *rk = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
+        rk.fromValue = @(-0.065);
+        rk.toValue = @(0.065);
+        rk.duration = 2.9;
+        rk.autoreverses = YES;
+        rk.repeatCount = HUGE_VALF;
+        rk.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        rk.removedOnCompletion = NO;
+        [_clydeView.layer addAnimation:rk forKey:@"sdvClydeRock"];
+    }
+
+    // 5. Staggered twinkling Stardew/Discord sparkle stars
+    for (NSUInteger i = 0; i < _starLayers.count; i++) {
+        CAShapeLayer *st = _starLayers[i];
+        if ([st animationForKey:@"sdvTwinkle"]) continue;
+        CAKeyframeAnimation *op = [CAKeyframeAnimation animationWithKeyPath:@"opacity"];
+        op.values = @[@(0.18), @(1.0), @(0.25), @(0.92), @(0.18)];
+        op.keyTimes = @[@(0.0), @(0.28), @(0.55), @(0.80), @(1.0)];
+
+        CAKeyframeAnimation *sc = [CAKeyframeAnimation animationWithKeyPath:@"transform.scale"];
+        sc.values = @[@(0.55), @(1.18), @(0.68), @(1.05), @(0.55)];
+        sc.keyTimes = @[@(0.0), @(0.28), @(0.55), @(0.80), @(1.0)];
+
+        CAAnimationGroup *tg = [CAAnimationGroup animation];
+        tg.animations = @[op, sc];
+        tg.duration = 2.8 + (double)i * 0.35;
+        tg.timeOffset = (double)i * 0.65;
+        tg.repeatCount = HUGE_VALF;
+        tg.removedOnCompletion = NO;
+        [st addAnimation:tg forKey:@"sdvTwinkle"];
+    }
+
+    // 6. Live emerald sonar ripple
+    if (![_liveRadarRing animationForKey:@"sdvLiveRadar"]) {
+        CABasicAnimation *sc = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
+        sc.fromValue = @(1.0);
+        sc.toValue = @(2.5);
+        CABasicAnimation *op = [CABasicAnimation animationWithKeyPath:@"opacity"];
+        op.fromValue = @(0.85);
+        op.toValue = @(0.0);
+        CAAnimationGroup *rg = [CAAnimationGroup animation];
+        rg.animations = @[sc, op];
+        rg.duration = 1.8;
+        rg.repeatCount = HUGE_VALF;
+        rg.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+        rg.removedOnCompletion = NO;
+        [_liveRadarRing addAnimation:rg forKey:@"sdvLiveRadar"];
+    }
+
+    // 7. Subtle diagonal arrow nudge on CTA pill
+    if (![_ctaArrow.layer animationForKey:@"sdvArrowNudge"]) {
+        CABasicAnimation *nx = [CABasicAnimation animationWithKeyPath:@"transform.translation.x"];
+        nx.fromValue = @(0.0);
+        nx.toValue = @(2.0);
+        CABasicAnimation *ny = [CABasicAnimation animationWithKeyPath:@"transform.translation.y"];
+        ny.fromValue = @(0.0);
+        ny.toValue = @(-2.0);
+        CAAnimationGroup *ng = [CAAnimationGroup animation];
+        ng.animations = @[nx, ny];
+        ng.duration = 0.95;
+        ng.autoreverses = YES;
+        ng.repeatCount = HUGE_VALF;
+        ng.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        ng.removedOnCompletion = NO;
+        [_ctaArrow.layer addAnimation:ng forKey:@"sdvArrowNudge"];
+    }
+}
+
+-(void)setHighlighted:(BOOL)highlighted {
+    [super setHighlighted:highlighted];
+    if (highlighted) {
+        [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+    }
+    [UIView animateWithDuration:(highlighted ? 0.12 : 0.42)
+                          delay:0
+         usingSpringWithDamping:(highlighted ? 1.0 : 0.54)
+          initialSpringVelocity:(highlighted ? 0.0 : 0.85)
+                        options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{
+        self.transform = highlighted ? CGAffineTransformMakeScale(0.968, 0.968) : CGAffineTransformIdentity;
+        self->_ctaPill.transform = highlighted ? CGAffineTransformMakeScale(0.93, 0.93) : CGAffineTransformIdentity;
+        self.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:(highlighted ? 0.58 : 0.26)].CGColor;
+    } completion:nil];
+}
+
+-(void)playTapCelebration {
+    if (!UIAccessibilityIsReduceMotionEnabled()) {
+        CAKeyframeAnimation *spin = [CAKeyframeAnimation animationWithKeyPath:@"transform.rotation.z"];
+        spin.values = @[@(0.0), @(-0.25), @(M_PI * 2.0)];
+        spin.keyTimes = @[@(0.0), @(0.18), @(1.0)];
+        spin.duration = 0.48;
+        spin.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [_clydeView.layer addAnimation:spin forKey:@"sdvHeroSpin"];
+
+        CAKeyframeAnimation *pop = [CAKeyframeAnimation animationWithKeyPath:@"transform.scale"];
+        pop.values = @[@(1.0), @(1.20), @(0.94), @(1.0)];
+        pop.keyTimes = @[@(0.0), @(0.32), @(0.70), @(1.0)];
+        pop.duration = 0.44;
+        [_mascotBox.layer addAnimation:pop forKey:@"sdvHeroPop"];
+
+        CGPoint mascotCenter = [self convertPoint:CGPointMake(CGRectGetMidX(_mascotBox.bounds), CGRectGetMidY(_mascotBox.bounds)) fromView:_mascotBox];
+        CGPoint ctaCenter = [self convertPoint:CGPointMake(CGRectGetMidX(_ctaPill.bounds), CGRectGetMidY(_ctaPill.bounds)) fromView:_ctaPill];
+        sdvSpawnDiscordSparkleBurst(self, mascotCenter, 46.0);
+        sdvSpawnDiscordSparkleBurst(self, ctaCenter, 38.0);
+    }
+}
+@end
+
 #ifdef GARDEN_IN_GAME
 #define Home SDVGardenManagerController
 #endif
@@ -405,6 +1182,7 @@ static NSString *sdvProbeLocalNetwork(void) {
     [self buildShell];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onLauncherUpdateNotification:) name:kSDVUpdateNotification object:nil];
     sdvCheckLauncherUpdate(NO, nil);
+    sdvRefreshDiscordLiveStats(NO);
     [self renderAll:NO];
 #ifdef GARDEN_IN_GAME
     if (_root && [gameDataStatus(_root.path)[@"ready"] boolValue]) [self refresh];
@@ -444,6 +1222,9 @@ static NSString *sdvProbeLocalNetwork(void) {
     _navTitleLabel.numberOfLines = 1;
     [topBarRow addArrangedSubview:_navTitleLabel];
     [topBarRow addArrangedSubview:[UIView new]];
+    SDVDiscordPillControl *discordTopPill = [SDVDiscordPillControl new];
+    [discordTopPill addTarget:self action:@selector(openDiscordServerTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [topBarRow addArrangedSubview:discordTopPill];
     _verPillLabel = mkBadgePill(@"v" kSDVAppVersion @" · Native", [kTintBlue colorWithAlphaComponent:0.12], kTintBlue, 11);
     [topBarRow addArrangedSubview:_verPillLabel];
     [topBar.contentView addSubview:topBarRow];
@@ -807,6 +1588,7 @@ static NSString *sdvProbeLocalNetwork(void) {
         [btns addArrangedSubview:chkBtn];
         [hero addArrangedSubview:btns];
         [_pane addArrangedSubview:mkGroupedCard(hero, UIEdgeInsetsMake(14, 14, 14, 14))];
+        [_pane addArrangedSubview:[self makeDiscordHeroCardWithSubtitle:nil]];
 
         [_pane addArrangedSubview:mkSectionTitle([NSString stringWithFormat:@"Trạng thái tệp · Tệp → Trên iPhone → %@", appNm])];
         [_pane addArrangedSubview:mkGroupedRows(@[
@@ -966,6 +1748,7 @@ static NSString *sdvProbeLocalNetwork(void) {
     [hero addArrangedSubview:chips];
 
     [_pane addArrangedSubview:mkGroupedCard(hero, UIEdgeInsetsMake(14, 14, 14, 14))];
+    [_pane addArrangedSubview:[self makeDiscordHeroCardWithSubtitle:nil]];
 
 #ifdef GARDEN_IN_GAME
     // Direct Content / Game Data Re-Import & Open Files Access Card (fixes #GL-FKRBMM!)
@@ -2300,6 +3083,9 @@ static NSString *sdvProbeLocalNetwork(void) {
     [_pane addArrangedSubview:mkSectionTitle(@"Hướng dẫn kết nối")];
     UILabel *guide = mkLabel(@"1. Cùng Wi-Fi (LAN): Chủ phòng vào Co-op → Tạo phòng (Host) và gửi IP Wi-Fi ở trên. Máy kia vào Co-op → Tham gia LAN → bấm KEY để gõ IP → OK.\n2. Online khác mạng: Cả 2 máy cài Tailscale hoặc ZeroTier, vào chung 1 mạng ảo rồi nhập IP mạng ảo (100.x.x.x).\nLưu ý: Các máy cần trùng bản 1.6.15, trùng mod gameplay và farm máy Host phải có sẵn nhà phụ (Cabin).", 13, UIFontWeightRegular, kInkSecondary);
     [_pane addArrangedSubview:mkGroupedCard(guide, UIEdgeInsetsMake(12, 14, 12, 14))];
+
+    [_pane addArrangedSubview:mkSectionTitle(@"Tìm bạn chơi chung Co-op & Đồng bộ Mod")];
+    [_pane addArrangedSubview:[self makeDiscordHeroCardWithSubtitle:@"Tìm bạn chơi Co-op qua Tailscale / ZeroTier / LAN, tải chung bộ Mod đồng bộ & bật mic kênh thoại trực tiếp trên Discord!"]];
 }
 
 -(void)refreshCoopTab {
@@ -2703,6 +3489,9 @@ static NSString *sdvProbeLocalNetwork(void) {
         [_pane addArrangedSubview:mkGroupedCard(hpRow, UIEdgeInsetsMake(11, 14, 11, 14))];
     }
 
+    [_pane addArrangedSubview:mkSectionTitle(@"Server Discord Chính Thức (Trực tuyến 24/7)")];
+    [_pane addArrangedSubview:[self makeDiscordHeroCardWithSubtitle:nil]];
+
     [_pane addArrangedSubview:mkSectionTitle(@"Cộng đồng Stardew Valley Việt Nam (Facebook Groups & Pages)")];
     [_pane addArrangedSubview:mkGroupedRows(@[
         [self mkCreditRow:@"GROUP CỘNG ĐỒNG FACEBOOK" name:@"Stardew Valley Việt Nam (Group)" detail:@"Nhóm giao lưu, chia sẻ kinh nghiệm chơi, hỏi đáp & hướng dẫn mod Stardew Valley." url:@"https://www.facebook.com/groups/261129932243154/" urlLabel:@"Tham gia"],
@@ -2937,6 +3726,39 @@ static NSString *sdvProbeLocalNetwork(void) {
     _tab = 6;
     [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
     [self renderAll:YES];
+}
+
+-(UIView *)makeDiscordHeroCardWithSubtitle:(NSString *)subtitle {
+    SDVDiscordHeroCard *card = [[SDVDiscordHeroCard alloc] initWithCustomSubtitle:subtitle];
+    [card addTarget:self action:@selector(openDiscordServerTapped:) forControlEvents:UIControlEventTouchUpInside];
+    return card;
+}
+
+-(void)openDiscordServerTapped:(UIControl *)sender {
+    NSString *s = sdvDiscordInviteURL();
+    if (!s.length) return;
+    UIPasteboard.generalPasteboard.string = s;
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
+    if ([sender isKindOfClass:SDVDiscordHeroCard.class]) {
+        [(SDVDiscordHeroCard *)sender playTapCelebration];
+    } else if ([sender isKindOfClass:SDVDiscordPillControl.class]) {
+        [(SDVDiscordPillControl *)sender playTapCelebration];
+    }
+    NSURL *u = [NSURL URLWithString:s];
+    if (!u) return;
+    NSTimeInterval delay = UIAccessibilityIsReduceMotionEnabled() ? 0.0 : 0.20;
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [UIApplication.sharedApplication openURL:u options:@{} completionHandler:^(BOOL ok) {
+            if (!ok) {
+                __strong typeof(weakSelf) strongSelf = weakSelf;
+                if (!strongSelf) return;
+                strongSelf->_message = [NSString stringWithFormat:@"Đã sao chép link mời Discord vào bộ nhớ tạm: %@", s];
+                strongSelf->_messageIsError = NO;
+                [strongSelf renderAll:NO];
+            }
+        }];
+    });
 }
 
 -(void)openExternalLink:(UIButton *)btn {

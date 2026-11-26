@@ -4,29 +4,33 @@
   <p><b>Launcher &amp; Mod Manager cho Stardew Valley PC 1.6.15 trên iOS &amp; iPadOS</b></p>
 
   <p>
-    <a href="https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/tag/v1.0.6"><img src="https://img.shields.io/badge/Version-v1.0.6-2ea44f?style=flat-square" alt="Version v1.0.6" /></a>
+    <a href="https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/tag/v1.0.7"><img src="https://img.shields.io/badge/Version-v1.0.7-2ea44f?style=flat-square" alt="Version v1.0.7" /></a>
+    <a href="https://discord.gg/tuTKv9xQ2Z"><img src="https://img.shields.io/badge/Discord-Vườn%20Bách%20Thú-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord Server" /></a>
     <img src="https://img.shields.io/badge/iOS%20%2F%20iPadOS-14%20–%2027+-007aff?style=flat-square&logo=apple&logoColor=white" alt="iOS & iPadOS 14-27+" />
     <img src="https://img.shields.io/badge/SMAPI-4.5.2-6f42c1?style=flat-square" alt="SMAPI 4.5.2" />
     <img src="https://img.shields.io/badge/JIT-Không%20cần%20(0%25)-f59e0b?style=flat-square" alt="0% JIT" />
-    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-64748b?style=flat-square" alt="MIT License" /></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-64747b?style=flat-square" alt="MIT License" /></a>
   </p>
 </div>
 
 > [!NOTE]
 > **Launcher sạch (0% tệp bản quyền):** Kho mã nguồn và các bản `.ipa` không chứa dữ liệu game của ConcernedApe. Bạn cần tự chuẩn bị bộ dữ liệu **Stardew Valley PC 1.6.15** của riêng mình.
+> 💬 **Cộng đồng Discord Chính Thức:** Tham gia [**Vườn Bách Thú 🦖 | Garden Launcher**](https://discord.gg/tuTKv9xQ2Z) để giao lưu Co-op, tải Mod & Việt hóa 1.6, hỏi đáp **Haley AI 🌻** và nhận hỗ trợ trực tiếp!
 
 ---
 
-## 📥 Tải xuống (`v1.0.6`)
+## 📥 Tải xuống (`v1.0.7`)
 
 | Thiết bị | Phiên bản IPA | Tải về |
 | :--- | :--- | :---: |
-| **iOS / iPadOS 14 – 18** | `Garden-Launcher-1.0.6-iOS14-18.ipa` | [**⬇️ Tải ngay**](https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.6/Garden-Launcher-1.0.6-iOS14-18.ipa) |
-| **iOS / iPadOS 26 – 27+** | `Garden-Launcher-1.0.6-iOS26-27.ipa` | [**⬇️ Tải ngay**](https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.6/Garden-Launcher-1.0.6-iOS26-27.ipa) |
+| **iOS / iPadOS 14 – 18** | `Garden-Launcher-1.0.7-iOS14-18.ipa` | [**⬇️ Tải ngay**](https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.7/Garden-Launcher-1.0.7-iOS14-18.ipa) |
+| **iOS / iPadOS 26 – 27+** | `Garden-Launcher-1.0.7-iOS26-27.ipa` | [**⬇️ Tải ngay**](https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.7/Garden-Launcher-1.0.7-iOS26-27.ipa) |
 
 ---
 
-## ✨ Điểm mới nổi bật trong `v1.0.6`, `v1.0.5` & `v1.0.4`
+## ✨ Điểm mới nổi bật trong `v1.0.7`, `v1.0.6` & `v1.0.5`
+
+- **💬 Cộng Đồng Server Discord Chính Thức & Thẻ Tương Tác Aurora (`v1.0.7`)** — Tích hợp liên kết mời vĩnh viễn [**Vườn Bách Thú 🦖 · Garden Launcher**](https://discord.gg/tuTKv9xQ2Z) xuyên suốt ứng dụng: nút nhanh **`Discord`** phát sáng trên thanh điều hướng trên cùng (hiển thị ở cả 9 tab) và thẻ **Hero Aurora** tại tab *Thiết lập / Cài Mod*, *Co-op LAN* & *Credit* với chuyển động cực quang 4 dải màu, linh vật **Discord Clyde** vector nổi bồng bềnh kèm 4 sao lấp lánh, tia sáng holographic lướt chéo, chấm radar **`● ONLINE`** cập nhật số người trực tuyến theo thời gian thực, hiệu ứng xoay 360° & bung pháo sáng đa sắc khi chạm, nút hỗ trợ nhanh ở tab *Báo lỗi* và cơ chế đồng bộ `discord_url` từ xa qua `version.json`.
 
 - **🎯 Đại Tu Gameplay Stardew `1.6.15`, `SInputState` `0% JIT` & An Toàn Lưu Nhanh (`v1.0.6`)** — Sửa ná cao su (**Slingshot**) giữ tọa độ tâm ngắm khi nhả bắn, đảo gương tâm kéo ngược chuẩn hướng đạn và đi bộ tự nhiên ở chế độ *Chạm đi A\**; sửa đặt đồ 1 chạm vào quầy trưng bày Hội chợ (**Fair Grange Display**), phản hồi `0ms` trò đập búa (**StrengthGame**) và câu cá Hội chợ (**FishingGame**); sửa tháo mồi/phao cần Iridium nâng cấp 2 khe, chống mất vật phẩm vĩnh viễn khi balô đầy `36/36`, cho phép đổi đồ **Desert Trader** khi tiêu vừa khít 1 ô; cưỡi ngựa lọt cổng rào mở 1 ô chuẩn `1.6` & không nhảy khỏi ngựa khi mở rương; bơm trực tiếp tay cầm vật lý (`GamePad.ExternalGetStateHook`) vào `SInputState.TrueUpdate()` kích hoạt **100% sự kiện phím bấm Mod SMAPI trên `0% JIT`**; kẹp biên chống trôi camera menu xây chuồng Robin / Bảo tàng; bảo toàn bộ đếm giờ máy móc (`Keg`/`Cask`/`Jar` không nhảy gấp đôi) & chống kẹt đá/dung nham khi **QuickLoad** ở Hầm mỏ/Núi lửa; đồng bộ đầy đủ tài nguyên màn hình khởi động lên mã nguồn.
 
@@ -74,8 +78,8 @@ dotnet build ModGarden\SDVMobileControls\SDVMobileControls.csproj -c Release
 powershell -ExecutionPolicy Bypass -File scripts\patch_perf_v7.ps1
 
 # 3. Đóng gói 2 bản IPA sạch (iOS / iPadOS 26–27+ & iOS / iPadOS 14–18)
-python scripts\package_embedded.py base-sdvios.ipa build\SDVModGarden_ios26 zsign.exe dist\Garden-Launcher-1.0.6-iOS26-27.ipa "$WorkDir\v7-host.dll" "$WorkDir\v7-touch.dll" "$WorkDir\Lidgren.Network.dll" --launcher --min-ios=16.0
-python scripts\package_embedded.py base-sdvios.ipa build\SDVModGarden_ios14 zsign.exe dist\Garden-Launcher-1.0.6-iOS14-18.ipa "$WorkDir\v7-host.dll" "$WorkDir\v7-touch.dll" "$WorkDir\Lidgren.Network.dll" --launcher --no-scene --min-ios=14.0
+python scripts\package_embedded.py base-sdvios.ipa build\SDVModGarden_ios26 zsign.exe dist\Garden-Launcher-1.0.7-iOS26-27.ipa "$WorkDir\v7-host.dll" "$WorkDir\v7-touch.dll" "$WorkDir\Lidgren.Network.dll" --launcher --min-ios=16.0
+python scripts\package_embedded.py base-sdvios.ipa build\SDVModGarden_ios14 zsign.exe dist\Garden-Launcher-1.0.7-iOS14-18.ipa "$WorkDir\v7-host.dll" "$WorkDir\v7-touch.dll" "$WorkDir\Lidgren.Network.dll" --launcher --no-scene --min-ios=14.0
 ```
 
 </details>

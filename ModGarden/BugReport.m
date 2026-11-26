@@ -616,6 +616,10 @@ static NSData *sdvBuildMultipartBody(
     [actRow addArrangedSubview:_shareBtn];
     [pane addArrangedSubview:actRow];
 
+    SDVAppleButton *discordHelpBtn = mkIOSButton(@"Cần hỗ trợ trực tiếp? Tham gia Server Discord Garden Launcher", @"bubble.left.and.bubble.right.fill", rgba(0x5865F2, 0.14), rgb(0x5865F2), 13.0, UIEdgeInsetsMake(10, 14, 10, 14));
+    [discordHelpBtn addTarget:self action:@selector(openDiscordSupportTapped) forControlEvents:UIControlEventTouchUpInside];
+    [pane addArrangedSubview:discordHelpBtn];
+
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(kbWillShow:) name:UIKeyboardWillShowNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(kbWillHide:) name:UIKeyboardWillHideNotification object:nil];
 
@@ -661,6 +665,14 @@ static NSData *sdvBuildMultipartBody(
     _scroll.scrollIndicatorInsets = UIEdgeInsetsZero;
 }
 -(void)endEditingNow { [self.view endEditing:YES]; }
+-(void)openDiscordSupportTapped {
+    NSString *s = sdvDiscordInviteURL();
+    if (!s.length) return;
+    UIPasteboard.generalPasteboard.string = s;
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
+    NSURL *u = [NSURL URLWithString:s];
+    if (u) [UIApplication.sharedApplication openURL:u options:@{} completionHandler:nil];
+}
 -(void)dismissSelf {
     if (self.embeddedInTab) {
         _descView.text = @"";

@@ -2887,13 +2887,112 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
 // ============================================================================
 // GARDEN LAUNCHER UPDATE CHECKER + OTA HOT-PATCH ENGINE (0% IPA Re-Signing!)
 // ============================================================================
-#define kSDVAppVersion @"1.0.6"
-#define kSDVAppBuild   10600
+#define kSDVAppVersion @"1.0.7"
+#define kSDVAppBuild   10700
 static NSString *const kSDVUpdateNotification = @"SDVLauncherUpdateDidChangeNotification";
 static NSString *const kSDVDismissedUpdatePrefKey = @"sdv_dismissed_update_id";
+static NSString *const kSDVDefaultDiscordURL = @"https://discord.gg/tuTKv9xQ2Z";
+static NSString *const kSDVDiscordUrlPrefKey = @"sdv_discord_invite_url";
+static NSString *const kSDVDiscordStatsNotification = @"SDVDiscordStatsDidUpdateNotification";
 static NSString *const kSDVVersionApiRawURL = @"https://api.github.com/repos/hanprm9-dot/Garden-Launcher-iOS/contents/version.json?ref=main";
 static NSString *const kSDVVersionJsonURL = @"https://raw.githubusercontent.com/hanprm9-dot/Garden-Launcher-iOS/main/version.json";
 static NSString *const kSDVLatestReleaseApiURL = @"https://api.github.com/repos/hanprm9-dot/Garden-Launcher-iOS/releases/latest";
+
+static NSInteger gSdvDiscordOnlineCount = 0;
+static NSInteger gSdvDiscordMemberCount = 0;
+static NSTimeInterval gSdvLastDiscordStatsAt = 0;
+static BOOL gSdvDiscordStatsInFlight = NO;
+
+static BOOL sdvIsAllowedDiscordInviteURL(NSString *raw) {
+    if (![raw isKindOfClass:NSString.class]) return NO;
+    NSString *s = [raw stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (s.length < 16 || s.length > 128) return NO;
+    if ([s rangeOfCharacterFromSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].location != NSNotFound) return NO;
+    NSString *low = s.lowercaseString;
+    return [low hasPrefix:@"https://discord.gg/"] || [low hasPrefix:@"https://discord.com/invite/"];
+}
+
+static NSString *sdvDiscordInviteURL(void) {
+    NSString *saved = [NSUserDefaults.standardUserDefaults stringForKey:kSDVDiscordUrlPrefKey];
+    if (sdvIsAllowedDiscordInviteURL(saved)) {
+        return [saved stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    }
+    return kSDVDefaultDiscordURL;
+}
+
+static NSString *sdvExtractDiscordInviteCode(NSString *urlStr) {
+    if (!urlStr.length) return @"";
+    NSString *s = [urlStr stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/ \t\r\n"]];
+    NSRange q = [s rangeOfString:@"?"];
+    if (q.location != NSNotFound) s = [s substringToIndex:q.location];
+    NSString *code = s.lastPathComponent ?: @"";
+    if (code.length < 2 || code.length > 48) return @"";
+    for (NSUInteger i = 0; i < code.length; i++) {
+        unichar c = [code characterAtIndex:i];
+        BOOL ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
+        if (!ok) return @"";
+    }
+    return code;
+}
+
+static NSInteger sdvDiscordOnlineCount(void) { return gSdvDiscordOnlineCount; }
+static NSInteger sdvDiscordMemberCount(void) { return gSdvDiscordMemberCount; }
+
+static void sdvRefreshDiscordLiveStats(BOOL force) {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ sdvRefreshDiscordLiveStats(force); });
+        return;
+    }
+    NSTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (!force && gSdvLastDiscordStatsAt > 0 && (now - gSdvLastDiscordStatsAt) < 600.0) return;
+    if (gSdvDiscordStatsInFlight) return;
+    NSString *code = sdvExtractDiscordInviteCode(sdvDiscordInviteURL());
+    if (!code.length) return;
+    gSdvDiscordStatsInFlight = YES;
+
+    NSString *apiStr = [NSString stringWithFormat:@"https://discord.com/api/v10/invites/%@?with_counts=true", code];
+    NSURL *apiUrl = [NSURL URLWithString:apiStr];
+    if (!apiUrl) {
+        gSdvDiscordStatsInFlight = NO;
+        return;
+    }
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    cfg.timeoutIntervalForRequest = 5.0;
+    cfg.timeoutIntervalForResource = 8.0;
+    cfg.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+    NSURLSession *sess = [NSURLSession sessionWithConfiguration:cfg];
+    [[sess dataTaskWithURL:apiUrl completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        NSInteger status = [resp isKindOfClass:NSHTTPURLResponse.class] ? ((NSHTTPURLResponse *)resp).statusCode : 0;
+        NSInteger online = 0;
+        NSInteger members = 0;
+        BOOL ok = NO;
+        if (!err && status == 200 && data.length > 0) {
+            NSDictionary *j = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if ([j isKindOfClass:NSDictionary.class]) {
+                if ([j[@"approximate_presence_count"] respondsToSelector:@selector(integerValue)]) {
+                    online = [j[@"approximate_presence_count"] integerValue];
+                }
+                if ([j[@"approximate_member_count"] respondsToSelector:@selector(integerValue)]) {
+                    members = [j[@"approximate_member_count"] integerValue];
+                }
+                ok = (members > 0 || online > 0);
+            }
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            gSdvDiscordStatsInFlight = NO;
+            if (ok) {
+                gSdvLastDiscordStatsAt = CFAbsoluteTimeGetCurrent();
+                BOOL changed = (gSdvDiscordOnlineCount != online || gSdvDiscordMemberCount != members);
+                gSdvDiscordOnlineCount = online;
+                gSdvDiscordMemberCount = members;
+                if (changed) {
+                    [NSNotificationCenter.defaultCenter postNotificationName:kSDVDiscordStatsNotification object:nil];
+                }
+            }
+        });
+        [sess finishTasksAndInvalidate];
+    }] resume];
+}
 
 typedef void (^SDVUpdateCheckCompletion)(NSDictionary *updateInfo, NSString *statusMsg);
 static NSDictionary *gSdvLatestUpdateInfo = nil;
@@ -3498,6 +3597,16 @@ static void sdvParseAndStoreRemoteUpdateDict(NSDictionary *json, BOOL isGithubRe
         if ([json[@"hotpatch_url"] isKindOfClass:NSString.class]) hotpatchUrl = json[@"hotpatch_url"];
         if ([json[@"hotpatch_sha256"] isKindOfClass:NSString.class]) hotpatchSha256 = [json[@"hotpatch_sha256"] lowercaseString];
         if ([json[@"hotpatch_size"] respondsToSelector:@selector(longLongValue)]) hotpatchSize = [json[@"hotpatch_size"] longLongValue];
+        if ([json[@"discord_url"] isKindOfClass:NSString.class] && sdvIsAllowedDiscordInviteURL(json[@"discord_url"])) {
+            NSString *cleanDiscord = [json[@"discord_url"] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                NSString *prev = [NSUserDefaults.standardUserDefaults stringForKey:kSDVDiscordUrlPrefKey];
+                if (![prev isEqualToString:cleanDiscord]) {
+                    [NSUserDefaults.standardUserDefaults setObject:cleanDiscord forKey:kSDVDiscordUrlPrefKey];
+                    sdvRefreshDiscordLiveStats(YES);
+                }
+            });
+        }
         summary = sdvNormalizeSummaryLines(json[@"summary"], nil);
     } else {
         ver = [json[@"tag_name"] isKindOfClass:NSString.class] ? json[@"tag_name"] : @"";

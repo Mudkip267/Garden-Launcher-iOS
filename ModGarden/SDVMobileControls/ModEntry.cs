@@ -44,6 +44,8 @@ namespace SDVMobileControls
         private static long _fishingHoldStartMs;
         private static FishingRod _fishingHoldRod;
         private static int _fishingTraceCount;
+        private static int _lastBobberPhysicsTick = -1;
+        private static int _stuckReelingTicks;
         private static int _shaderDiagSaveTicks;
         private static bool _shaderDiagWaitingSave;
         private static bool _shaderDiagRanOutdoor;
@@ -61,6 +63,7 @@ namespace SDVMobileControls
         private static bool _mineFloorRelocateSuppressed;
         private static FieldInfo _soundBankSoundsField;
         private static FieldInfo _game1HooksField;
+        private static FieldInfo _inputCurrentMouseStateField;
         private static bool _gardenHooksInstalled;
         private static Dictionary<string, string> _vanillaBaseMailCache;
         private static bool _vanillaBaseMailLoaded;
@@ -103,26 +106,18 @@ namespace SDVMobileControls
 
         private static void HealStuckSandboxDirectories(string modDir)
         {
+            // Native sdvRepairSandboxPermissions in Garden.m already heals Documents/{Mods,Saves,StardewValley,.garden}
+            // at process launch via fast POSIX lstat. Here we only clean up an orphaned temp ModGardenBatch folder if present.
             try
             {
                 string tmp = Path.GetTempPath();
                 if (!string.IsNullOrEmpty(tmp))
                 {
                     string batchDir = Path.Combine(tmp, "ModGardenBatch");
-                    RepairDirectoryModesRecursive(batchDir, 4);
                     if (Directory.Exists(batchDir))
                     {
+                        RepairDirectoryModesRecursive(batchDir, 4);
                         try { Directory.Delete(batchDir, true); } catch { }
-                    }
-                }
-                var docsDir = Directory.GetParent(modDir)?.Parent?.FullName;
-                if (!string.IsNullOrEmpty(docsDir) && Directory.Exists(docsDir))
-                {
-                    foreach (string sub in new[] { "Mods", "Saves", "StardewValley", ".garden" })
-                    {
-                        string p = Path.Combine(docsDir, sub);
-                        if (Directory.Exists(p))
-                            RepairDirectoryModesRecursive(p, 3);
                     }
                 }
             }
@@ -749,6 +744,40 @@ namespace SDVMobileControls
             }
             catch { }
             try { Engine?.OnUpdateTickedGlobal(); } catch { }
+            try
+            {
+                // Zero-Harmony 0% JIT BobberBar physics + orphaned isReeling post-BobberBar rescue
+                if (Game1.activeClickableMenu is BobberBar activeBobber)
+                {
+                    _stuckReelingTicks = 0;
+                    PostfixBobberBarUpdate(activeBobber);
+                }
+                else if (Context.IsWorldReady &&
+                         Game1.activeClickableMenu == null &&
+                         !Game1.eventUp &&
+                         Game1.player?.CurrentTool is FishingRod curRod &&
+                         curRod.isReeling &&
+                         !curRod.isFishing &&
+                         !curRod.isNibbling &&
+                         !curRod.isCasting &&
+                         !curRod.isTimingCast &&
+                         !curRod.castedButBobberStillInAir &&
+                         !curRod.pullingOutOfWater &&
+                         !curRod.fishCaught &&
+                         !curRod.showingTreasure)
+                {
+                    if (++_stuckReelingTicks >= 15)
+                    {
+                        _stuckReelingTicks = 0;
+                        curRod.doneFishing(Game1.player, consumeBaitAndTackle: false);
+                    }
+                }
+                else
+                {
+                    _stuckReelingTicks = 0;
+                }
+            }
+            catch { }
             try { RamOptimizer?.PollManualPruneFlag(); } catch { }
             FlushPendingPortraitSync();
             PollMailboxWatchdog();
@@ -1603,7 +1632,52 @@ namespace SDVMobileControls
                 {
                     ApplyExternalControlInputStates(ext, ref keyboardState, ref mouseState, ref gamePadState);
                 }
-                base.OnGame1_UpdateControlInput(ref keyboardState, ref mouseState, ref gamePadState, action);
+                bool holdFishingCast = Context.IsWorldReady &&
+                                       Game1.player?.CurrentTool is FishingRod timingRod &&
+                                       timingRod.isTimingCast &&
+                                       ShouldBlockPrematureFishingRelease(timingRod, logRelease: true);
+                if (holdFishingCast && mouseState.LeftButton != ButtonState.Pressed)
+                {
+                    mouseState = new MouseState(
+                        mouseState.X,
+                        mouseState.Y,
+                        mouseState.ScrollWheelValue,
+                        ButtonState.Pressed,
+                        mouseState.MiddleButton,
+                        mouseState.RightButton,
+                        mouseState.XButton1,
+                        mouseState.XButton2);
+                }
+                if (!holdFishingCast || action == null)
+                {
+                    base.OnGame1_UpdateControlInput(ref keyboardState, ref mouseState, ref gamePadState, action);
+                    return;
+                }
+                base.OnGame1_UpdateControlInput(ref keyboardState, ref mouseState, ref gamePadState, () =>
+                {
+                    action();
+                    try
+                    {
+                        if (Game1.input != null)
+                        {
+                            MouseState committed = Game1.input.GetMouseState();
+                            if (committed.LeftButton != ButtonState.Pressed)
+                            {
+                                var mf = _inputCurrentMouseStateField ?? (_inputCurrentMouseStateField = typeof(InputState).GetField("_currentMouseState", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic));
+                                mf?.SetValue(Game1.input, new MouseState(
+                                    committed.X,
+                                    committed.Y,
+                                    committed.ScrollWheelValue,
+                                    ButtonState.Pressed,
+                                    committed.MiddleButton,
+                                    committed.RightButton,
+                                    committed.XButton1,
+                                    committed.XButton2));
+                            }
+                        }
+                    }
+                    catch { }
+                });
             }
 
             public override bool OnGameLocation_CheckAction(GameLocation location, xTile.Dimensions.Location tileLocation, xTile.Dimensions.Rectangle viewport, Farmer who, Func<bool> action)
@@ -1715,6 +1789,10 @@ namespace SDVMobileControls
                 return;
             if (__instance.fadeIn || __instance.fadeOut)
                 return;
+            int curTick = Game1.ticks;
+            if (_lastBobberPhysicsTick == curTick)
+                return;
+            _lastBobberPhysicsTick = curTick;
 
             // Mobile-feel bobber bar control: eliminate PC's icy inertia & overly bouncy edges
             float spd = __instance.bobberBarSpeed;

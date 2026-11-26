@@ -890,6 +890,7 @@ void sdv_ext_set_rumble(float leftMotor, float rightMotor) {
 -(void)onAppResignActive {
     sdvRumbleStopImmediate(NO);
     os_unfair_lock_lock(&gExtLock);
+    gNativeTextEditingCount = 0;
     gActiveDirectTouchCount = 0;
     gMouseButtonsMask = 0;
     gMouseButtonsLatchedMask = 0;
@@ -902,13 +903,16 @@ static void sdvExtSetGardenOpen(BOOL open) {
     gGardenOpenCached = open ? 1 : 0;
     if (open) {
         sdvRumbleStopImmediate(NO);
-        os_unfair_lock_lock(&gExtLock);
+    }
+    os_unfair_lock_lock(&gExtLock);
+    gNativeTextEditingCount = 0;
+    if (open) {
         gActiveDirectTouchCount = 0;
         gMouseButtonsLatchedMask = 0;
         gKbLatchedCount = 0;
         gTextRingHead = gTextRingTail;
-        os_unfair_lock_unlock(&gExtLock);
     }
+    os_unfair_lock_unlock(&gExtLock);
 }
 
 static BOOL sdvIsGameInputSuppressed(void) {

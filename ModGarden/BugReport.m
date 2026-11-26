@@ -1055,6 +1055,12 @@ static NSData *sdvBuildMultipartBody(
     }
 
     unsigned long long preZipSz = _attachSwitch.isOn ? [_bundle[@"bytes"] unsignedLongLongValue] : 0;
+    if (_attachSwitch.isOn && preZipSz > kSDVBugReportMaxSingleMediaBytes) {
+        [self showAlertTitle:@"Tệp ErrorLogs.zip vượt 7.5 MB"
+            msg:@"Tệp nhật ký ErrorLogs.zip quá lớn so với giới hạn tệp đơn của Discord. Bạn có thể bấm Xuất ErrorLogs.zip để chia sẻ trực tiếp hoặc tắt công tắc đính kèm tệp log."
+            closeAfter:NO];
+        return;
+    }
     if ([self totalMediaBytes] + preZipSz > kSDVBugReportMaxTotalUploadBytes) {
         [self showAlertTitle:@"Tổng dung lượng vượt 8.5 MB"
             msg:@"Tổng dung lượng ảnh/video + ErrorLogs.zip vượt giới hạn gửi của Discord. Hãy xóa bớt tệp đính kèm hoặc tắt đính kèm tệp log."
@@ -1087,13 +1093,13 @@ static NSData *sdvBuildMultipartBody(
         NSData *zipData = nil;
         if (attachZip && [b[@"url"] isKindOfClass:NSURL.class]) {
             zipData = [NSData dataWithContentsOfURL:b[@"url"]];
-            if (zipData.length > 4 * 1024 * 1024) zipData = nil;
+            if (zipData.length > kSDVBugReportMaxTotalUploadBytes) zipData = nil;
         }
         NSDictionary<NSString *, NSString *> *fields = @{
             @"category":     cat,
             @"description":  desc,
             @"contact":      contact,
-            @"appVersion":   b[@"appVersion"] ?: kSDVAppVersion,
+            @"appVersion":   b[@"appVersion"] ?: sdvEffectiveAppVersion(),
             @"iosVersion":   b[@"iosVersion"] ?: @"?",
             @"device":       b[@"device"] ?: @"iPhone",
             @"ramInfo":      b[@"ramInfo"] ?: @"?",
@@ -1113,7 +1119,7 @@ static NSData *sdvBuildMultipartBody(
         [req setValue:[NSString stringWithFormat:@"multipart/form-data; boundary=%@", boundary] forHTTPHeaderField:@"Content-Type"];
         [req setValue:@"GardenLauncher-iOS" forHTTPHeaderField:@"X-Garden-App"];
         [req setValue:kSDVBugReportClientKey forHTTPHeaderField:@"X-Garden-Key"];
-        [req setValue:@"GardenLauncher-iOS/" kSDVAppVersion forHTTPHeaderField:@"User-Agent"];
+        [req setValue:[NSString stringWithFormat:@"GardenLauncher-iOS/%@", sdvEffectiveAppVersion()] forHTTPHeaderField:@"User-Agent"];
         req.HTTPBody = body;
 
         NSURLSessionDataTask *task = [NSURLSession.sharedSession dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {

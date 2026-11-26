@@ -357,9 +357,14 @@ static void sdvDeleteSaveFolder(NSString *folderPath, NSString *docsPath) {
     removeItem(folderPath);
     if (docsPath.length && folderName.length) {
         NSString *qs = sdvQuickSaveJsonPath(docsPath, folderName);
-        if (qs.length && [fm() fileExistsAtPath:qs]) [fm() removeItemAtPath:qs error:nil];
+        if (qs.length && [fm() fileExistsAtPath:qs]) sdvRemoveItemQuiet(qs);
         NSString *slotsDir = join(docsPath, [NSString stringWithFormat:@"Mods/SDVMobileControls/SaveSlots/%@", folderName]);
-        if ([fm() fileExistsAtPath:slotsDir]) [fm() removeItemAtPath:slotsDir error:nil];
+        if ([fm() fileExistsAtPath:slotsDir]) sdvRemoveItemQuiet(slotsDir);
+        NSString *sanitized = [[folderName componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/\\:*?\"<>|"]] componentsJoinedByString:@"_"];
+        if (sanitized.length && ![sanitized isEqualToString:folderName]) {
+            NSString *altSlotsDir = join(docsPath, [NSString stringWithFormat:@"Mods/SDVMobileControls/SaveSlots/%@", sanitized]);
+            if ([fm() fileExistsAtPath:altSlotsDir]) sdvRemoveItemQuiet(altSlotsDir);
+        }
     }
 }
 

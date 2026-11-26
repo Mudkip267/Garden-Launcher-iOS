@@ -864,10 +864,15 @@ namespace SDVMobileControls
                     {
                         SuppressGamepadShoulderThisFrame = true;
                         IsRightStickMenuCursorActive = false;
+                        int maxTab = (gm.pages != null && gm.pages.Count > 0)
+                            ? Math.Min(GameMenu.numberOfTabs, gm.pages.Count - 1)
+                            : -1;
+                        if (maxTab < 0)
+                            return;
                         if (gm.currentTab == GameMenu.mapTab)
                         {
                             int nextFromMap = dir > 0 ? (GameMenu.mapTab + 1) : (GameMenu.mapTab - 1);
-                            if (nextFromMap >= 0 && nextFromMap <= GameMenu.numberOfTabs)
+                            if (nextFromMap >= 0 && nextFromMap <= maxTab)
                             {
                                 Game1.activeClickableMenu = new GameMenu(nextFromMap, -1, playOpeningSound: true);
                                 Game1.playSound("smallSelect");
@@ -875,7 +880,7 @@ namespace SDVMobileControls
                             return;
                         }
                         int targetTab = gm.currentTab + dir;
-                        if (targetTab >= 0 && targetTab <= GameMenu.numberOfTabs)
+                        if (targetTab >= 0 && targetTab <= maxTab)
                         {
                             gm.changeTab(targetTab, playSound: true);
                         }

@@ -40,6 +40,18 @@ static BOOL sdvRemoveItemQuiet(NSString *p) {
     return [fm() removeItemAtPath:p error:nil];
 }
 
+static void sdvPrepareWritableFileTarget(NSString *p) {
+    if (!p.length) return;
+    const char *cp = p.fileSystemRepresentation;
+    struct stat st;
+    if (!cp || lstat(cp, &st) != 0) return;
+    if (S_ISDIR(st.st_mode)) {
+        sdvRemoveItemQuiet(p);
+    } else if (S_ISREG(st.st_mode)) {
+        chmod(cp, 0644);
+    }
+}
+
 static void mkdirs(NSString *p) {
     if (!p.length) return;
     const char *cp = p.fileSystemRepresentation;
@@ -71,11 +83,7 @@ static NSString *hashData(NSData *data) {
 static NSData *readFile(NSString *p) { NSError *e=nil; NSData *d=[NSData dataWithContentsOfFile:p options:NSDataReadingMappedIfSafe error:&e]; check(d!=nil,e); return d; }
 static void writeFile(NSData *d, NSString *p) {
     mkdirs(p.stringByDeletingLastPathComponent);
-    const char *cp = p.fileSystemRepresentation;
-    struct stat st;
-    if (cp && lstat(cp, &st) == 0 && S_ISREG(st.st_mode)) {
-        chmod(cp, 0644);
-    }
+    sdvPrepareWritableFileTarget(p);
     NSError *e = nil;
     BOOL ok = [d writeToFile:p options:NSDataWritingAtomic error:&e];
     check(ok, e);
@@ -290,8 +298,7 @@ static void sdvMigrateDocumentsToHiddenLayout(NSString *docsPath) {
                 if (![fm() fileExistsAtPath:dst]) {
                     [fm() moveItemAtPath:src toPath:dst error:nil];
                 } else {
-                    chmod(src.fileSystemRepresentation, 0644);
-                    [fm() removeItemAtPath:src error:nil];
+                    sdvRemoveItemQuiet(src);
                 }
             }
         }
@@ -320,15 +327,14 @@ static void sdvMigrateDocumentsToHiddenLayout(NSString *docsPath) {
                         if ([fm() fileExistsAtPath:srcCfg] && ![fm() fileExistsAtPath:dstCfg]) {
                             [fm() moveItemAtPath:srcCfg toPath:dstCfg error:nil];
                         }
-                        [fm() removeItemAtPath:src error:nil];
+                        sdvRemoveItemQuiet(src);
                     }
                 }
                 continue;
             }
             NSString *ext = item.pathExtension.lowercaseString;
             if (sdvIsUnusedGameRootJunk(low, ext)) {
-                chmod(src.fileSystemRepresentation, 0644);
-                [fm() removeItemAtPath:src error:nil];
+                sdvRemoveItemQuiet(src);
                 continue;
             }
             BOOL isGameRuntimeFile =
@@ -341,8 +347,7 @@ static void sdvMigrateDocumentsToHiddenLayout(NSString *docsPath) {
                 if (![fm() fileExistsAtPath:dst]) {
                     [fm() moveItemAtPath:src toPath:dst error:nil];
                 } else {
-                    chmod(src.fileSystemRepresentation, 0644);
-                    [fm() removeItemAtPath:src error:nil];
+                    sdvRemoveItemQuiet(src);
                 }
             }
         }
@@ -352,19 +357,23 @@ static void sdvMigrateDocumentsToHiddenLayout(NSString *docsPath) {
             NSString *gp = join(gameDir, gitem);
             if (dir(gp)) continue;
             if (sdvIsUnusedGameRootJunk(gitem.lowercaseString, gitem.pathExtension.lowercaseString)) {
-                chmod(gp.fileSystemRepresentation, 0644);
-                [fm() removeItemAtPath:gp error:nil];
+                sdvRemoveItemQuiet(gp);
             }
         }
     } @catch (NSException *ex) { }
 }
 
 static NSDictionary *sdvActiveHotPatchInfo(void);
+static BOOL sdvHotPatchOverridesRelPath(NSString *docsPath, NSString *relPath);
 static NSUInteger sdvDeployActiveHotPatchFiles(NSString *docsPath);
 
 static void syncBundledLidgren(NSString *docsPath) {
     if (!docsPath.length) return;
     @try {
+        if (sdvHotPatchOverridesRelPath(docsPath, @"StardewValley/Lidgren.Network.dll")) {
+            sdvDeployActiveHotPatchFiles(docsPath);
+            return;
+        }
         NSArray<NSString *> *cands = @[
             join(join(join(NSBundle.mainBundle.bundlePath, @"Frameworks"), @"SDVModGarden.framework"), @"Lidgren.Network.dll"),
             join(NSBundle.mainBundle.bundlePath, @"Lidgren.Network.dll"),
@@ -381,13 +390,11 @@ static void syncBundledLidgren(NSString *docsPath) {
 
         NSString *base = sdvHiddenGameDir(docsPath);
         NSString *dst = join(base, @"Lidgren.Network.dll");
-        NSData *dstData = [fm() fileExistsAtPath:dst] ? [NSData dataWithContentsOfFile:dst options:NSDataReadingMappedIfSafe error:nil] : nil;
+        NSData *dstData = (!dir(dst) && [fm() fileExistsAtPath:dst]) ? [NSData dataWithContentsOfFile:dst options:NSDataReadingMappedIfSafe error:nil] : nil;
         if (!dstData || dstData.length != srcData.length || ![srcHash isEqualToString:hashData(dstData)]) {
             [fm() createDirectoryAtPath:base withIntermediateDirectories:YES attributes:nil error:nil];
+            sdvPrepareWritableFileTarget(dst);
             [srcData writeToFile:dst options:NSDataWritingAtomic error:nil];
-        }
-        if (sdvActiveHotPatchInfo() != nil) {
-            sdvDeployActiveHotPatchFiles(docsPath);
         }
     } @catch (NSException *ex) { }
 }
@@ -401,6 +408,10 @@ static BOOL dataContainsAscii(NSData *data, const char *needle) {
 static NSString *syncBundledSmapi(NSString *docsPath) {
     if (!docsPath.length) return @"no-docs";
     @try {
+        if (sdvHotPatchOverridesRelPath(docsPath, @"StardewValley/StardewModdingAPI.dll")) {
+            sdvDeployActiveHotPatchFiles(docsPath);
+            return @"hotpatched";
+        }
         NSString *smapiRoot = join(join(join(NSBundle.mainBundle.bundlePath, @"Frameworks"), @"SDVModGarden.framework"), @"BundledSMAPI");
         if (!dir(smapiRoot)) return @"no-bundle";
         [fm() createDirectoryAtPath:docsPath withIntermediateDirectories:YES attributes:nil error:nil];
@@ -425,7 +436,7 @@ static NSString *syncBundledSmapi(NSString *docsPath) {
             NSString *stampPath = join(dstInternal, @".garden_smapi_v1");
 
             NSString *reason = nil;
-            NSData *dstData = [fm() fileExistsAtPath:dstDll] ? [NSData dataWithContentsOfFile:dstDll options:NSDataReadingMappedIfSafe error:nil] : nil;
+            NSData *dstData = (!dir(dstDll) && [fm() fileExistsAtPath:dstDll]) ? [NSData dataWithContentsOfFile:dstDll options:NSDataReadingMappedIfSafe error:nil] : nil;
             if (!dstData || dstData.length < 100 * 1024) {
                 reason = @"missing";
             } else if (dataContainsAscii(dstData, "set_InputEncoding") || dataContainsAscii(dstData, "set_OutputEncoding")) {
@@ -444,7 +455,7 @@ static NSString *syncBundledSmapi(NSString *docsPath) {
 
             if (!reason && srcToolkitHash.length) {
                 NSString *dstToolkit = join(dstInternal, @"SMAPI.Toolkit.dll");
-                NSData *dstTk = [fm() fileExistsAtPath:dstToolkit] ? [NSData dataWithContentsOfFile:dstToolkit options:NSDataReadingMappedIfSafe error:nil] : nil;
+                NSData *dstTk = (!dir(dstToolkit) && [fm() fileExistsAtPath:dstToolkit]) ? [NSData dataWithContentsOfFile:dstToolkit options:NSDataReadingMappedIfSafe error:nil] : nil;
                 if (!dstTk || dstTk.length != srcToolkitData.length || ![hashData(dstTk) isEqualToString:srcToolkitHash]) {
                     reason = @"toolkit-mismatch";
                 }
@@ -464,25 +475,26 @@ static NSString *syncBundledSmapi(NSString *docsPath) {
             // Also remove any stale cached StardewModdingAPI.dll inside smapi-internal/ if it is a Windows SMAPI or when re-syncing
             NSString *cachedSmapi = join(dstInternal, @"StardewModdingAPI.dll");
             if ([fm() fileExistsAtPath:cachedSmapi]) {
-                NSData *cd = [NSData dataWithContentsOfFile:cachedSmapi options:NSDataReadingMappedIfSafe error:nil];
+                NSData *cd = !dir(cachedSmapi) ? [NSData dataWithContentsOfFile:cachedSmapi options:NSDataReadingMappedIfSafe error:nil] : nil;
                 if (reason || !cd.length || dataContainsAscii(cd, "set_InputEncoding") || dataContainsAscii(cd, "set_OutputEncoding")) {
-                    [fm() removeItemAtPath:cachedSmapi error:nil];
+                    sdvRemoveItemQuiet(cachedSmapi);
                 }
             }
 
             if (reason) {
                 [fm() createDirectoryAtPath:base withIntermediateDirectories:YES attributes:nil error:nil];
+                sdvPrepareWritableFileTarget(dstDll);
                 [srcDllData writeToFile:dstDll options:NSDataWritingAtomic error:nil];
 
                 // Preserve user's config.user.json if present, then cleanly deploy iOS-verified smapi-internal/
                 NSData *savedUserCfg = nil;
                 NSString *userCfgPath = join(dstInternal, @"config.user.json");
-                if ([fm() fileExistsAtPath:userCfgPath]) {
+                if (!dir(userCfgPath) && [fm() fileExistsAtPath:userCfgPath]) {
                     savedUserCfg = [NSData dataWithContentsOfFile:userCfgPath options:0 error:nil];
                 }
                 if (dir(srcInternal)) {
                     if ([fm() fileExistsAtPath:dstInternal]) {
-                        [fm() removeItemAtPath:dstInternal error:nil];
+                        sdvRemoveItemQuiet(dstInternal);
                     }
                     [fm() createDirectoryAtPath:dstInternal withIntermediateDirectories:YES attributes:nil error:nil];
                     NSDirectoryEnumerator *en = [fm() enumeratorAtPath:srcInternal];
@@ -491,12 +503,17 @@ static NSString *syncBundledSmapi(NSString *docsPath) {
                         NSString *dst = join(dstInternal, rel);
                         [fm() createDirectoryAtPath:dst.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
                         NSData *d = [NSData dataWithContentsOfFile:join(srcInternal, rel) options:NSDataReadingMappedIfSafe error:nil];
-                        if (d) [d writeToFile:dst options:NSDataWritingAtomic error:nil];
+                        if (d) {
+                            sdvPrepareWritableFileTarget(dst);
+                            [d writeToFile:dst options:NSDataWritingAtomic error:nil];
+                        }
                     }
                     if (savedUserCfg.length) {
+                        sdvPrepareWritableFileTarget(userCfgPath);
                         [savedUserCfg writeToFile:userCfgPath options:NSDataWritingAtomic error:nil];
                     }
                 }
+                sdvPrepareWritableFileTarget(stampPath);
                 [srcHash writeToFile:stampPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
                 [notes addObject:[NSString stringWithFormat:@"synced:%@", reason]];
             } else {
@@ -515,37 +532,42 @@ static void syncBundledMobileControls(NSString *docsPath) {
     if (!docsPath.length) return;
     @try {
         NSString *srcMod = join(join(join(join(NSBundle.mainBundle.bundlePath, @"Frameworks"), @"SDVModGarden.framework"), @"BundledMods"), @"SDVMobileControls");
-        if (!dir(srcMod)) return;
         NSString *modsDir = join(docsPath, @"Mods");
         // Respect user explicitly disabling via .SDVMobileControls folder
-        if (!dir(join(modsDir, @".SDVMobileControls"))) {
+        if (dir(srcMod) && !dir(join(modsDir, @".SDVMobileControls"))) {
             NSString *dstMod = join(modsDir, @"SDVMobileControls");
             [fm() createDirectoryAtPath:dstMod withIntermediateDirectories:YES attributes:nil error:nil];
             for (NSString *fn in @[@"manifest.json", @"SDVMobileControls.dll"]) {
+                NSString *rel = [NSString stringWithFormat:@"Mods/SDVMobileControls/%@", fn];
+                if (sdvHotPatchOverridesRelPath(docsPath, rel)) continue;
                 NSString *sp = join(srcMod, fn);
                 if (![fm() fileExistsAtPath:sp]) continue;
                 NSData *sd = [NSData dataWithContentsOfFile:sp options:NSDataReadingMappedIfSafe error:nil];
                 if (!sd.length) continue;
                 NSString *dp = join(dstMod, fn);
-                NSData *dd = [fm() fileExistsAtPath:dp] ? [NSData dataWithContentsOfFile:dp options:NSDataReadingMappedIfSafe error:nil] : nil;
+                NSData *dd = (!dir(dp) && [fm() fileExistsAtPath:dp]) ? [NSData dataWithContentsOfFile:dp options:NSDataReadingMappedIfSafe error:nil] : nil;
                 if (!dd || dd.length != sd.length || ![hashData(sd) isEqualToString:hashData(dd)]) {
+                    sdvPrepareWritableFileTarget(dp);
                     [sd writeToFile:dp options:NSDataWritingAtomic error:nil];
                 }
             }
         }
-        // Also keep bundled SDViOSTouchControls DLLs in sync with the updated IPA bundle
+        // Also keep bundled SDViOSTouchControls DLLs in sync with the updated IPA bundle (unless overridden by an active Hot-Patch!)
+        BOOL hpOverridesTouch = sdvHotPatchOverridesRelPath(docsPath, @"Mods/SDViOSTouchControls/SDViOSTouchControls.dll") ||
+                                sdvHotPatchOverridesRelPath(docsPath, @"Mods/SDViOSTouchControls/SDViOSTouchControlsMod.dll");
         NSString *srcTouchMod = join(join(NSBundle.mainBundle.bundlePath, @"Mods"), @"SDViOSTouchControls");
-        if (dir(srcTouchMod) && !dir(join(modsDir, @".SDViOSTouchControls"))) {
+        if (!hpOverridesTouch && dir(srcTouchMod) && !dir(join(modsDir, @".SDViOSTouchControls"))) {
             NSString *dstTouchMod = join(modsDir, @"SDViOSTouchControls");
             [fm() createDirectoryAtPath:dstTouchMod withIntermediateDirectories:YES attributes:nil error:nil];
-            for (NSString *fn in @[@"SDViOSTouchControlsMod.dll", @"SDViOSTouchControls.dll"]) {
+            for (NSString *fn in @[@"SDViOSTouchControlsMod.dll", @"SDViOSTouchControls.dll", @"manifest.json"]) {
                 NSString *sp = join(srcTouchMod, fn);
                 if (![fm() fileExistsAtPath:sp]) continue;
                 NSData *sd = [NSData dataWithContentsOfFile:sp options:NSDataReadingMappedIfSafe error:nil];
                 if (!sd.length) continue;
                 NSString *dp = join(dstTouchMod, fn);
-                NSData *dd = [fm() fileExistsAtPath:dp] ? [NSData dataWithContentsOfFile:dp options:NSDataReadingMappedIfSafe error:nil] : nil;
+                NSData *dd = (!dir(dp) && [fm() fileExistsAtPath:dp]) ? [NSData dataWithContentsOfFile:dp options:NSDataReadingMappedIfSafe error:nil] : nil;
                 if (!dd || dd.length != sd.length || ![hashData(sd) isEqualToString:hashData(dd)]) {
+                    sdvPrepareWritableFileTarget(dp);
                     [sd writeToFile:dp options:NSDataWritingAtomic error:nil];
                 }
             }
@@ -853,9 +875,10 @@ static void copyModDirectoryRecursive(NSString *srcDir, NSString *dstDir) {
             NSString *dstFile = inside(dstDir, rel);
             mkdirs(dstFile.stringByDeletingLastPathComponent);
             NSError *e = nil;
-            if ([fm() fileExistsAtPath:dstFile]) [fm() removeItemAtPath:dstFile error:nil];
+            if ([fm() fileExistsAtPath:dstFile]) sdvRemoveItemQuiet(dstFile);
             BOOL ok = [fm() copyItemAtPath:srcFile toPath:dstFile error:&e];
             check(ok, e);
+            chmod(dstFile.fileSystemRepresentation, 0644);
         }
     }
 }
@@ -1029,6 +1052,7 @@ static BOOL extractWithLibArchive(NSString *archivePath, NSString *displayName, 
                 break;
             }
 
+            sdvPrepareWritableFileTarget(p);
             FILE *fp = fopen(p.fileSystemRepresentation, "wb");
             if (!fp) {
                 if (outErr) *outErr = [NSString stringWithFormat:@"Không tạo được tệp '%@'.", r.lastPathComponent];
@@ -1064,7 +1088,7 @@ static BOOL extractWithLibArchive(NSString *archivePath, NSString *displayName, 
             }
             fclose(fp);
             if (!entryOk) {
-                [fm() removeItemAtPath:p error:nil];
+                sdvRemoveItemQuiet(p);
                 ok = NO;
                 break;
             }
@@ -1095,7 +1119,7 @@ static void unpackNestedArchives(NSArray<NSString *> *nestedArchives, int depth)
             NSString *subOut = join(na.stringByDeletingLastPathComponent, sanitizeFolderName(baseName, @"SubMod"));
             mkdirs(subOut);
             extractArchiveFileToDir(na, na.lastPathComponent, subOut, depth + 1);
-            [fm() removeItemAtPath:na error:nil];
+            sdvRemoveItemQuiet(na);
         } @catch (NSException *ignored) { }
     }
 }
@@ -1148,6 +1172,7 @@ static void extractArchiveFileToDir(NSString *archivePath, NSString *displayName
                     NSString *r = clean(rawName);
                     NSString *p = inside(tmp, r);
                     mkdirs(p.stringByDeletingLastPathComponent);
+                    sdvPrepareWritableFileTarget(p);
                     if (!mz_zip_reader_extract_to_file(&z, i, p.fileSystemRepresentation, 0)) {
                         fallbackToLibArchive = YES;
                         break;
@@ -1453,8 +1478,7 @@ static NSUInteger importGameDataWithLibArchive(NSURL *url, NSString *docsPath) {
                 NSString *targetBase = [topLow isEqualToString:@"mods"] ? docsPath : gameRoot;
                 NSString *dst = inside(targetBase, rel);
                 mkdirs(dst.stringByDeletingLastPathComponent);
-                chmod(dst.fileSystemRepresentation, 0644);
-                unlink(dst.fileSystemRepresentation);
+                if ([fm() fileExistsAtPath:dst]) sdvRemoveItemQuiet(dst);
                 FILE *fp = fopen(dst.fileSystemRepresentation, "wb");
                 if (!fp) fail([NSString stringWithFormat:@"Không tạo được tệp dữ liệu game (%@).", rel.lastPathComponent]);
                 for (;;) {
@@ -1631,8 +1655,7 @@ static NSUInteger importGameDataZip(NSURL *url, NSString *docsPath) {
             NSString *targetBase = [topLow isEqualToString:@"mods"] ? docsPath : gameRoot;
             NSString *dst = inside(targetBase, rel);
             mkdirs(dst.stringByDeletingLastPathComponent);
-            chmod(dst.fileSystemRepresentation, 0644);
-            unlink(dst.fileSystemRepresentation);
+            if ([fm() fileExistsAtPath:dst]) sdvRemoveItemQuiet(dst);
             if (!mz_zip_reader_extract_to_file(&z, i, dst.fileSystemRepresentation, 0)) {
                 fallbackToLibArchive = YES;
                 break;
@@ -2788,17 +2811,19 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
 // ============================================================================
 // GARDEN LAUNCHER UPDATE CHECKER + OTA HOT-PATCH ENGINE (0% IPA Re-Signing!)
 // ============================================================================
-#define kSDVAppVersion @"1.0.4"
-#define kSDVAppBuild   10400
+#define kSDVAppVersion @"1.0.5"
+#define kSDVAppBuild   10500
 static NSString *const kSDVUpdateNotification = @"SDVLauncherUpdateDidChangeNotification";
 static NSString *const kSDVDismissedUpdatePrefKey = @"sdv_dismissed_update_id";
 static NSString *const kSDVVersionApiRawURL = @"https://api.github.com/repos/hanprm9-dot/Garden-Launcher-iOS/contents/version.json?ref=main";
 static NSString *const kSDVVersionJsonURL = @"https://raw.githubusercontent.com/hanprm9-dot/Garden-Launcher-iOS/main/version.json";
 static NSString *const kSDVLatestReleaseApiURL = @"https://api.github.com/repos/hanprm9-dot/Garden-Launcher-iOS/releases/latest";
 
+typedef void (^SDVUpdateCheckCompletion)(NSDictionary *updateInfo, NSString *statusMsg);
 static NSDictionary *gSdvLatestUpdateInfo = nil;
 static NSTimeInterval gSdvLastUpdateCheckAt = 0;
 static BOOL gSdvUpdateCheckInFlight = NO;
+static NSMutableArray<SDVUpdateCheckCompletion> *gSdvPendingUpdateCallbacks = nil;
 
 static os_unfair_lock gSdvHotPatchLock = OS_UNFAIR_LOCK_INIT;
 static NSDictionary *gSdvActiveHotPatchInfo = nil;
@@ -2820,6 +2845,12 @@ static void sdvSetActiveHotPatchInfo(NSDictionary *info) {
     os_unfair_lock_lock(&gSdvHotPatchLock);
     gSdvActiveHotPatchInfo = copied;
     os_unfair_lock_unlock(&gSdvHotPatchLock);
+}
+
+static BOOL sdvHotPatchOverridesRelPath(NSString *docsPath, NSString *relPath) {
+    if (!docsPath.length || !relPath.length || sdvActiveHotPatchInfo() == nil) return NO;
+    NSString *p = join(join(sdvHotPatchRootDir(docsPath), @"payload"), relPath);
+    return !dir(p) && [fm() fileExistsAtPath:p];
 }
 
 static NSString *sdvEffectiveAppVersion(void) {
@@ -2851,8 +2882,8 @@ static void sdvClearHotPatchStamps(NSString *docsPath) {
     if (!docsPath.length) return;
     NSString *touchStamp = join(join(join(docsPath, @"Mods"), @"SDViOSTouchControls"), @".embedded_sha256");
     NSString *smapiStamp = join(join(sdvHiddenGameDir(docsPath), @"smapi-internal"), @".garden_smapi_v1");
-    unlink(touchStamp.fileSystemRepresentation);
-    unlink(smapiStamp.fileSystemRepresentation);
+    sdvRemoveItemQuiet(touchStamp);
+    sdvRemoveItemQuiet(smapiStamp);
 }
 
 static BOOL sdvValidateHotPatchRelPathAndData(NSString *rawRel, NSData *data, NSString **outReason) {
@@ -3032,36 +3063,43 @@ static NSUInteger sdvDeployActiveHotPatchFiles(NSString *docsPath) {
             }
 
             [fm() createDirectoryAtPath:dstPath.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
-            NSData *dd = [fm() fileExistsAtPath:dstPath] ? [NSData dataWithContentsOfFile:dstPath options:NSDataReadingMappedIfSafe error:nil] : nil;
+            NSData *dd = (!dir(dstPath) && [fm() fileExistsAtPath:dstPath]) ? [NSData dataWithContentsOfFile:dstPath options:NSDataReadingMappedIfSafe error:nil] : nil;
             NSString *sh = hashData(sd);
             if (!dd || dd.length != sd.length || ![sh isEqualToString:hashData(dd)]) {
-                chmod(dstPath.fileSystemRepresentation, 0644);
+                sdvPrepareWritableFileTarget(dstPath);
                 [sd writeToFile:dstPath options:NSDataWritingAtomic error:nil];
             }
             deployed++;
 
-            // Mirror SDViOSTouchControls.dll -> SDViOSTouchControlsMod.dll and stamp .embedded_sha256 with the bundled resource's SHA-256
-            // so SDViOS.Loader.GameHost::EnsureDefaultModsDeployed keeps our hot-patched assembly intact!
-            if ([rel isEqualToString:@"Mods/SDViOSTouchControls/SDViOSTouchControls.dll"]) {
+            // Mirror SDViOSTouchControls.dll <-> SDViOSTouchControlsMod.dll (EntryDll in manifest.json!) and stamp .embedded_sha256
+            // with the bundled resource's SHA-256 so SDViOS.Loader.GameHost::EnsureDefaultModsDeployed keeps our hot-patched assembly intact!
+            if ([rel isEqualToString:@"Mods/SDViOSTouchControls/SDViOSTouchControls.dll"] ||
+                [rel isEqualToString:@"Mods/SDViOSTouchControls/SDViOSTouchControlsMod.dll"]) {
                 NSString *dstTouchDir = dstPath.stringByDeletingLastPathComponent;
-                NSString *modCopyPath = join(dstTouchDir, @"SDViOSTouchControlsMod.dll");
-                NSData *md = [fm() fileExistsAtPath:modCopyPath] ? [NSData dataWithContentsOfFile:modCopyPath options:NSDataReadingMappedIfSafe error:nil] : nil;
+                NSString *siblingName = [rel hasSuffix:@"Mod.dll"] ? @"SDViOSTouchControls.dll" : @"SDViOSTouchControlsMod.dll";
+                NSString *siblingPath = join(dstTouchDir, siblingName);
+                NSData *md = (!dir(siblingPath) && [fm() fileExistsAtPath:siblingPath]) ? [NSData dataWithContentsOfFile:siblingPath options:NSDataReadingMappedIfSafe error:nil] : nil;
                 if (!md || md.length != sd.length || ![sh isEqualToString:hashData(md)]) {
-                    chmod(modCopyPath.fileSystemRepresentation, 0644);
-                    [sd writeToFile:modCopyPath options:NSDataWritingAtomic error:nil];
+                    sdvPrepareWritableFileTarget(siblingPath);
+                    [sd writeToFile:siblingPath options:NSDataWritingAtomic error:nil];
                 }
                 NSString *appTouchDir = join(join(NSBundle.mainBundle.bundlePath, @"Mods"), @"SDViOSTouchControls");
                 NSString *dstManifest = join(dstTouchDir, @"manifest.json");
                 NSString *appManifest = join(appTouchDir, @"manifest.json");
                 if (![fm() fileExistsAtPath:dstManifest] && [fm() fileExistsAtPath:appManifest]) {
                     NSData *mfd = [NSData dataWithContentsOfFile:appManifest options:0 error:nil];
-                    if (mfd.length) [mfd writeToFile:dstManifest options:NSDataWritingAtomic error:nil];
+                    if (mfd.length) {
+                        sdvPrepareWritableFileTarget(dstManifest);
+                        [mfd writeToFile:dstManifest options:NSDataWritingAtomic error:nil];
+                    }
                 }
                 NSString *appTouchDll = join(appTouchDir, @"SDViOSTouchControls.dll");
                 NSData *appTouchData = [fm() fileExistsAtPath:appTouchDll] ? [NSData dataWithContentsOfFile:appTouchDll options:NSDataReadingMappedIfSafe error:nil] : nil;
                 if (appTouchData.length) {
                     NSString *embStamp = [hashData(appTouchData) uppercaseString];
-                    [embStamp writeToFile:join(dstTouchDir, @".embedded_sha256") atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                    NSString *stampDst = join(dstTouchDir, @".embedded_sha256");
+                    sdvPrepareWritableFileTarget(stampDst);
+                    [embStamp writeToFile:stampDst atomically:YES encoding:NSUTF8StringEncoding error:nil];
                 }
             } else if ([rel isEqualToString:@"StardewValley/StardewModdingAPI.dll"]) {
                 NSString *appSmapiDll = join(join(join(join(NSBundle.mainBundle.bundlePath, @"Frameworks"), @"SDVModGarden.framework"), @"BundledSMAPI"), @"StardewModdingAPI.dll");
@@ -3069,7 +3107,9 @@ static NSUInteger sdvDeployActiveHotPatchFiles(NSString *docsPath) {
                 if (appSmapiData.length) {
                     NSString *smapiInternalDir = join(sdvHiddenGameDir(docsPath), @"smapi-internal");
                     [fm() createDirectoryAtPath:smapiInternalDir withIntermediateDirectories:YES attributes:nil error:nil];
-                    [hashData(appSmapiData) writeToFile:join(smapiInternalDir, @".garden_smapi_v1") atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                    NSString *smapiStampDst = join(smapiInternalDir, @".garden_smapi_v1");
+                    sdvPrepareWritableFileTarget(smapiStampDst);
+                    [hashData(appSmapiData) writeToFile:smapiStampDst atomically:YES encoding:NSUTF8StringEncoding error:nil];
                 }
             }
         }
@@ -3304,7 +3344,21 @@ static NSString *sdvRecommendedUpdateDownloadURL(NSDictionary *info) {
     return pick.length ? pick : @"https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/latest";
 }
 
-static void sdvParseAndStoreRemoteUpdateDict(NSDictionary *json, BOOL isGithubReleaseApi, void (^completion)(NSDictionary *updateInfo, NSString *statusMsg)) {
+static void sdvCompletePendingUpdateCallbacks(NSDictionary *info, NSString *msg, BOOL networkSucceeded) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        gSdvUpdateCheckInFlight = NO;
+        if (networkSucceeded) {
+            gSdvLastUpdateCheckAt = CFAbsoluteTimeGetCurrent();
+        }
+        NSArray<SDVUpdateCheckCompletion> *cbs = gSdvPendingUpdateCallbacks.count ? [gSdvPendingUpdateCallbacks copy] : nil;
+        [gSdvPendingUpdateCallbacks removeAllObjects];
+        for (SDVUpdateCheckCompletion cb in cbs) {
+            cb(info, msg);
+        }
+    });
+}
+
+static void sdvParseAndStoreRemoteUpdateDict(NSDictionary *json, BOOL isGithubReleaseApi) {
     NSString *ver = nil;
     NSInteger build = 0;
     NSInteger minIpaBuild = kSDVAppBuild;
@@ -3361,9 +3415,7 @@ static void sdvParseAndStoreRemoteUpdateDict(NSDictionary *json, BOOL isGithubRe
     }
 
     if (!ver.length) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (completion) completion(nil, @"Không đọc được thông tin phiên bản từ máy chủ.");
-        });
+        sdvCompletePendingUpdateCallbacks(nil, @"Không đọc được thông tin phiên bản từ máy chủ.", NO);
         return;
     }
 
@@ -3401,84 +3453,102 @@ static void sdvParseAndStoreRemoteUpdateDict(NSDictionary *json, BOOL isGithubRe
 
     dispatch_async(dispatch_get_main_queue(), ^{
         gSdvLatestUpdateInfo = info;
+        NSString *msg = nil;
         if (info) {
             [NSNotificationCenter.defaultCenter postNotificationName:kSDVUpdateNotification object:nil];
-            NSString *msg = canHotPatch
+            msg = canHotPatch
                 ? [NSString stringWithFormat:@"Đã có bản cập nhật nhanh v%@ — cập nhật trực tiếp ngay trong app, không cần ký lại IPA!", ver]
                 : [NSString stringWithFormat:@"Đã tìm thấy bản cập nhật mới v%@!", ver];
-            if (completion) completion(info, msg);
         } else {
-            if (completion) completion(nil, [NSString stringWithFormat:@"Bạn đang dùng phiên bản mới nhất (v%@).", sdvEffectiveAppVersion()]);
+            msg = [NSString stringWithFormat:@"Bạn đang dùng phiên bản mới nhất (v%@).", sdvEffectiveAppVersion()];
         }
+        sdvCompletePendingUpdateCallbacks(info, msg, YES);
     });
 }
 
-static void sdvCheckLauncherUpdate(BOOL force, void (^completion)(NSDictionary *updateInfo, NSString *statusMsg)) {
+static void sdvCheckLauncherUpdate(BOOL force, SDVUpdateCheckCompletion completion) {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            sdvCheckLauncherUpdate(force, completion);
+        });
+        return;
+    }
     NSTimeInterval now = CFAbsoluteTimeGetCurrent();
     if (!force && gSdvLastUpdateCheckAt > 0 && (now - gSdvLastUpdateCheckAt) < 1800.0) {
-        if (completion) completion(gSdvLatestUpdateInfo, gSdvLatestUpdateInfo ? nil : [NSString stringWithFormat:@"Bạn đang dùng phiên bản mới nhất (v%@).", sdvEffectiveAppVersion()]);
+        if (completion) {
+            completion(gSdvLatestUpdateInfo, gSdvLatestUpdateInfo ? nil : [NSString stringWithFormat:@"Bạn đang dùng phiên bản mới nhất (v%@).", sdvEffectiveAppVersion()]);
+        }
         return;
+    }
+    if (completion) {
+        if (!gSdvPendingUpdateCallbacks) gSdvPendingUpdateCallbacks = [NSMutableArray array];
+        [gSdvPendingUpdateCallbacks addObject:[completion copy]];
     }
     if (gSdvUpdateCheckInFlight) return;
     gSdvUpdateCheckInFlight = YES;
-    gSdvLastUpdateCheckAt = now;
 
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
     cfg.timeoutIntervalForRequest = 6.0;
-    cfg.timeoutIntervalForResource = 10.0;
+    cfg.timeoutIntervalForResource = 12.0;
     cfg.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
     NSURLSession *sess = [NSURLSession sessionWithConfiguration:cfg];
 
-    // 1. Primary: GitHub Contents API raw JSON (bypasses Vietnam ISP blocks on raw.githubusercontent.com + 60s cache!)
-    NSMutableURLRequest *apiReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kSDVVersionApiRawURL]];
-    [apiReq setValue:@"GardenLauncher-iOS/" kSDVAppVersion forHTTPHeaderField:@"User-Agent"];
-    [apiReq setValue:@"application/vnd.github.raw+json" forHTTPHeaderField:@"Accept"];
+    NSString *ua = [NSString stringWithFormat:@"GardenLauncher-iOS/%@", sdvEffectiveAppVersion()];
+    NSMutableURLRequest *(^makeRawReq)(NSTimeInterval) = ^NSMutableURLRequest *(NSTimeInterval timeout) {
+        NSString *u = [NSString stringWithFormat:@"%@?t=%ld", kSDVVersionJsonURL, (long)time(NULL)];
+        NSMutableURLRequest *r = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:u]];
+        r.timeoutInterval = timeout;
+        [r setValue:ua forHTTPHeaderField:@"User-Agent"];
+        return r;
+    };
+    NSMutableURLRequest *(^makeApiReq)(NSTimeInterval) = ^NSMutableURLRequest *(NSTimeInterval timeout) {
+        NSMutableURLRequest *r = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kSDVVersionApiRawURL]];
+        r.timeoutInterval = timeout;
+        [r setValue:ua forHTTPHeaderField:@"User-Agent"];
+        [r setValue:@"application/vnd.github.raw+json" forHTTPHeaderField:@"Accept"];
+        return r;
+    };
 
-    [[sess dataTaskWithRequest:apiReq completionHandler:^(NSData *apiData, NSURLResponse *apiResp, NSError *apiErr) {
-        NSHTTPURLResponse *apiHttp = [apiResp isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)apiResp : nil;
-        if (!apiErr && apiHttp.statusCode == 200 && apiData.length > 8) {
-            NSDictionary *apiJson = [NSJSONSerialization JSONObjectWithData:apiData options:0 error:nil];
-            if ([apiJson isKindOfClass:NSDictionary.class] && [apiJson[@"version"] isKindOfClass:NSString.class]) {
-                gSdvUpdateCheckInFlight = NO;
-                sdvParseAndStoreRemoteUpdateDict(apiJson, NO, completion);
+    // Automatic boot check (force == NO): try raw.githubusercontent.com (4s, zero REST API rate-limit cost on CGNAT) -> GitHub Contents API -> Releases API.
+    // Manual check (force == YES): try GitHub Contents API first (0s CDN lag + bypasses Vietnam ISP raw blocks) -> raw.githubusercontent.com -> Releases API.
+    NSMutableURLRequest *firstReq  = force ? makeApiReq(6.0) : makeRawReq(4.0);
+    NSMutableURLRequest *secondReq = force ? makeRawReq(6.0) : makeApiReq(6.0);
+
+    [[sess dataTaskWithRequest:firstReq completionHandler:^(NSData *d1, NSURLResponse *r1, NSError *e1) {
+        NSHTTPURLResponse *h1 = [r1 isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)r1 : nil;
+        if (!e1 && h1.statusCode == 200 && d1.length > 8) {
+            NSDictionary *j1 = [NSJSONSerialization JSONObjectWithData:d1 options:0 error:nil];
+            if ([j1 isKindOfClass:NSDictionary.class] && [j1[@"version"] isKindOfClass:NSString.class]) {
+                sdvParseAndStoreRemoteUpdateDict(j1, NO);
                 [sess finishTasksAndInvalidate];
                 return;
             }
         }
-        // 2. Secondary: raw.githubusercontent.com
-        NSString *primaryStr = [NSString stringWithFormat:@"%@?t=%ld", kSDVVersionJsonURL, (long)time(NULL)];
-        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:primaryStr]];
-        [req setValue:@"GardenLauncher-iOS/" kSDVAppVersion forHTTPHeaderField:@"User-Agent"];
-
-        [[sess dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-            NSHTTPURLResponse *http = [resp isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)resp : nil;
-            if (!err && http.statusCode == 200 && data.length > 8) {
-                NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                if ([json isKindOfClass:NSDictionary.class] && [json[@"version"] isKindOfClass:NSString.class]) {
-                    gSdvUpdateCheckInFlight = NO;
-                    sdvParseAndStoreRemoteUpdateDict(json, NO, completion);
+        [[sess dataTaskWithRequest:secondReq completionHandler:^(NSData *d2, NSURLResponse *r2, NSError *e2) {
+            NSHTTPURLResponse *h2 = [r2 isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)r2 : nil;
+            if (!e2 && h2.statusCode == 200 && d2.length > 8) {
+                NSDictionary *j2 = [NSJSONSerialization JSONObjectWithData:d2 options:0 error:nil];
+                if ([j2 isKindOfClass:NSDictionary.class] && [j2[@"version"] isKindOfClass:NSString.class]) {
+                    sdvParseAndStoreRemoteUpdateDict(j2, NO);
                     [sess finishTasksAndInvalidate];
                     return;
                 }
             }
-            // 3. Fallback: GitHub Releases /latest API
             NSMutableURLRequest *fbReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kSDVLatestReleaseApiURL]];
-            [fbReq setValue:@"GardenLauncher-iOS/" kSDVAppVersion forHTTPHeaderField:@"User-Agent"];
+            fbReq.timeoutInterval = 6.0;
+            [fbReq setValue:ua forHTTPHeaderField:@"User-Agent"];
             [fbReq setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
             [[sess dataTaskWithRequest:fbReq completionHandler:^(NSData *fbData, NSURLResponse *fbResp, NSError *fbErr) {
-                gSdvUpdateCheckInFlight = NO;
                 NSHTTPURLResponse *fbHttp = [fbResp isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)fbResp : nil;
                 if (!fbErr && fbHttp.statusCode == 200 && fbData.length > 16) {
                     NSDictionary *fbJson = [NSJSONSerialization JSONObjectWithData:fbData options:0 error:nil];
-                    if ([fbJson isKindOfClass:NSDictionary.class]) {
-                        sdvParseAndStoreRemoteUpdateDict(fbJson, YES, completion);
+                    if ([fbJson isKindOfClass:NSDictionary.class] && [fbJson[@"tag_name"] isKindOfClass:NSString.class]) {
+                        sdvParseAndStoreRemoteUpdateDict(fbJson, YES);
                         [sess finishTasksAndInvalidate];
                         return;
                     }
                 }
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    if (completion) completion(nil, @"Không thể kết nối kiểm tra cập nhật. Vui lòng thử lại khi có mạng.");
-                });
+                sdvCompletePendingUpdateCallbacks(nil, @"Không thể kết nối kiểm tra cập nhật. Vui lòng thử lại khi có mạng.", NO);
                 [sess finishTasksAndInvalidate];
             }] resume];
         }] resume];

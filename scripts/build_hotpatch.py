@@ -5,7 +5,7 @@ for Garden Launcher iOS (v1.0.3+, Mono Interpreter 0% JIT).
 
 Whitelisted managed/data targets inside the archive:
   - Mods/SDVMobileControls/{SDVMobileControls.dll, manifest.json, ...}
-  - Mods/SDViOSTouchControls/SDViOSTouchControls.dll   (--include-touch <dll>)
+  - Mods/SDViOSTouchControls/{SDViOSTouchControls.dll, SDViOSTouchControlsMod.dll} (--include-touch <dll>)
   - StardewValley/Lidgren.Network.dll                  (--include-lidgren <dll>)
   - StardewValley/StardewModdingAPI.dll + smapi-internal/* (--include-smapi <dir>)
   - .garden/extra_mod_rules.json                       (--extra-rules <json>)
@@ -80,6 +80,7 @@ def main() -> int:
         tb = args.include_touch.read_bytes()
         assert tb[:2] == b"MZ", "TouchControls DLL is not a valid PE assembly"
         staged["Mods/SDViOSTouchControls/SDViOSTouchControls.dll"] = tb
+        staged["Mods/SDViOSTouchControls/SDViOSTouchControlsMod.dll"] = tb
 
     if args.include_lidgren:
         lb = args.include_lidgren.read_bytes()

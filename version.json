@@ -1,19 +1,19 @@
 {
-  "version": "1.0.4",
-  "build": 10400,
-  "min_ipa_build": 10400,
+  "version": "1.0.5",
+  "build": 10500,
+  "min_ipa_build": 10500,
   "date": "2026-11-26",
-  "release_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/tag/v1.0.4",
-  "ios14_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.4/Garden-Launcher-1.0.4-iOS14-18.ipa",
-  "ios26_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.4/Garden-Launcher-1.0.4-iOS26-27.ipa",
+  "release_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/tag/v1.0.5",
+  "ios14_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.5/Garden-Launcher-1.0.5-iOS14-18.ipa",
+  "ios26_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.5/Garden-Launcher-1.0.5-iOS26-27.ipa",
   "hotpatch_url": "",
   "hotpatch_sha256": "",
   "hotpatch_size": 0,
   "summary": [
-    "Sửa khẩn cấp lỗi quyền truy cập thư mục #GL-WY7FCB (\"ModGardenBatch couldn't be removed because you don't have permission to access it\") khi cài/xóa Mod & File Save, kèm tự động mở khóa các thư mục bị kẹt quyền ngay khi mở app.",
-    "Tối ưu kiểm tra cập nhật qua api.github.com chống chặn mạng tại Việt Nam và tích hợp sẵn Cập nhật nhanh trực tiếp trong ứng dụng (OTA Hot-Patch xác thực SHA-256 — các bản vá sau cài 1 chạm không cần ký lại IPA).",
-    "Logo Slime khung đá rêu Pixel 16-bit & mở trực tiếp thư mục StardewValley/Content trong ứng dụng Tệp + sửa #GL-FKRBMM nạp lại XNB / Wave Bank Deflate64.",
-    "Đại tu Tay cầm Console (SnappyMenus 0% JIT, chuyển khung LB/RB/LT/RT, thay/vứt/giữ A kéo-thả vật phẩm, rung CoreHaptics), thêm Chế độ Tay cầm thuần và sửa lỗi không di chuyển được trong Event / Lễ hội.",
-    "Tương thích UI Info Suite 2 v2.3.7, đồng bộ chân dung Anime theo mùa, nút SKIP gốc & số tầng Hầm mỏ (@Mudkip267)."
+    "Tổng rà soát & sửa triệt để 8 nhóm lỗi tiềm ẩn toàn hệ thống: khóa cứng còn sót với chmod/removeItem khi di chuyển/nhập dữ liệu & xóa SaveSlots, tự động cứu lịch sử cài Mod gián đoạn (History.m) không bao giờ bị kẹt cứng.",
+    "Hoàn thiện OTA Hot-Patch 100%: đóng gói đồng bộ cả SDViOSTouchControls.dll & SDViOSTouchControlsMod.dll (EntryDll thật), giữ nguyên bản vá qua bước Kiểm tra lại dữ liệu và khôi phục sạch khi Về gốc IPA.",
+    "Tối ưu Kiểm tra cập nhật (sdvCheckLauncherUpdate): xếp hàng callback chống treo thông báo khi bấm thủ công, chỉ tính cooldown 30 phút khi mạng trả HTTP 200 hợp lệ, và chống chạm giới hạn 60 req/giờ trên mạng CGNAT.",
+    "Đưa vật lý phao câu cá Mobile (BobberBar damping & chống nảy gắt), khóa nhả câu sớm khi giữ nút quăng cần và cứu kẹt isReeling hoạt động trực tiếp trên nền 0% JIT (Zero-Harmony).",
+    "Chặn văng GameMenu khi mod thay đổi số tab LB/RB, tự reset khóa bàn phím ảo khi đóng Mod Garden/ẩn nền, rút gọn quét quyền lúc khởi động SMAPI và nâng trần gửi ErrorLogs.zip lên 7.5–8.5 MB."
   ]
 }

@@ -251,8 +251,8 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
         }
         _logPath = cur;
         SDVRamSnapshot s0 = [self sample];
-        [self appendLogLine:[NSString stringWithFormat:@"=== Garden Launcher " kSDVAppVersion @" RAM Monitor Started | Device RAM: %.2f GB | Initial Budget: %@ | Alerts: 85%% Warn / 90%% Critical ===",
-            (double)s0.deviceBytes / (1024.0 * 1024.0 * 1024.0), sdvFmtMemMB(s0.budgetBytes)]];
+        [self appendLogLine:[NSString stringWithFormat:@"=== Garden Launcher %@ RAM Monitor Started | Device RAM: %.2f GB | Initial Budget: %@ | Alerts: 85%% Warn / 90%% Critical ===",
+            sdvEffectiveAppVersion(), (double)s0.deviceBytes / (1024.0 * 1024.0 * 1024.0), sdvFmtMemMB(s0.budgetBytes)]];
     }
 
     dispatch_async(dispatch_get_main_queue(), ^{

@@ -1,19 +1,18 @@
 {
-  "version": "1.0.7",
-  "build": 10700,
-  "min_ipa_build": 10700,
+  "version": "1.0.8",
+  "build": 10800,
+  "min_ipa_build": 10800,
   "date": "2026-11-26",
   "discord_url": "https://discord.gg/tuTKv9xQ2Z",
-  "release_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/tag/v1.0.7",
-  "ios14_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.7/Garden-Launcher-1.0.7-iOS14-18.ipa",
-  "ios26_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.7/Garden-Launcher-1.0.7-iOS26-27.ipa",
+  "release_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/tag/v1.0.8",
+  "ios14_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.8/Garden-Launcher-1.0.8-iOS14-18.ipa",
+  "ios26_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.8/Garden-Launcher-1.0.8-iOS26-27.ipa",
   "hotpatch_url": "",
   "hotpatch_sha256": "",
   "hotpatch_size": 0,
   "summary": [
-    "Tích hợp Cộng đồng Server Discord Chính Thức (Vườn Bách Thú 🦖 · Garden Launcher — https://discord.gg/tuTKv9xQ2Z) ngay trong thanh điều hướng trên cùng, màn hình Thiết lập / Cài Mod, Co-op LAN, Báo lỗi và Credit.",
-    "Thiết kế thẻ tương tác chuyển động Aurora 4 dải màu, linh vật Discord Clyde vector nổi bồng bềnh kèm 4 sao lấp lánh, tia sáng holographic quét chéo, bộ đếm thành viên đang Online thời gian thực (● ONLINE) và hiệu ứng xoay nảy bắn pháo sáng khi chạm.",
-    "Hỗ trợ đồng bộ từ xa trường discord_url qua version.json giúp liên kết mời Discord trong ứng dụng luôn cập nhật vĩnh viễn mà không cần cài lại IPA.",
-    "Bao gồm trọn bộ đại tu Gameplay Stardew 1.6.15 & SInputState 0% JIT từ v1.0.6: ná cao su (Slingshot), Hội chợ Grange Display & StrengthGame, tháo mồi/phao cần Iridium 2 khe, cưỡi ngựa qua cổng rào 1 ô, phím tắt Mod cho tay cầm và bảo vệ bộ đếm giờ máy móc khi QuickSave."
+    "Sửa triệt để lỗi chế độ Chạm đi A* (Tap-to-Move) không nhận diện và không kích hoạt được Xe mỏ (Minecart) ở Trạm Xe Buýt, Lò Rèn Thị Trấn, Mỏ Đá, Cửa Hầm Mỏ (kể cả xe mỏ 2 ô nằm sát vách đá chéo và chạm phần viền/than trên của xe), đồng thời hỗ trợ chạm đi tự động cho Thảm Vẹt Đảo Gừng (Parrot Express), Máy mua vé xe buýt, Cuộn giấy Bundle, Xe than & Tượng Calico 1.6.",
+    "Thêm hiệu ứng nền cực quang sống động toàn menu Mod Garden (SDVAuroraCanvasView): 4 dải cực quang Ngọc Lục Bảo · Blurple · Thạch Anh Tím · Xanh Băng trôi chuyển mượt dưới lớp kính mờ Sidebar, Thanh điều hướng, các thẻ nổi bán trong suốt có viền phát sáng trên toàn bộ 9 tab, tự thích ứng Sáng/Tối (Light/Dark Mode) và tự tạm dừng khi bật Tiết kiệm pin / Giảm chuyển động.",
+    "Tích hợp Cộng đồng Server Discord Chính Thức (Vườn Bách Thú 🦖 · Garden Launcher — https://discord.gg/tuTKv9xQ2Z) kèm bộ đếm thành viên Online trực tiếp từ v1.0.7 và trọn bộ đại tu Gameplay Stardew 1.6.15 trên nền 0% JIT từ v1.0.6."
   ]
 }

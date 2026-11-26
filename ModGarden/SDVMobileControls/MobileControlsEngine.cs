@@ -6052,9 +6052,10 @@ namespace SDVMobileControls
                 intent.StopAdjacent = false;
             }
 
+            bool requireCardNow = intent.PreferCardinal && HasWalkableCardinalNeighbor(loc, actionTile, playerTile, who);
             bool closeEnoughNow = (intent.Kind == TileActionKind.UseTool)
                 ? (intent.AllowSameTile ? (actionCheb <= 1) : (actionCheb == 1))
-                : (intent.PreferCardinal ? (actionManh == 1 || (intent.AllowSameTile && actionCheb == 0)) : (actionCheb <= 1));
+                : (requireCardNow ? (actionManh == 1 || (intent.AllowSameTile && actionCheb == 0)) : (actionCheb <= 1));
             if (!tappedWarp && intent.Kind != TileActionKind.None && closeEnoughNow)
             {
                 ClearPath();
@@ -6176,6 +6177,21 @@ namespace SDVMobileControls
         // For unwalkable/out-of-bounds door warps (e.g. FarmHouse exit (3,12) or Building humanDoor),
         // pick the walkable CARDINAL tile directly in front of the door (e.g. rug (3,11)) so A* walks
         // squarely onto the rug instead of stopping diagonally against the wall!
+        private static bool HasWalkableCardinalNeighbor(GameLocation loc, Point goal, Point playerTile, Farmer who)
+        {
+            if (loc == null) return false;
+            int[] cdx = { 0, 1, 0, -1 };
+            int[] cdy = { -1, 0, 1, 0 };
+            for (int i = 0; i < 4; i++)
+            {
+                int cx = goal.X + cdx[i];
+                int cy = goal.Y + cdy[i];
+                if ((cx == playerTile.X && cy == playerTile.Y) || PathFinder.IsTileWalkable(loc, cx, cy, who))
+                    return true;
+            }
+            return false;
+        }
+
         private static Point FindWarpApproachTile(GameLocation loc, Point warpGoal, Point playerTile, Farmer who)
         {
             if (loc == null || PathFinder.IsTileWalkable(loc, warpGoal.X, warpGoal.Y, who))
@@ -6373,9 +6389,10 @@ namespace SDVMobileControls
                 int dy = Math.Abs(who.TilePoint.Y - target.Y);
                 int cheb = Math.Max(dx, dy);
                 int manh = dx + dy;
+                bool requireCard = intent.PreferCardinal && HasWalkableCardinalNeighbor(Game1.currentLocation, target, who.TilePoint, who);
                 bool reachedAction = (intent.Kind == TileActionKind.UseTool)
                     ? (intent.AllowSameTile ? (cheb <= 1) : (cheb == 1))
-                    : (intent.PreferCardinal ? (manh == 1 || (intent.AllowSameTile && cheb == 0)) : (cheb <= 1));
+                    : (requireCard ? (manh == 1 || (intent.AllowSameTile && cheb == 0)) : (cheb <= 1));
                 if (reachedAction)
                     TriggerTileIntent(who, target, intent);
             }

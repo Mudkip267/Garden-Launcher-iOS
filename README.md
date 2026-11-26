@@ -4,7 +4,7 @@
   <p><b>Launcher &amp; Mod Manager cho Stardew Valley PC 1.6.15 trên iOS &amp; iPadOS</b></p>
 
   <p>
-    <a href="https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/tag/v1.0.7"><img src="https://img.shields.io/badge/Version-v1.0.7-2ea44f?style=flat-square" alt="Version v1.0.7" /></a>
+    <a href="https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/tag/v1.0.8"><img src="https://img.shields.io/badge/Version-v1.0.8-2ea44f?style=flat-square" alt="Version v1.0.8" /></a>
     <a href="https://discord.gg/tuTKv9xQ2Z"><img src="https://img.shields.io/badge/Discord-Vườn%20Bách%20Thú-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord Server" /></a>
     <img src="https://img.shields.io/badge/iOS%20%2F%20iPadOS-14%20–%2027+-007aff?style=flat-square&logo=apple&logoColor=white" alt="iOS & iPadOS 14-27+" />
     <img src="https://img.shields.io/badge/SMAPI-4.5.2-6f42c1?style=flat-square" alt="SMAPI 4.5.2" />
@@ -19,16 +19,18 @@
 
 ---
 
-## 📥 Tải xuống (`v1.0.7`)
+## 📥 Tải xuống (`v1.0.8`)
 
 | Thiết bị | Phiên bản IPA | Tải về |
 | :--- | :--- | :---: |
-| **iOS / iPadOS 14 – 18** | `Garden-Launcher-1.0.7-iOS14-18.ipa` | [**⬇️ Tải ngay**](https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.7/Garden-Launcher-1.0.7-iOS14-18.ipa) |
-| **iOS / iPadOS 26 – 27+** | `Garden-Launcher-1.0.7-iOS26-27.ipa` | [**⬇️ Tải ngay**](https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.7/Garden-Launcher-1.0.7-iOS26-27.ipa) |
+| **iOS / iPadOS 14 – 18** | `Garden-Launcher-1.0.8-iOS14-18.ipa` | [**⬇️ Tải ngay**](https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.8/Garden-Launcher-1.0.8-iOS14-18.ipa) |
+| **iOS / iPadOS 26 – 27+** | `Garden-Launcher-1.0.8-iOS26-27.ipa` | [**⬇️ Tải ngay**](https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.8/Garden-Launcher-1.0.8-iOS26-27.ipa) |
 
 ---
 
-## ✨ Điểm mới nổi bật trong `v1.0.7`, `v1.0.6` & `v1.0.5`
+## ✨ Điểm mới nổi bật trong `v1.0.8`, `v1.0.7` & `v1.0.6`
+
+- **🌌 Giao Diện Cực Quang Toàn Menu Mod Garden (`SDVAuroraCanvasView`) & Sửa Dứt Điểm Chạm Đi Xe Mỏ (`v1.0.8`)** — Phủ lớp nền **Aurora sống động toàn bộ 9 tab của Mod Garden** (4 dải cực quang *Ngọc Lục Bảo · Blurple · Thạch Anh Tím · Xanh Băng* kèm sóng lụa chéo chạy GPU mượt mà xuyên qua kính mờ Sidebar, Thanh điều hướng và hệ thống thẻ nổi bán trong suốt viền sáng `sdvDynamicAuroraCardBg`, tự động đổi bảng màu theo **Light / Dark Mode** và tự nghỉ khi bật *Chế độ Nguồn điện thấp* hoặc *Giảm chuyển động*); sửa triệt để lỗi chế độ **Chạm đi A\* (`Tap-to-Move`) không nhận diện Xe mỏ (`Minecart`)** tại *Trạm Xe Buýt, Lò Rèn Thị Trấn, Mỏ Đá & Cửa Hầm Mỏ* (bắt đủ tile `Buildings` `958 / 1080 / 1081` không có thuộc tính `Action`, hỗ trợ chạm phần miệng/than tầng `Front` `tile.Y - 1`, tự chọn nửa xe thông thoáng cho xe mỏ 2 ô nằm sát hốc đá và mở tiếp cận chéo `HasWalkableCardinalNeighbor`), đồng thời bổ sung Chạm đi tự động cho **Thảm Vẹt Đảo Gừng (`Parrot Express`)**, **Máy bán vé xe buýt**, **Cuộn giấy Bundle Nhà Văn Hóa**, **Xe than trong mỏ** và **Tượng Calico `1.6`**.
 
 - **💬 Cộng Đồng Server Discord Chính Thức & Thẻ Tương Tác Aurora (`v1.0.7`)** — Tích hợp liên kết mời vĩnh viễn [**Vườn Bách Thú 🦖 · Garden Launcher**](https://discord.gg/tuTKv9xQ2Z) xuyên suốt ứng dụng: nút nhanh **`Discord`** phát sáng trên thanh điều hướng trên cùng (hiển thị ở cả 9 tab) và thẻ **Hero Aurora** tại tab *Thiết lập / Cài Mod*, *Co-op LAN* & *Credit* với chuyển động cực quang 4 dải màu, linh vật **Discord Clyde** vector nổi bồng bềnh kèm 4 sao lấp lánh, tia sáng holographic lướt chéo, chấm radar **`● ONLINE`** cập nhật số người trực tuyến theo thời gian thực, hiệu ứng xoay 360° & bung pháo sáng đa sắc khi chạm, nút hỗ trợ nhanh ở tab *Báo lỗi* và cơ chế đồng bộ `discord_url` từ xa qua `version.json`.
 
@@ -78,8 +80,8 @@ dotnet build ModGarden\SDVMobileControls\SDVMobileControls.csproj -c Release
 powershell -ExecutionPolicy Bypass -File scripts\patch_perf_v7.ps1
 
 # 3. Đóng gói 2 bản IPA sạch (iOS / iPadOS 26–27+ & iOS / iPadOS 14–18)
-python scripts\package_embedded.py base-sdvios.ipa build\SDVModGarden_ios26 zsign.exe dist\Garden-Launcher-1.0.7-iOS26-27.ipa "$WorkDir\v7-host.dll" "$WorkDir\v7-touch.dll" "$WorkDir\Lidgren.Network.dll" --launcher --min-ios=16.0
-python scripts\package_embedded.py base-sdvios.ipa build\SDVModGarden_ios14 zsign.exe dist\Garden-Launcher-1.0.7-iOS14-18.ipa "$WorkDir\v7-host.dll" "$WorkDir\v7-touch.dll" "$WorkDir\Lidgren.Network.dll" --launcher --no-scene --min-ios=14.0
+python scripts\package_embedded.py base-sdvios.ipa build\SDVModGarden_ios26 zsign.exe dist\Garden-Launcher-1.0.8-iOS26-27.ipa "$WorkDir\v7-host.dll" "$WorkDir\v7-touch.dll" "$WorkDir\Lidgren.Network.dll" --launcher --min-ios=16.0
+python scripts\package_embedded.py base-sdvios.ipa build\SDVModGarden_ios14 zsign.exe dist\Garden-Launcher-1.0.8-iOS14-18.ipa "$WorkDir\v7-host.dll" "$WorkDir\v7-touch.dll" "$WorkDir\Lidgren.Network.dll" --launcher --no-scene --min-ios=14.0
 ```
 
 </details>

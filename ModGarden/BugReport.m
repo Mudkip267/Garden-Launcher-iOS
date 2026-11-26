@@ -372,7 +372,14 @@ static NSData *sdvBuildMultipartBody(
 
 -(void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = kBgCanvas;
+    if (self.embeddedInTab) {
+        self.view.backgroundColor = UIColor.clearColor;
+    } else {
+        self.view.backgroundColor = kBgCanvas;
+        SDVAuroraCanvasView *aurora = [SDVAuroraCanvasView new];
+        [self.view insertSubview:aurora atIndex:0];
+        pinAll(aurora, self.view, 0);
+    }
     _categories = @[
         @"Văng game (Crash)",
         @"Lỗi Mod / Xung đột",
@@ -426,6 +433,7 @@ static NSData *sdvBuildMultipartBody(
     }
 
     _scroll = [UIScrollView new];
+    _scroll.backgroundColor = UIColor.clearColor;
     _scroll.alwaysBounceVertical = YES;
     _scroll.keyboardDismissMode = UIScrollViewKeyboardDismissModeInteractive;
     _scroll.translatesAutoresizingMaskIntoConstraints = NO;

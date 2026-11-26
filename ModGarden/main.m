@@ -511,7 +511,7 @@ static void sdvSpawnDiscordSparkleBurst(UIView *hostView, CGPoint origin, CGFloa
 }
 
 -(void)startAmbientAnimations {
-    if (UIAccessibilityIsReduceMotionEnabled()) return;
+    if (sdvShouldPauseAmbientEffects()) return;
     if (![_sheenGrad animationForKey:@"sdvPillSheen"]) {
         CABasicAnimation *sh = [CABasicAnimation animationWithKeyPath:@"locations"];
         sh.fromValue = @[@(-0.85), @(-0.42), @(0.0)];
@@ -845,7 +845,7 @@ static void sdvSpawnDiscordSparkleBurst(UIView *hostView, CGPoint origin, CGFloa
 }
 
 -(void)startHeroAnimations {
-    if (UIAccessibilityIsReduceMotionEnabled()) return;
+    if (sdvShouldPauseAmbientEffects()) return;
 
     // 1. Slow breathing Aurora color/angle shift
     if (![_auroraGrad animationForKey:@"sdvAuroraShift"]) {
@@ -1194,13 +1194,18 @@ static void sdvSpawnDiscordSparkleBurst(UIView *hostView, CGPoint origin, CGFloa
 -(void)buildShell {
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
 
-    // Translucent Apple Split-View Sidebar (adapts natively to iOS 14–18 Material & iOS 26 Glass)
+    // Full-menu living Aurora backdrop spanning behind Sidebar, Top Header, Scroll Canvas & Bug Report tab
+    SDVAuroraCanvasView *auroraBg = [SDVAuroraCanvasView new];
+    [self.view insertSubview:auroraBg atIndex:0];
+    pinAll(auroraBg, self.view, 0);
+
+    // Translucent Apple Split-View Sidebar (blurs Aurora ribbons natively on iOS 14–18 Material & iOS 26 Glass)
     _sidebar = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterial]];
     _sidebar.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:_sidebar];
 
     UIView *divider = [UIView new];
-    divider.backgroundColor = kSepColor;
+    divider.backgroundColor = sdvDynamicAuroraCardBorder();
     divider.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:divider];
 
@@ -1210,6 +1215,7 @@ static void sdvSpawnDiscordSparkleBurst(UIView *hostView, CGPoint origin, CGFloa
     [self.view addSubview:topBar];
 
     UIView *topSep = mkHairline();
+    topSep.backgroundColor = sdvDynamicAuroraCardBorder();
     [topBar.contentView addSubview:topSep];
     [NSLayoutConstraint activateConstraints:@[
         [topSep.leadingAnchor constraintEqualToAnchor:topBar.contentView.leadingAnchor],
@@ -1231,7 +1237,7 @@ static void sdvSpawnDiscordSparkleBurst(UIView *hostView, CGPoint origin, CGFloa
     pinInsets(topBarRow, topBar.contentView, UIEdgeInsetsMake(0, 16, 0, 16));
 
     _scroll = [UIScrollView new];
-    _scroll.backgroundColor = kBgCanvas;
+    _scroll.backgroundColor = UIColor.clearColor;
     _scroll.alwaysBounceVertical = YES;
     _scroll.showsVerticalScrollIndicator = YES;
     _scroll.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1435,7 +1441,9 @@ static void sdvSpawnDiscordSparkleBurst(UIView *hostView, CGPoint origin, CGFloa
         NSInteger tid = b.tag;
         if (tid < 0 || tid >= (NSInteger)titles.count) continue;
         BOOL active = (tid == _tab);
-        b.backgroundColor = active ? kTintBlue : UIColor.clearColor;
+        b.backgroundColor = active ? rgba(0x4F46E5, 0.90) : UIColor.clearColor;
+        b.layer.borderWidth = active ? 0.75 : 0.0;
+        b.layer.borderColor = active ? [UIColor colorWithWhite:1.0 alpha:0.28].CGColor : UIColor.clearColor.CGColor;
         UIColor *fg = active ? UIColor.whiteColor : kInkPrimary;
         b.tintColor = active ? UIColor.whiteColor : iconTints[tid];
         [b setImage:sfIcon(icons[tid], 14.0, active ? UIImageSymbolWeightSemibold : UIImageSymbolWeightMedium) forState:UIControlStateNormal];

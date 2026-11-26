@@ -780,6 +780,8 @@ void sdv_ext_set_rumble(float leftMotor, float rightMotor) {
     [nc addObserver:self selector:@selector(onTextEnd) name:UITextViewTextDidEndEditingNotification object:nil];
     [nc addObserver:self selector:@selector(onAppResignActive) name:UIApplicationWillResignActiveNotification object:nil];
     [nc addObserver:self selector:@selector(onAppResignActive) name:UISceneWillDeactivateNotification object:nil];
+    [nc addObserver:self selector:@selector(onAppBecomeActive) name:UIApplicationDidBecomeActiveNotification object:nil];
+    [nc addObserver:self selector:@selector(onAppBecomeActive) name:UISceneDidActivateNotification object:nil];
 
     if (GCKeyboard.coalescedKeyboard) {
         sdvAttachKeyboardHandlers(GCKeyboard.coalescedKeyboard);
@@ -906,6 +908,23 @@ void sdv_ext_set_rumble(float leftMotor, float rightMotor) {
     gMouseButtonsLatchedMask = 0;
     gKbLatchedCount = 0;
     os_unfair_lock_unlock(&gExtLock);
+}
+
+-(void)onAppBecomeActive {
+    if (@available(iOS 14.0, *)) {
+        if (gRumbleQueue) {
+            dispatch_async(gRumbleQueue, ^{
+                sdvRumbleTeardownOnQueue();
+                gRumbleNeedsRestartL = YES;
+                gRumbleNeedsRestartR = YES;
+            });
+        }
+    }
+    if (!gGardenOpenCached && sdv_kb_is_active() == 0) {
+        os_unfair_lock_lock(&gExtLock);
+        gNativeTextEditingCount = 0;
+        os_unfair_lock_unlock(&gExtLock);
+    }
 }
 @end
 

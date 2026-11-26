@@ -639,6 +639,7 @@ static void sdvApplyAutoHideHomeIndicator(UIViewController *vc) {
 @interface SDVRamHudController : UIViewController
 @property(nonatomic, readonly) UIView *badgeView;
 -(void)stopMonitoring;
+-(void)setMonitoringPaused:(BOOL)paused;
 @end
 
 @implementation SDVRamHudController {
@@ -671,6 +672,15 @@ static void sdvApplyAutoHideHomeIndicator(UIViewController *vc) {
 -(void)stopMonitoring {
     [_link invalidate];
     _link = nil;
+}
+
+-(void)setMonitoringPaused:(BOOL)paused {
+    if (!_link) return;
+    if (!paused && _link.paused) {
+        _frames = 0;
+        _lastFpsStamp = CACurrentMediaTime();
+    }
+    _link.paused = paused;
 }
 
 -(void)viewDidLoad {
@@ -2385,6 +2395,7 @@ static UIImage *sdvLoadBootFrameworkImage(NSString *filename) {
 @property(nonatomic, assign) BOOL autoOpenedSetup;
 @property(nonatomic, assign) BOOL gameDataReadyCached;
 @property(nonatomic, strong) NSTimer *hapticTimer;
+@property(nonatomic, assign) UIBackgroundTaskIdentifier bgSaveTaskId;
 -(BOOL)isGardenOpen;
 -(void)attachToGameWindows;
 -(void)showBootLoadingOverlayIfNeeded;
@@ -2528,6 +2539,7 @@ static void sdvExtSetGardenOpen(BOOL open);
     self = [super init];
     if (self) {
         _attachedWindows = [NSHashTable weakObjectsHashTable];
+        _bgSaveTaskId = UIBackgroundTaskInvalid;
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(syncRamHudVisibility) name:kSDVRamHudToggleNotification object:nil];
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onHighRamWarning:) name:kSDVRamHighWarningNotification object:nil];
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onSceneOrAppNotification) name:UISceneDidActivateNotification object:nil];
@@ -2557,8 +2569,31 @@ static void sdvExtSetGardenOpen(BOOL open);
     self.hapticTimer = nil;
 }
 
+-(void)endBackgroundSaveGuardIfNeeded {
+    if (self.bgSaveTaskId != UIBackgroundTaskInvalid) {
+        UIBackgroundTaskIdentifier tid = self.bgSaveTaskId;
+        self.bgSaveTaskId = UIBackgroundTaskInvalid;
+        [UIApplication.sharedApplication endBackgroundTask:tid];
+    }
+}
+
 -(void)onAppDidEnterBackground {
     [self stopHapticTimer];
+    if (self.ramHudWindow && [self.ramHudWindow.rootViewController isKindOfClass:SDVRamHudController.class]) {
+        [(SDVRamHudController *)self.ramHudWindow.rootViewController setMonitoringPaused:YES];
+    }
+    // Protect any active end-of-day XML serialization or QuickSave write when user swipes Home!
+    if (self.bgSaveTaskId == UIBackgroundTaskInvalid) {
+        __weak typeof(self) weakSelf = self;
+        self.bgSaveTaskId = [UIApplication.sharedApplication beginBackgroundTaskWithName:@"GardenSaveFlushGuard" expirationHandler:^{
+            [weakSelf endBackgroundSaveGuardIfNeeded];
+        }];
+        if (self.bgSaveTaskId != UIBackgroundTaskInvalid) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(22 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [weakSelf endBackgroundSaveGuardIfNeeded];
+            });
+        }
+    }
 }
 
 -(void)onAudioModeChanged {
@@ -2634,6 +2669,10 @@ static void sdvExtSetGardenOpen(BOOL open);
 
 -(void)onSceneOrAppNotification {
     dispatch_async(dispatch_get_main_queue(), ^{
+        [self endBackgroundSaveGuardIfNeeded];
+        if (self.ramHudWindow && !self.ramHudWindow.hidden && [self.ramHudWindow.rootViewController isKindOfClass:SDVRamHudController.class]) {
+            [(SDVRamHudController *)self.ramHudWindow.rootViewController setMonitoringPaused:[self isGardenOpen]];
+        }
         sdvEnsureAudioSession("did-become-active");
         [self startHapticTimer];
         [self attachToGameWindows];
@@ -3686,6 +3725,11 @@ static void sdvBootParseSingleLine(const char *s, size_t len, BOOL *outMajor) {
     if (newStage.length) gBootLiveStage = newStage;
     if (newDetail.length) gBootLiveDetail = newDetail;
     os_unfair_lock_unlock(&gBootTelLock);
+}
+
+__attribute__((visibility("default")))
+int32_t sdv_is_boot_done(void) {
+    return gSdvBootDone;
 }
 
 __attribute__((visibility("default")))

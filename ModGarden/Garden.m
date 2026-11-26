@@ -686,29 +686,46 @@ static NSUInteger syncContentPackLocaleFallbacks(NSString *docsPath) {
                     [nameLow containsString:@"việt hóa"] || [nameLow containsString:@"vietnamese"] ||
                     [nameLow containsString:@"viethoa"]) continue;
 
-                // Check if content.json (or any included json inside the pack) uses {{Language}} token
+        // Fast pre-check: inspect content.json + non-asset JSONs BEFORE walking huge assets/ trees!
+                NSData *rootCj = [NSData dataWithContentsOfFile:join(packDir, @"content.json") options:NSDataReadingMappedIfSafe error:nil];
                 BOOL usesLanguageToken = NO;
-                NSMutableArray<NSString *> *packFiles = [NSMutableArray array];
-                NSDirectoryEnumerator *fe = [fm() enumeratorAtPath:packDir];
-                NSString *fRel = nil;
-                while ((fRel = [fe nextObject])) {
-                    NSString *full = join(packDir, fRel);
-                    BOOL isD = NO;
-                    if (![fm() fileExistsAtPath:full isDirectory:&isD] || isD) continue;
-                    [packFiles addObject:fRel];
-                    if (!usesLanguageToken && [fRel.pathExtension.lowercaseString isEqualToString:@"json"]) {
-                        NSString *topSub = fRel.pathComponents.firstObject.lowercaseString;
-                        if ([topSub isEqualToString:@"i18n"]) continue;
-                        NSData *jd = [NSData dataWithContentsOfFile:full options:NSDataReadingMappedIfSafe error:nil];
+                if (rootCj.length > 0 && rootCj.length <= 2 * 1024 * 1024) {
+                    NSString *cjs = [[NSString alloc] initWithData:rootCj encoding:NSUTF8StringEncoding];
+                    if (cjs && [cjs rangeOfString:@"{{language}}" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                        usesLanguageToken = YES;
+                    }
+                }
+                if (!usesLanguageToken) {
+                    NSDirectoryEnumerator *je = [fm() enumeratorAtPath:packDir];
+                    for (NSString *jRel in je) {
+                        NSString *ft = je.fileAttributes.fileType;
+                        NSString *topSub = jRel.pathComponents.firstObject.lowercaseString;
+                        if ([ft isEqualToString:NSFileTypeDirectory] && ([topSub isEqualToString:@"assets"] || [topSub isEqualToString:@"i18n"])) {
+                            [je skipDescendants];
+                            continue;
+                        }
+                        if (![ft isEqualToString:NSFileTypeRegular] || ![jRel.pathExtension.lowercaseString isEqualToString:@"json"]) continue;
+                        if ([jRel.lowercaseString isEqualToString:@"content.json"] || [jRel.lowercaseString isEqualToString:@"manifest.json"]) continue;
+                        NSData *jd = [NSData dataWithContentsOfFile:join(packDir, jRel) options:NSDataReadingMappedIfSafe error:nil];
                         if (jd.length > 0 && jd.length <= 1024 * 1024) {
                             NSString *js = [[NSString alloc] initWithData:jd encoding:NSUTF8StringEncoding];
                             if (js && [js rangeOfString:@"{{language}}" options:NSCaseInsensitiveSearch].location != NSNotFound) {
                                 usesLanguageToken = YES;
+                                break;
                             }
                         }
                     }
                 }
                 if (!usesLanguageToken) continue;
+
+                NSMutableArray<NSString *> *packFiles = [NSMutableArray array];
+                NSDirectoryEnumerator *fe = [fm() enumeratorAtPath:packDir];
+                NSString *fRel = nil;
+                while ((fRel = [fe nextObject])) {
+                    if ([fe.fileAttributes.fileType isEqualToString:NSFileTypeRegular]) {
+                        [packFiles addObject:fRel];
+                    }
+                }
 
                 // Create 0-byte APFS copy-on-write clones (*.en.<ext> -> *.vi.<ext>, *_en.<ext> -> *_vi.<ext>, en/ -> vi/)
                 // Uses copyItemAtPath (APFS clonefile, st_nlink=1) instead of linkItemAtPath (hardlink st_nlink=2 breaks iOS AFC).
@@ -903,6 +920,129 @@ static NSArray *files(NSString *p) {
     NSMutableArray *a=[NSMutableArray array]; NSDirectoryEnumerator *en=[fm() enumeratorAtPath:p];
     for(NSString *r in en){ NSString *type=en.fileAttributes.fileType; if([type isEqual:NSFileTypeRegular]) [a addObject:r]; }
     return [a sortedArrayUsingSelector:@selector(compare:)];
+}
+
+// Fast manifest-only scanner for Mods/ (skips assets/, i18n/, data/, SaveSlots/ subtrees -> 20x-50x faster with SVE/Ridgeside!)
+static NSArray<NSString *> *modManifestFiles(NSString *modsDir) {
+    if (!modsDir.length || !dir(modsDir)) return @[];
+    static NSSet<NSString *> *skipSubdirs = nil;
+    static dispatch_once_t onceSkip;
+    dispatch_once(&onceSkip, ^{
+        skipSubdirs = [NSSet setWithArray:@[
+            @"assets", @"i18n", @"data", @".git", @"__macosx", @"saveslots", @"screenshots", @"cache"
+        ]];
+    });
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    NSDirectoryEnumerator *en = [fm() enumeratorAtPath:modsDir];
+    for (NSString *r in en) {
+        NSArray<NSString *> *parts = r.pathComponents;
+        NSString *ft = en.fileAttributes.fileType;
+        if ([ft isEqualToString:NSFileTypeDirectory]) {
+            if (parts.count >= 4 || (parts.count >= 2 && [skipSubdirs containsObject:parts.lastObject.lowercaseString])) {
+                [en skipDescendants];
+            }
+            continue;
+        }
+        if ([ft isEqualToString:NSFileTypeRegular] && [r.lastPathComponent.lowercaseString isEqualToString:@"manifest.json"]) {
+            [out addObject:r];
+        }
+    }
+    return [out sortedArrayUsingSelector:@selector(compare:)];
+}
+
+static BOOL sdvSafeCaseRenameInDir(NSString *dirPath, NSString *oldName, NSString *newName) {
+    if (!dirPath.length || !oldName.length || !newName.length) return NO;
+    if ([oldName isEqualToString:newName]) return NO;
+    if ([oldName caseInsensitiveCompare:newName] != NSOrderedSame) return NO;
+    NSString *src = join(dirPath, oldName);
+    NSString *dst = join(dirPath, newName);
+    if (![fm() fileExistsAtPath:src]) return NO;
+    // On APFS Case-Sensitive, dst will not exist if only casing differs (unless both files exist simultaneously)
+    if ([fm() fileExistsAtPath:dst]) {
+        struct stat stA, stB;
+        if (lstat(src.fileSystemRepresentation, &stA) == 0 && lstat(dst.fileSystemRepresentation, &stB) == 0 && stA.st_ino != stB.st_ino) {
+            return NO; // Distinct file already exists with exact target case
+        }
+    }
+    NSString *tmp = join(dirPath, [NSString stringWithFormat:@".garden_case_%@", NSUUID.UUID.UUIDString]);
+    if (![fm() moveItemAtPath:src toPath:tmp error:nil]) return NO;
+    if (![fm() moveItemAtPath:tmp toPath:dst error:nil]) {
+        [fm() moveItemAtPath:tmp toPath:src error:nil];
+        return NO;
+    }
+    return YES;
+}
+
+// Auto-heals Windows/macOS case mismatches inside a mod root or staging directory (Manifest.json, Content.json, Config.json, I18N/*.JSON, EntryDll)
+static NSDictionary *sdvHealModTreeCaseSensitivity(NSString *treeRoot) {
+    NSUInteger fixedJson = 0, fixedDll = 0;
+    if (!treeRoot.length || !dir(treeRoot)) return @{@"fixedJson": @0, @"fixedDll": @0};
+
+    // Pass 1: Normalize manifest.json / content.json / config.json & i18n/ folder casing
+    NSMutableArray<NSString *> *dirsToCheck = [NSMutableArray arrayWithObject:treeRoot];
+    NSDirectoryEnumerator *en = [fm() enumeratorAtPath:treeRoot];
+    for (NSString *rel in en) {
+        if (![en.fileAttributes.fileType isEqualToString:NSFileTypeDirectory]) continue;
+        NSArray<NSString *> *parts = rel.pathComponents;
+        NSString *leafLow = parts.lastObject.lowercaseString;
+        if (parts.count > 4 || [leafLow isEqualToString:@"assets"] || [leafLow isEqualToString:@".git"] || [leafLow isEqualToString:@"__macosx"]) {
+            [en skipDescendants];
+            continue;
+        }
+        [dirsToCheck addObject:join(treeRoot, rel)];
+    }
+
+    for (NSString *dPath in dirsToCheck) { @autoreleasepool {
+        NSArray<NSString *> *entries = [fm() contentsOfDirectoryAtPath:dPath error:nil] ?: @[];
+        for (NSString *fn in entries) {
+            NSString *lo = fn.lowercaseString;
+            if ([lo isEqualToString:@"manifest.json"] && ![fn isEqualToString:@"manifest.json"]) {
+                if (sdvSafeCaseRenameInDir(dPath, fn, @"manifest.json")) fixedJson++;
+            } else if ([lo isEqualToString:@"content.json"] && ![fn isEqualToString:@"content.json"]) {
+                if (sdvSafeCaseRenameInDir(dPath, fn, @"content.json")) fixedJson++;
+            } else if ([lo isEqualToString:@"config.json"] && ![fn isEqualToString:@"config.json"]) {
+                if (sdvSafeCaseRenameInDir(dPath, fn, @"config.json")) fixedJson++;
+            } else if ([lo isEqualToString:@"i18n"] && ![fn isEqualToString:@"i18n"] && dir(join(dPath, fn))) {
+                if (sdvSafeCaseRenameInDir(dPath, fn, @"i18n")) fixedJson++;
+            }
+        }
+        NSString *i18nDir = join(dPath, @"i18n");
+        if (dir(i18nDir)) {
+            for (NSString *tf in ([fm() contentsOfDirectoryAtPath:i18nDir error:nil] ?: @[])) {
+                if ([tf.pathExtension.lowercaseString isEqualToString:@"json"] && ![tf.pathExtension isEqualToString:@"json"]) {
+                    NSString *target = [[tf stringByDeletingPathExtension] stringByAppendingPathExtension:@"json"];
+                    if (sdvSafeCaseRenameInDir(i18nDir, tf, target)) fixedJson++;
+                }
+            }
+        }
+        // Pass 2: Match EntryDll in manifest.json case-insensitively against .dll files on disk
+        NSString *mfPath = join(dPath, @"manifest.json");
+        if ([fm() fileExistsAtPath:mfPath] && !dir(mfPath)) {
+            @try {
+                id parsed = jsonAt(mfPath);
+                if ([parsed isKindOfClass:NSDictionary.class]) {
+                    NSString *entryDll = nil;
+                    for (id k in [(NSDictionary *)parsed allKeys]) {
+                        if ([k isKindOfClass:NSString.class] && [k caseInsensitiveCompare:@"EntryDll"] == NSOrderedSame && [parsed[k] isKindOfClass:NSString.class]) {
+                            entryDll = parsed[k];
+                            break;
+                        }
+                    }
+                    if (entryDll.length && ![entryDll containsString:@"/"] && ![entryDll containsString:@"\\"]) {
+                        if (![fm() fileExistsAtPath:join(dPath, entryDll)]) {
+                            for (NSString *cand in ([fm() contentsOfDirectoryAtPath:dPath error:nil] ?: @[])) {
+                                if ([cand caseInsensitiveCompare:entryDll] == NSOrderedSame && ![cand isEqualToString:entryDll]) {
+                                    if (sdvSafeCaseRenameInDir(dPath, cand, entryDll)) fixedDll++;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            } @catch (NSException *ignored) { }
+        }
+    }}
+    return @{@"fixedJson": @(fixedJson), @"fixedDll": @(fixedDll)};
 }
 
 static BOOL isJunkArchiveEntry(NSString *r) {
@@ -1808,8 +1948,7 @@ static NSDictionary *installed(NSString *root) {
     NSMutableDictionary *d = [NSMutableDictionary dictionary];
     NSString *mods = gamePath(root, @"Mods");
     if (!dir(mods)) return d;
-    for (NSString *r in files(mods)) {
-        if (![r.lastPathComponent.lowercaseString isEqual:@"manifest.json"]) continue;
+    for (NSString *r in modManifestFiles(mods)) {
         if (isHiddenRelPath(r)) continue;
         @try {
             NSDictionary *m = manifest(inside(mods, r));
@@ -1828,8 +1967,7 @@ static NSDictionary<NSString *, NSString *> *disabledModsById(NSString *root) {
     NSMutableDictionary *d = [NSMutableDictionary dictionary];
     NSString *mods = gamePath(root, @"Mods");
     if (!dir(mods)) return d;
-    for (NSString *r in files(mods)) {
-        if (![r.lastPathComponent.lowercaseString isEqual:@"manifest.json"]) continue;
+    for (NSString *r in modManifestFiles(mods)) {
         NSString *top = r.pathComponents.firstObject;
         if (![top hasPrefix:@"."]) continue;
         @try {
@@ -1846,14 +1984,16 @@ static NSArray<NSDictionary *> *modCatalog(NSString *root) {
     NSString *mods = gamePath(root, @"Mods");
     if (!dir(mods)) return @[];
     NSMutableDictionary *byTopFolder = [NSMutableDictionary dictionary];
-    for (NSString *r in files(mods)) {
-        if (![r.lastPathComponent.lowercaseString isEqual:@"manifest.json"]) continue;
+    for (NSString *r in modManifestFiles(mods)) {
         NSArray *parts = r.pathComponents;
         if (parts.count < 2) continue;
         NSString *top = parts.firstObject;
         BOOL enabled = ![top hasPrefix:@"."];
         NSString *cleanTop = enabled ? top : [top substringFromIndex:1];
         if (!cleanTop.length) continue;
+        NSString *packDir = inside(mods, r).stringByDeletingLastPathComponent;
+        NSString *cfgPath = join(packDir, @"config.json");
+        BOOL hasCfg = ([fm() fileExistsAtPath:cfgPath] && !dir(cfgPath));
         @try {
             NSDictionary *m = manifest(inside(mods, r));
             NSString *name = field(m, @"Name");
@@ -1873,15 +2013,25 @@ static NSArray<NSDictionary *> *modCatalog(NSString *root) {
                     @"author": author,
                     @"enabled": @(enabled),
                     @"protected": @(isSystem),
-                    @"packCount": @(1)
+                    @"packCount": @(1),
+                    @"hasConfig": @(hasCfg),
+                    @"configPath": hasCfg ? cfgPath : @""
                 } mutableCopy];
                 byTopFolder[top] = entry;
             } else {
                 entry[@"packCount"] = @([entry[@"packCount"] integerValue] + 1);
+                if (hasCfg && ![entry[@"hasConfig"] boolValue]) {
+                    entry[@"hasConfig"] = @YES;
+                    entry[@"configPath"] = cfgPath;
+                }
                 if (parts.count == 2) {
                     entry[@"name"] = name.length ? name : entry[@"name"];
                     entry[@"version"] = ver.length ? ver : entry[@"version"];
                     entry[@"author"] = author.length ? author : entry[@"author"];
+                    if (hasCfg) {
+                        entry[@"hasConfig"] = @YES;
+                        entry[@"configPath"] = cfgPath;
+                    }
                 }
             }
         } @catch (NSException *ex) {
@@ -2132,8 +2282,7 @@ static NSDictionary<NSString *, NSSet<NSString *> *> *sdvCollectInstalledCpLoadT
     if (!root.length || [root.lastPathComponent isEqual:@"Content"]) return res;
     NSString *mods = gamePath(root, @"Mods");
     if (!dir(mods)) return res;
-    for (NSString *r in files(mods)) { @autoreleasepool {
-        if (![r.lastPathComponent.lowercaseString isEqual:@"manifest.json"]) continue;
+    for (NSString *r in modManifestFiles(mods)) { @autoreleasepool {
         if (isHiddenRelPath(r)) continue;
         @try {
             NSDictionary *m = manifest(inside(mods, r));
@@ -2191,8 +2340,7 @@ static NSArray<NSDictionary *> *sdvDiagnoseMods(NSString *root) {
     NSDictionary<NSString *, NSString *> *disabledMap = disabledModsById(root);
     NSSet<NSString *> *sysIds = [NSSet setWithArray:@[@"com.deadakj.sdviostouchcontrols", @"gardenlauncher.mobilecontrols"]];
 
-    for (NSString *r in files(mods)) { @autoreleasepool {
-        if (![r.lastPathComponent.lowercaseString isEqual:@"manifest.json"]) continue;
+    for (NSString *r in modManifestFiles(mods)) { @autoreleasepool {
         if (isHiddenRelPath(r)) continue;
         NSString *top = r.pathComponents.firstObject;
         if (top.length) [topWithManifest addObject:top];
@@ -2483,6 +2631,29 @@ static NSArray<NSDictionary *> *sdvDiagnoseMods(NSString *root) {
         }
     } @catch (NSException *ex) { }
 
+    // 7. Optional OTA Live Compatibility Rules (.garden/extra_mod_rules.json)
+    NSString *extraRulesPath = join(sdvHiddenGardenDir(root), @"extra_mod_rules.json");
+    if ([fm() fileExistsAtPath:extraRulesPath] && !dir(extraRulesPath)) {
+        @try {
+            id rulesObj = jsonAt(extraRulesPath);
+            NSArray *rulesArr = [rulesObj isKindOfClass:NSArray.class] ? (NSArray *)rulesObj
+                : ([rulesObj isKindOfClass:NSDictionary.class] && [rulesObj[@"rules"] isKindOfClass:NSArray.class] ? rulesObj[@"rules"] : nil);
+            for (NSDictionary *rl in rulesArr) {
+                if (![rl isKindOfClass:NSDictionary.class]) continue;
+                NSString *ruid = [field(rl, @"uid") lowercaseString];
+                if (!ruid.length) ruid = [field(rl, @"uniqueID") lowercaseString];
+                if (!ruid.length || !activeById[ruid]) continue;
+                NSString *sev = [field(rl, @"severity").lowercaseString isEqualToString:@"error"] ? @"error" : @"warn";
+                NSString *rTitle = field(rl, @"title");
+                NSString *rDetail = field(rl, @"detail");
+                if (!rTitle.length) rTitle = [NSString stringWithFormat:@"Cảnh báo tương thích: %@", activeById[ruid][@"name"] ?: ruid];
+                if (rDetail.length) {
+                    addIssue([@"otarule:" stringByAppendingString:ruid], sev, rTitle, rDetail, nil);
+                }
+            }
+        } @catch (NSException *ignored) { }
+    }
+
     // Sort errors first, then warnings
     [issues sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
         BOOL ea = [a[@"severity"] isEqualToString:@"error"];
@@ -2493,8 +2664,93 @@ static NSArray<NSDictionary *> *sdvDiagnoseMods(NSString *root) {
     return issues;
 }
 
+// Canonicalizes a relative path under Content/ (e.g. "portraits/abigail.xnb" -> "Portraits/Abigail.xnb") against existing StardewValley/Content on APFS
+static NSString *sdvCanonicalizeContentSubpath(NSString *root, NSString *subRel) {
+    if (!root.length || !subRel.length) return subRel;
+    NSString *contentRoot = nil;
+    @try { contentRoot = gamePath(root, @"Content"); } @catch (NSException *ex) { return subRel; }
+    if (!contentRoot.length || !dir(contentRoot)) return subRel;
+
+    NSArray<NSString *> *parts = [clean(subRel) componentsSeparatedByString:@"/"];
+    NSMutableArray<NSString *> *resolved = [NSMutableArray arrayWithCapacity:parts.count];
+    NSString *curDisk = contentRoot;
+    BOOL walkValid = YES;
+    for (NSUInteger i = 0; i < parts.count; i++) {
+        NSString *seg = parts[i];
+        if (!walkValid || !dir(curDisk)) {
+            [resolved addObject:seg];
+            continue;
+        }
+        NSString *exactMatch = nil;
+        NSString *ciMatch = nil;
+        for (NSString *cand in ([fm() contentsOfDirectoryAtPath:curDisk error:nil] ?: @[])) {
+            if ([cand isEqualToString:seg]) { exactMatch = cand; break; }
+            if (!ciMatch && [cand caseInsensitiveCompare:seg] == NSOrderedSame) ciMatch = cand;
+        }
+        NSString *chosen = exactMatch ?: (ciMatch ?: seg);
+        [resolved addObject:chosen];
+        NSString *nextDisk = join(curDisk, chosen);
+        if (!exactMatch && !ciMatch) walkValid = NO;
+        curDisk = nextDisk;
+    }
+    return [resolved componentsJoinedByString:@"/"];
+}
+
+// 1-tap APFS Case-Sensitivity Healer across installed Mods/ and StardewValley/Content/
+static NSDictionary *sdvHealInstalledCaseSensitivity(NSString *root) {
+    if (!root.length) return @{@"fixedJson": @0, @"fixedDll": @0, @"fixedContent": @0};
+    NSString *mods = [root.lastPathComponent isEqual:@"Content"] ? nil : gamePath(root, @"Mods");
+    NSDictionary *modRes = (mods.length && dir(mods)) ? sdvHealModTreeCaseSensitivity(mods) : @{@"fixedJson": @0, @"fixedDll": @0};
+
+    NSUInteger fixedContent = 0;
+    NSString *contentDir = nil;
+    @try { contentDir = gamePath(root, @"Content"); } @catch (NSException *ex) { contentDir = nil; }
+    if (contentDir.length && dir(contentDir)) {
+        NSArray<NSString *> *canonicalTopDirs = @[
+            @"Animals", @"Buildings", @"Characters", @"Data", @"Effects", @"Fonts",
+            @"LooseSprites", @"Maps", @"Minigames", @"Portraits", @"Strings",
+            @"TerrainFeatures", @"TileSheets", @"VolcanoLayouts", @"XACT"
+        ];
+        NSDictionary<NSString *, NSString *> *canonByLow = ({
+            NSMutableDictionary *d = [NSMutableDictionary dictionary];
+            for (NSString *c in canonicalTopDirs) d[c.lowercaseString] = c;
+            d;
+        });
+        for (NSString *entry in ([fm() contentsOfDirectoryAtPath:contentDir error:nil] ?: @[])) {
+            NSString *canon = canonByLow[entry.lowercaseString];
+            if (!canon || [entry isEqualToString:canon]) continue;
+            NSString *wrongDir = join(contentDir, entry);
+            NSString *rightDir = join(contentDir, canon);
+            if (!dir(wrongDir)) continue;
+            if (![fm() fileExistsAtPath:rightDir]) {
+                if (sdvSafeCaseRenameInDir(contentDir, entry, canon)) fixedContent++;
+            } else if (dir(rightDir)) {
+                // Merge mis-cased files from wrongDir into canonical rightDir (matching existing file casing inside rightDir)
+                for (NSString *subRel in files(wrongDir)) {
+                    NSString *canonSub = sdvCanonicalizeContentSubpath(root, join(canon, subRel));
+                    NSString *srcF = join(wrongDir, subRel);
+                    NSString *dstF = join(contentDir, canonSub);
+                    NSData *d = [NSData dataWithContentsOfFile:srcF options:NSDataReadingMappedIfSafe error:nil];
+                    if (d.length) {
+                        writeFile(d, dstF);
+                        fixedContent++;
+                    }
+                }
+                sdvRemoveItemQuiet(wrongDir);
+            }
+        }
+    }
+    return @{
+        @"fixedJson": modRes[@"fixedJson"] ?: @0,
+        @"fixedDll": modRes[@"fixedDll"] ?: @0,
+        @"fixedContent": @(fixedContent)
+    };
+}
+
 // Plan installing ONE OR MULTIPLE staged packages inside `stage` (each package unpacked into `stage/pkg_<i>/...`)
 static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences, NSDictionary *translations, NSArray<NSString *> *stagedFileNames) {
+    // Auto-heal Windows/macOS case mismatches in staging BEFORE scanning manifests, DLLs & i18n!
+    sdvHealModTreeCaseSensitivity(stage);
     NSArray *items = files(stage);
     NSDictionary *library = installed(root);
     NSDictionary<NSString *, NSString *> *disabledMap = disabledModsById(root);
@@ -2532,6 +2788,7 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
 
     // Pass 1: Discover all SMAPI mods (manifest.json) across all staged packages
     NSMutableArray<NSString *> *badManifests = [NSMutableArray array];
+    NSMutableArray<NSString *> *skippedBases = [NSMutableArray array];
     for (NSString *r in items) {
         if (![r.lastPathComponent.lowercaseString isEqual:@"manifest.json"]) continue;
         NSDictionary *m = nil;
@@ -2545,7 +2802,8 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
         NSString *key = uid.lowercaseString;
         NSString *base = parent(r);
         if ([ids containsObject:key]) {
-            // User selected a duplicate copy of the same mod in one batch -> skip duplicate gracefully
+            // User selected a duplicate copy / variant of the same mod -> claim its base so variant files never leak into Pass 3b!
+            if (base.length) [skippedBases addObject:base];
             continue;
         }
         [ids addObject:key];
@@ -2688,6 +2946,11 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
             found = YES;
             break;
         }
+        if (!found) {
+            for (NSString *sb in skippedBases) {
+                if (below(r, sb) != nil) { found = YES; break; }
+            }
+        }
         if (!found) [remaining addObject:r];
     }}
 
@@ -2718,8 +2981,9 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
                 if ([fnLow hasPrefix:@"mobileatlas"]) {
                     addMobileWarn([NSString stringWithFormat:@"Chứa tệp riêng bản Mobile (%@) — có thể không tương thích giao diện PC 1.6.15.", r.lastPathComponent]);
                 }
-                add(join(@"Content", subRel), r);
-                NSString *topSub = parts[contentIdx + 1];
+                NSString *canonSubRel = sdvCanonicalizeContentSubpath(root, subRel);
+                add(join(@"Content", canonSubRel), r);
+                NSString *topSub = canonSubRel.pathComponents.firstObject ?: parts[contentIdx + 1];
                 NSString *lbl = [NSString stringWithFormat:@"Content/%@ (Việt hóa / Tài nguyên)", topSub];
                 if (![addedExtraNames containsObject:lbl]) { [addedExtraNames addObject:lbl]; [names addObject:lbl]; }
                 continue;
@@ -2815,8 +3079,9 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
                 }
             }
             if (knownSub.length) {
-                add(join(@"Content", knownSub), r);
-                NSString *lbl = [NSString stringWithFormat:@"XNB → Content/%@", knownSub];
+                NSString *canonKnown = sdvCanonicalizeContentSubpath(root, knownSub);
+                add(join(@"Content", canonKnown), r);
+                NSString *lbl = [NSString stringWithFormat:@"XNB → Content/%@", canonKnown];
                 if (![addedExtraNames containsObject:lbl]) { [addedExtraNames addObject:lbl]; [names addObject:lbl]; }
                 continue;
             }
@@ -2887,8 +3152,8 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
 // ============================================================================
 // GARDEN LAUNCHER UPDATE CHECKER + OTA HOT-PATCH ENGINE (0% IPA Re-Signing!)
 // ============================================================================
-#define kSDVAppVersion @"1.0.8"
-#define kSDVAppBuild   10800
+#define kSDVAppVersion @"1.1.0"
+#define kSDVAppBuild   11000
 static NSString *const kSDVUpdateNotification = @"SDVLauncherUpdateDidChangeNotification";
 static NSString *const kSDVDismissedUpdatePrefKey = @"sdv_dismissed_update_id";
 static NSString *const kSDVDefaultDiscordURL = @"https://discord.gg/tuTKv9xQ2Z";
@@ -3057,8 +3322,142 @@ static void sdvClearHotPatchStamps(NSString *docsPath) {
     if (!docsPath.length) return;
     NSString *touchStamp = join(join(join(docsPath, @"Mods"), @"SDViOSTouchControls"), @".embedded_sha256");
     NSString *smapiStamp = join(join(sdvHiddenGameDir(docsPath), @"smapi-internal"), @".garden_smapi_v1");
+    NSString *patchStampsDir = join(sdvHiddenGardenDir(docsPath), @"patch_stamps");
     sdvRemoveItemQuiet(touchStamp);
     sdvRemoveItemQuiet(smapiStamp);
+    sdvRemoveItemQuiet(patchStampsDir);
+}
+
+// ============================================================================
+// MOD PROFILES, SMART HOTKEY SCANNER & CO-OP LAN MODPACK HASH (v1.1.0)
+// ============================================================================
+static NSString *sdvModProfilesFilePath(NSString *root) {
+    return join(sdvHiddenGardenDir(root), @"mod_profiles.json");
+}
+
+static NSArray<NSDictionary *> *sdvListSavedModProfiles(NSString *root) {
+    NSString *p = sdvModProfilesFilePath(root);
+    if (!p.length || ![fm() fileExistsAtPath:p] || dir(p)) return @[];
+    @try {
+        id parsed = jsonAt(p);
+        if ([parsed isKindOfClass:NSArray.class]) return (NSArray *)parsed;
+    } @catch (NSException *ex) { }
+    return @[];
+}
+
+static void sdvSaveModProfileNamed(NSString *root, NSString *profileName) {
+    NSString *trim = [profileName stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (!trim.length) fail(@"Tên hồ sơ không được để trống.");
+    NSArray<NSDictionary *> *cat = modCatalog(root);
+    NSMutableArray<NSString *> *enabledClean = [NSMutableArray array];
+    for (NSDictionary *m in cat) {
+        if ([m[@"protected"] boolValue]) continue;
+        if ([m[@"enabled"] boolValue] && [m[@"cleanFolder"] length]) {
+            [enabledClean addObject:m[@"cleanFolder"]];
+        }
+    }
+    NSMutableArray<NSDictionary *> *all = [sdvListSavedModProfiles(root) mutableCopy];
+    NSInteger replaceIdx = NSNotFound;
+    for (NSUInteger i = 0; i < all.count; i++) {
+        if ([all[i][@"name"] caseInsensitiveCompare:trim] == NSOrderedSame) { replaceIdx = (NSInteger)i; break; }
+    }
+    NSDictionary *rec = @{
+        @"name": trim,
+        @"enabledCleanFolders": enabledClean,
+        @"count": @(enabledClean.count),
+        @"savedAt": @((long)time(NULL))
+    };
+    if (replaceIdx != NSNotFound) all[(NSUInteger)replaceIdx] = rec;
+    else [all addObject:rec];
+    NSData *out = [NSJSONSerialization dataWithJSONObject:all options:NSJSONWritingPrettyPrinted error:nil];
+    if (out.length) writeFile(out, sdvModProfilesFilePath(root));
+}
+
+static void sdvDeleteModProfileNamed(NSString *root, NSString *profileName) {
+    NSMutableArray<NSDictionary *> *all = [sdvListSavedModProfiles(root) mutableCopy];
+    for (NSInteger i = (NSInteger)all.count - 1; i >= 0; i--) {
+        if ([all[(NSUInteger)i][@"name"] caseInsensitiveCompare:profileName] == NSOrderedSame) {
+            [all removeObjectAtIndex:(NSUInteger)i];
+        }
+    }
+    NSData *out = [NSJSONSerialization dataWithJSONObject:all options:NSJSONWritingPrettyPrinted error:nil];
+    if (out.length) writeFile(out, sdvModProfilesFilePath(root));
+}
+
+// mode: @"all_on", @"safe_mode" (only SDViOSTouchControls + SDVMobileControls), or @"profile:<name>"
+static NSUInteger sdvApplyModProfileMode(NSString *root, NSString *mode) {
+    NSArray<NSDictionary *> *cat = modCatalog(root);
+    NSSet<NSString *> *targetOnClean = nil;
+    if ([mode hasPrefix:@"profile:"]) {
+        NSString *pName = [mode substringFromIndex:8];
+        for (NSDictionary *pr in sdvListSavedModProfiles(root)) {
+            if ([pr[@"name"] caseInsensitiveCompare:pName] == NSOrderedSame && [pr[@"enabledCleanFolders"] isKindOfClass:NSArray.class]) {
+                NSMutableSet *s = [NSMutableSet set];
+                for (NSString *cf in pr[@"enabledCleanFolders"]) [s addObject:cf.lowercaseString];
+                targetOnClean = s;
+                break;
+            }
+        }
+        if (!targetOnClean) fail(@"Không tìm thấy hồ sơ Mod đã lưu.");
+    }
+
+    NSUInteger toggled = 0;
+    for (NSDictionary *m in cat) {
+        if ([m[@"protected"] boolValue]) continue;
+        NSString *cleanLow = [m[@"cleanFolder"] lowercaseString];
+        BOOL curOn = [m[@"enabled"] boolValue];
+        BOOL wantOn = curOn;
+        if ([mode isEqualToString:@"all_on"]) {
+            wantOn = YES;
+        } else if ([mode isEqualToString:@"safe_mode"]) {
+            wantOn = ([cleanLow isEqualToString:@"sdvmobilecontrols"]);
+        } else if (targetOnClean) {
+            wantOn = [targetOnClean containsObject:cleanLow];
+        }
+        if (curOn != wantOn) {
+            toggleModEnabled(root, m[@"topFolder"]);
+            toggled++;
+        }
+    }
+    return toggled;
+}
+
+static NSDictionary *sdvComputeCoopModpackInfo(NSString *root) {
+    NSArray<NSDictionary *> *cat = modCatalog(root);
+    NSSet<NSString *> *localOnly = [NSSet setWithArray:@[
+        @"com.deadakj.sdviostouchcontrols", @"gardenlauncher.mobilecontrols",
+        @"spacechase0.genericmodconfigmenu"
+    ]];
+    NSMutableArray<NSString *> *sigItems = [NSMutableArray array];
+    NSMutableArray<NSString *> *humanLines = [NSMutableArray array];
+    for (NSDictionary *m in cat) {
+        if (![m[@"enabled"] boolValue]) continue;
+        NSString *uid = [m[@"uniqueID"] isKindOfClass:NSString.class] ? m[@"uniqueID"] : @"";
+        NSString *uidLow = uid.lowercaseString;
+        if (!uidLow.length || [localOnly containsObject:uidLow]) continue;
+        NSString *ver = m[@"version"] ?: @"1.0";
+        [sigItems addObject:[NSString stringWithFormat:@"%@@%@", uidLow, ver.lowercaseString]];
+        [humanLines addObject:[NSString stringWithFormat:@"• %@ (v%@)", m[@"name"] ?: uid, ver]];
+    }
+    [sigItems sortUsingSelector:@selector(compare:)];
+    [humanLines sortUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
+    NSString *joined = sigItems.count ? [sigItems componentsJoinedByString:@"|"] : @"vanilla-1.6.15";
+    NSString *fullSha = [hashData([joined dataUsingEncoding:NSUTF8StringEncoding]) uppercaseString];
+    NSString *code = sigItems.count
+        ? [NSString stringWithFormat:@"#COOP-%@", [fullSha substringToIndex:6]]
+        : @"#COOP-VANILLA";
+    NSMutableString *copyText = [NSMutableString stringWithFormat:@"Mã đồng bộ Co-op: %@ (Stardew 1.6.15 · %lu Mod active)", code, (unsigned long)sigItems.count];
+    if (humanLines.count) {
+        [copyText appendString:@"\n"];
+        NSUInteger lim = MIN((NSUInteger)25, humanLines.count);
+        for (NSUInteger i = 0; i < lim; i++) [copyText appendFormat:@"%@\n", humanLines[i]];
+        if (humanLines.count > lim) [copyText appendFormat:@"… (+%lu mod khác)", (unsigned long)(humanLines.count - lim)];
+    }
+    return @{
+        @"code": code,
+        @"count": @(sigItems.count),
+        @"copyText": copyText
+    };
 }
 
 // Removes non-bundled Hot-Patch extra files (e.g. .garden/extra_mod_rules.json) before retiring or replacing a Hot-Patch payload

@@ -1393,8 +1393,8 @@ namespace SDVMobileControls
             if (!ReferenceEquals(cur, _lastKbSubscriber))
             {
                 _lastKbSubscriber = cur;
-                // On CharacterCustomization in touch mode, wait for explicit tap on Name/Farm/Favorite box (or KEY button);
-                // when a physical gamepad is active and snapped onto a TextBox, open native iOS keyboard on A-select!
+                // On CharacterCustomization or AnimalQueryMenu in touch mode, wait for explicit tap on the TextBox (or KEY/Rename button);
+                // Vanilla AnimalQueryMenu constructor sets Subscriber = textBox (with Selected = false), which otherwise pops up rename KB on every cow/chicken inspect!
                 if (topMenu is CharacterCustomization ccMenu)
                 {
                     bool gpSnappedBox = ModEntry.ExternalInput != null && ModEntry.ExternalInput.IsPhysicalGamepadActive &&
@@ -1403,6 +1403,12 @@ namespace SDVMobileControls
                          ccMenu.currentlySnappedComponent == ccMenu.farmnameBoxCC ||
                          ccMenu.currentlySnappedComponent == ccMenu.favThingBoxCC);
                     if (!gpSnappedBox)
+                        return;
+                }
+                else if (topMenu is AnimalQueryMenu)
+                {
+                    bool gpActive = ModEntry.ExternalInput != null && ModEntry.ExternalInput.IsPhysicalGamepadActive;
+                    if (!gpActive && !(cur is TextBox aqmTb && aqmTb.Selected))
                         return;
                 }
                 if ((nowSec - _lastAutoKbSec) >= 0.45)
@@ -1798,6 +1804,9 @@ namespace SDVMobileControls
             if (menu == null) return false;
             if (menu is DialogueBox || menu is LetterViewerMenu || menu is BobberBar || menu is TitleMenu || menu is EmoteMenu)
                 return false;
+            // Never show ESC during end-of-day saving/shipping, multiplayer ready checks, or compulsory naming dialogs
+            if (menu is SaveGameMenu || menu is ShippingMenu || menu is ReadyCheckDialog || menu is NamingMenu)
+                return false;
             // Never show ESC over a Level 5/10 profession chooser (prevents accidentally skipping professions!)
             if (menu is LevelUpMenu lum && lum.isProfessionChooser)
                 return false;
@@ -1842,6 +1851,10 @@ namespace SDVMobileControls
             }
         }
 
+        private static FieldInfo _syncInputCurMouseField;
+        private static FieldInfo _syncSInputMouseField;
+        private static bool _syncMouseFieldsResolved;
+
         private void SyncVanillaMouse(Vector2 vp, bool leftDown = false)
         {
             Point rawPt = ViewportToRaw(vp);
@@ -1851,51 +1864,124 @@ namespace SDVMobileControls
             try
             {
                 var prev = Game1.oldMouseState;
-                Game1.oldMouseState = new MouseState(
+                var nextMs = new MouseState(
                     mx, my, prev.ScrollWheelValue,
                     leftDown ? ButtonState.Pressed : ButtonState.Released,
                     prev.MiddleButton, prev.RightButton, prev.XButton1, prev.XButton2);
+                Game1.oldMouseState = nextMs;
+                Game1.lastCursorMotionWasMouse = true;
+                if (Game1.input != null)
+                {
+                    if (!_syncMouseFieldsResolved)
+                    {
+                        _syncMouseFieldsResolved = true;
+                        const BindingFlags bf = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                        _syncInputCurMouseField = typeof(InputState).GetField("_currentMouseState", bf);
+                        _syncSInputMouseField = Game1.input.GetType().GetField("<MouseState>k__BackingField", bf);
+                    }
+                    _syncInputCurMouseField?.SetValue(Game1.input, nextMs);
+                    _syncSInputMouseField?.SetValue(Game1.input, nextMs);
+                }
             }
             catch { }
         }
 
+        private static bool TryReturnHeldItemToInventoryMenu(MenuWithInventory mwi, Point fallbackUi)
+        {
+            if (mwi == null || mwi.heldItem == null)
+                return true;
+            try
+            {
+                if (Game1.player != null && Game1.player.addItemToInventoryBool(mwi.heldItem))
+                {
+                    mwi.heldItem = null;
+                    return true;
+                }
+                if (fallbackUi.X > 0 || fallbackUi.Y > 0)
+                    mwi.receiveLeftClick(fallbackUi.X, fallbackUi.Y, false);
+                if (mwi.heldItem != null && Game1.player != null)
+                {
+                    Game1.createItemDebris(mwi.heldItem, Game1.player.getStandingPosition(), Game1.player.FacingDirection, Game1.currentLocation);
+                    mwi.heldItem = null;
+                }
+            }
+            catch { }
+            return mwi.heldItem == null;
+        }
+
         private static bool TryAutoPlaceCraftStation(IClickableMenu activeMenu, Point ui)
         {
-            if (activeMenu is ForgeMenu fm && fm.inventory != null && fm.inventory.isWithinBounds(ui.X, ui.Y) && fm.heldItem == null)
+            if (activeMenu is ForgeMenu fm)
             {
-                try
+                if (fm.IsBusy())
+                    return true;
+                if (fm.heldItem == null &&
+                    ((fm.leftIngredientSpot != null && fm.leftIngredientSpot.item != null && fm.leftIngredientSpot.containsPoint(ui.X, ui.Y)) ||
+                     (fm.rightIngredientSpot != null && fm.rightIngredientSpot.item != null && fm.rightIngredientSpot.containsPoint(ui.X, ui.Y)) ||
+                     (fm.craftResultDisplay != null && fm.craftResultDisplay.item != null && fm.craftResultDisplay.containsPoint(ui.X, ui.Y))))
                 {
-                    fm.receiveLeftClick(ui.X, ui.Y, true);
-                    if (fm.heldItem != null)
+                    try
                     {
-                        if (fm.leftIngredientSpot != null && fm.leftIngredientSpot.item == null)
-                            fm.receiveLeftClick(fm.leftIngredientSpot.bounds.Center.X, fm.leftIngredientSpot.bounds.Center.Y, true);
-                        if (fm.heldItem != null && fm.rightIngredientSpot != null && fm.rightIngredientSpot.item == null)
-                            fm.receiveLeftClick(fm.rightIngredientSpot.bounds.Center.X, fm.rightIngredientSpot.bounds.Center.Y, true);
+                        fm.receiveLeftClick(ui.X, ui.Y, true);
+                        TryReturnHeldItemToInventoryMenu(fm, Point.Zero);
+                        return true;
+                    }
+                    catch { }
+                }
+                if (fm.inventory != null && fm.inventory.isWithinBounds(ui.X, ui.Y) && fm.heldItem == null)
+                {
+                    try
+                    {
+                        fm.receiveLeftClick(ui.X, ui.Y, true);
                         if (fm.heldItem != null)
-                            fm.receiveLeftClick(ui.X, ui.Y, true);
+                        {
+                            if (fm.leftIngredientSpot != null && fm.leftIngredientSpot.item == null)
+                                fm.receiveLeftClick(fm.leftIngredientSpot.bounds.Center.X, fm.leftIngredientSpot.bounds.Center.Y, true);
+                            if (fm.heldItem != null && fm.rightIngredientSpot != null && fm.rightIngredientSpot.item == null)
+                                fm.receiveLeftClick(fm.rightIngredientSpot.bounds.Center.X, fm.rightIngredientSpot.bounds.Center.Y, true);
+                            if (fm.heldItem != null)
+                                TryReturnHeldItemToInventoryMenu(fm, ui);
+                        }
+                        return true;
                     }
-                    return true;
+                    catch { }
                 }
-                catch { }
             }
-            if (activeMenu is TailoringMenu tm && tm.inventory != null && tm.inventory.isWithinBounds(ui.X, ui.Y) && tm.heldItem == null)
+            if (activeMenu is TailoringMenu tm)
             {
-                try
-                {
-                    tm.receiveLeftClick(ui.X, ui.Y, true);
-                    if (tm.heldItem != null)
-                    {
-                        if (tm.leftIngredientSpot != null && tm.leftIngredientSpot.item == null)
-                            tm.receiveLeftClick(tm.leftIngredientSpot.bounds.Center.X, tm.leftIngredientSpot.bounds.Center.Y, true);
-                        if (tm.heldItem != null && tm.rightIngredientSpot != null && tm.rightIngredientSpot.item == null)
-                            tm.receiveLeftClick(tm.rightIngredientSpot.bounds.Center.X, tm.rightIngredientSpot.bounds.Center.Y, true);
-                        if (tm.heldItem != null)
-                            tm.receiveLeftClick(ui.X, ui.Y, true);
-                    }
+                if (tm.IsBusy())
                     return true;
+                if (tm.heldItem == null &&
+                    ((tm.leftIngredientSpot != null && tm.leftIngredientSpot.item != null && tm.leftIngredientSpot.containsPoint(ui.X, ui.Y)) ||
+                     (tm.rightIngredientSpot != null && tm.rightIngredientSpot.item != null && tm.rightIngredientSpot.containsPoint(ui.X, ui.Y)) ||
+                     (tm.craftResultDisplay != null && tm.craftResultDisplay.item != null && tm.craftResultDisplay.containsPoint(ui.X, ui.Y))))
+                {
+                    try
+                    {
+                        tm.receiveLeftClick(ui.X, ui.Y, true);
+                        TryReturnHeldItemToInventoryMenu(tm, Point.Zero);
+                        return true;
+                    }
+                    catch { }
                 }
-                catch { }
+                if (tm.inventory != null && tm.inventory.isWithinBounds(ui.X, ui.Y) && tm.heldItem == null)
+                {
+                    try
+                    {
+                        tm.receiveLeftClick(ui.X, ui.Y, true);
+                        if (tm.heldItem != null)
+                        {
+                            if (tm.leftIngredientSpot != null && tm.leftIngredientSpot.item == null)
+                                tm.receiveLeftClick(tm.leftIngredientSpot.bounds.Center.X, tm.leftIngredientSpot.bounds.Center.Y, true);
+                            if (tm.heldItem != null && tm.rightIngredientSpot != null && tm.rightIngredientSpot.item == null)
+                                tm.receiveLeftClick(tm.rightIngredientSpot.bounds.Center.X, tm.rightIngredientSpot.bounds.Center.Y, true);
+                            if (tm.heldItem != null)
+                                TryReturnHeldItemToInventoryMenu(tm, ui);
+                        }
+                        return true;
+                    }
+                    catch { }
+                }
             }
             if (activeMenu is GeodeMenu gm && gm.inventory != null && gm.inventory.isWithinBounds(ui.X, ui.Y) && gm.heldItem == null && !gm.waitingForServerResponse && gm.geodeAnimationTimer <= 0)
             {
@@ -2006,29 +2092,43 @@ namespace SDVMobileControls
 
         private static void TryAutoDepositJunimoItem(JunimoNoteMenu jnm, Point ui)
         {
-            if (jnm == null) return;
+            if (jnm == null || jnm.fromGameMenu) return;
             var prevKb = Game1.oldKBState;
             try
             {
                 jnm.performHoverAction(ui.X, ui.Y);
-                // Native Shift+Click deposits directly into matching bundle slot in 1.6!
+                // Native Shift+Click deposits directly into ONE matching bundle slot in 1.6!
                 Game1.oldKBState = new KeyboardState(Keys.LeftShift);
                 jnm.receiveLeftClick(ui.X, ui.Y, true);
                 Game1.oldKBState = prevKb;
 
-                // Fallback: if still held on cursor, explicitly click each empty ingredientSlot
+                // Fallback: if still held on cursor, explicitly click AT MOST ONE empty ingredientSlot
                 if (jnm.heldItem != null && jnm.ingredientSlots != null)
                 {
                     for (int i = 0; i < jnm.ingredientSlots.Count && jnm.heldItem != null; i++)
                     {
                         var slot = jnm.ingredientSlots[i];
                         if (slot != null && slot.item == null)
+                        {
                             jnm.receiveLeftClick(slot.bounds.Center.X, slot.bounds.Center.Y, true);
+                            if (slot.item != null)
+                                break; // Stop after filling 1 slot so duplicate bundle slots (e.g. 2x 99 Wood) aren't consumed in 1 tap!
+                        }
                     }
                 }
-                // Return any remaining heldItem cleanly to original inventory slot (zero stuck cursor!)
+                // Return any remaining heldItem cleanly to player inventory (zero stuck cursor!)
                 if (jnm.heldItem != null)
-                    jnm.receiveLeftClick(ui.X, ui.Y, true);
+                {
+                    if (Game1.player != null && Game1.player.addItemToInventoryBool(jnm.heldItem))
+                        jnm.heldItem = null;
+                    else
+                        jnm.receiveLeftClick(ui.X, ui.Y, false);
+                    if (jnm.heldItem != null && Game1.player != null)
+                    {
+                        Game1.createItemDebris(jnm.heldItem, Game1.player.getStandingPosition(), Game1.player.FacingDirection, Game1.currentLocation);
+                        jnm.heldItem = null;
+                    }
+                }
                 jnm.releaseLeftClick(ui.X, ui.Y);
             }
             catch { }
@@ -2037,7 +2137,7 @@ namespace SDVMobileControls
 
         private static ClickableComponent FindJunimoBundleSlotAt(JunimoNoteMenu jnm, Point ui)
         {
-            if (jnm == null || !jnm.specificBundlePage || jnm.inventory?.inventory == null)
+            if (jnm == null || jnm.fromGameMenu || !jnm.specificBundlePage || jnm.inventory?.inventory == null)
                 return null;
             for (int i = 0; i < jnm.inventory.inventory.Count; i++)
             {
@@ -3412,6 +3512,9 @@ namespace SDVMobileControls
 
         private static void CloseTopmostMenu(IClickableMenu rawMenu, IClickableMenu topMenu)
         {
+            if (topMenu == null || topMenu is SaveGameMenu || topMenu is ShippingMenu || topMenu is ReadyCheckDialog)
+                return;
+
             if (topMenu is LevelUpMenu lumEsc)
             {
                 if (lumEsc.isProfessionChooser)
@@ -3425,28 +3528,62 @@ namespace SDVMobileControls
                     return;
                 }
             }
-            try { Game1.playSound("bigDeSelect"); } catch { }
+            if ((topMenu is ForgeMenu fmBusy && fmBusy.IsBusy()) ||
+                (topMenu is TailoringMenu tmBusy && tmBusy.IsBusy()) ||
+                (topMenu is DyeMenu dmBusy && dmBusy.IsBusy()) ||
+                (topMenu is GeodeMenu gmBusy && (gmBusy.waitingForServerResponse || gmBusy.geodeAnimationTimer > 0)))
+            {
+                try { Game1.playSound("cancel"); } catch { }
+                return;
+            }
+
             try
             {
+                // Rescue any item held on cursor before closing MenuWithInventory (Forge, Tailoring, Chest, Shop, etc.)
+                if (topMenu is MenuWithInventory mwi && mwi.heldItem != null)
+                    TryReturnHeldItemToInventoryMenu(mwi, Point.Zero);
+
                 if (topMenu != null && !ReferenceEquals(topMenu, rawMenu))
                 {
                     topMenu.receiveKeyPress(Keys.Escape);
                     if (ReferenceEquals(GetTopmostMenu(Game1.activeClickableMenu), topMenu) && topMenu.readyToClose())
-                        topMenu.exitThisMenu(false);
+                        topMenu.exitThisMenu(true);
                     return;
                 }
-                if (IsThirdPartyModMenu(topMenu))
+
+                // Route ALL top-level vanilla & mod menus through receiveKeyPress(Keys.Escape) + exitThisMenu()
+                // so cleanupBeforeExit() ALWAYS runs (returns ForgeMenu/TailoringMenu/MuseumMenu items, restores
+                // CarpenterMenu/PurchaseAnimalsMenu/AnimalQueryMenu farm camera & HUD, triggers JunimoNoteMenu
+                // bundle completion cutscene, and clears FishingRod.showingTreasure)!
+                topMenu.receiveKeyPress(Keys.Escape);
+                if (ReferenceEquals(Game1.activeClickableMenu, topMenu))
                 {
-                    topMenu.receiveKeyPress(Keys.Escape);
-                    if (ReferenceEquals(Game1.activeClickableMenu, topMenu) && topMenu.readyToClose())
-                        topMenu.exitThisMenu(false);
-                    return;
+                    if (topMenu.readyToClose())
+                    {
+                        topMenu.exitThisMenu(true);
+                        if (ReferenceEquals(Game1.activeClickableMenu, topMenu))
+                        {
+                            try { topMenu.emergencyShutDown(); } catch { }
+                            Game1.exitActiveMenu();
+                        }
+                    }
+                    else
+                    {
+                        try { Game1.playSound("cancel"); } catch { }
+                    }
                 }
-                Game1.exitActiveMenu();
             }
             catch
             {
-                try { Game1.exitActiveMenu(); } catch { }
+                try
+                {
+                    if (topMenu != null && topMenu.readyToClose())
+                    {
+                        try { topMenu.emergencyShutDown(); } catch { }
+                        Game1.exitActiveMenu();
+                    }
+                }
+                catch { }
             }
         }
 

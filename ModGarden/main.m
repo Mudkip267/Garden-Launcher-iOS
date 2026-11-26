@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#import <objc/runtime.h>
 #import <ifaddrs.h>
 #import <arpa/inet.h>
 #import <net/if.h>
@@ -1020,6 +1021,301 @@ static void sdvSpawnDiscordSparkleBurst(UIView *hostView, CGPoint origin, CGFloa
 }
 @end
 
+// ============================================================
+// OFFLINE VISUAL MOD CONFIG.JSON EDITOR (GMCM Pre-Boot Editor)
+// ============================================================
+@interface SDVModConfigEditorController : UIViewController <UITextFieldDelegate>
+@property(nonatomic, copy) NSString *modName;
+@property(nonatomic, copy) NSString *configPath;
+@property(nonatomic, copy) void (^onSaved)(void);
+@end
+
+@implementation SDVModConfigEditorController {
+    NSMutableDictionary *_rootDict;
+    UIScrollView *_scroll;
+    UIStackView *_pane;
+    UITextView *_rawTextView;
+    BOOL _rawMode;
+    NSMutableArray<NSDictionary *> *_fieldBindings; // @{@"dict", @"key", @"tf", @"isNumber"}
+}
+
+-(UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
+
+-(void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = kBgCanvas;
+    SDVAuroraCanvasView *aurora = [SDVAuroraCanvasView new];
+    [self.view insertSubview:aurora atIndex:0];
+    pinAll(aurora, self.view, 0);
+
+    _fieldBindings = [NSMutableArray array];
+    @try {
+        NSData *raw = readFile(self.configPath);
+        NSData *san = stripJson5ForIOS14(raw);
+        id obj = [NSJSONSerialization JSONObjectWithData:san options:NSJSONReadingMutableContainers | NSJSONReadingMutableLeaves error:nil];
+        if ([obj isKindOfClass:NSMutableDictionary.class]) {
+            _rootDict = obj;
+        }
+    } @catch (NSException *ex) { }
+    if (!_rootDict) {
+        _rawMode = YES;
+    }
+
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    UIVisualEffectView *bar = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterial]];
+    bar.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:bar];
+
+    SDVAppleButton *closeBtn = mkIOSButton(@"Đóng", @"xmark", kBgCardSubtle, kInkPrimary, 13, UIEdgeInsetsMake(6, 11, 6, 11));
+    [closeBtn addTarget:self action:@selector(closeTapped) forControlEvents:UIControlEventTouchUpInside];
+
+    UILabel *titleLbl = mkLabel([NSString stringWithFormat:@"⚙️ Cấu hình · %@", self.modName ?: @"config.json"], 15, UIFontWeightSemibold, kInkPrimary);
+    titleLbl.lineBreakMode = NSLineBreakByTruncatingTail;
+
+    SDVAppleButton *modeBtn = mkIOSButton(_rawMode ? @"Trực quan" : @"JSON thô", @"curlybraces", [kTintPurple colorWithAlphaComponent:0.14], kTintPurple, 12.5, UIEdgeInsetsMake(6, 10, 6, 10));
+    [modeBtn addTarget:self action:@selector(toggleModeTapped:) forControlEvents:UIControlEventTouchUpInside];
+
+    SDVAppleButton *saveBtn = mkIOSButton(@"Lưu config", @"checkmark.circle.fill", kTintGreen, UIColor.whiteColor, 13, UIEdgeInsetsMake(6, 12, 6, 12));
+    [saveBtn addTarget:self action:@selector(saveTapped) forControlEvents:UIControlEventTouchUpInside];
+
+    UIStackView *barRow = mkHStack(8);
+    [barRow addArrangedSubview:closeBtn];
+    [barRow addArrangedSubview:titleLbl];
+    [barRow addArrangedSubview:[UIView new]];
+    if (_rootDict) [barRow addArrangedSubview:modeBtn];
+    [barRow addArrangedSubview:saveBtn];
+    [bar.contentView addSubview:barRow];
+    pinInsets(barRow, bar.contentView, UIEdgeInsetsMake(0, 14, 0, 14));
+
+    _scroll = [UIScrollView new];
+    _scroll.alwaysBounceVertical = YES;
+    _scroll.keyboardDismissMode = UIScrollViewKeyboardDismissModeInteractive;
+    _scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:_scroll];
+
+    _pane = mkVStack(10);
+    _pane.translatesAutoresizingMaskIntoConstraints = NO;
+    [_scroll addSubview:_pane];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [bar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [bar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [bar.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [bar.bottomAnchor constraintEqualToAnchor:safe.topAnchor constant:46],
+
+        [_scroll.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+        [_scroll.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+        [_scroll.topAnchor constraintEqualToAnchor:bar.bottomAnchor],
+        [_scroll.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+
+        [_pane.leadingAnchor constraintEqualToAnchor:_scroll.contentLayoutGuide.leadingAnchor constant:16],
+        [_pane.trailingAnchor constraintEqualToAnchor:_scroll.contentLayoutGuide.trailingAnchor constant:-16],
+        [_pane.topAnchor constraintEqualToAnchor:_scroll.contentLayoutGuide.topAnchor constant:12],
+        [_pane.bottomAnchor constraintEqualToAnchor:_scroll.contentLayoutGuide.bottomAnchor constant:-24],
+        [_pane.widthAnchor constraintEqualToAnchor:_scroll.frameLayoutGuide.widthAnchor constant:-32]
+    ]];
+
+    [self rebuildBody];
+}
+
+-(void)syncTextFieldsIntoDict {
+    for (NSDictionary *b in _fieldBindings) {
+        NSMutableDictionary *d = b[@"dict"];
+        NSString *k = b[@"key"];
+        UITextField *tf = b[@"tf"];
+        BOOL isNum = [b[@"isNumber"] boolValue];
+        NSString *txt = [tf.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] ?: @"";
+        if (isNum) {
+            if ([txt containsString:@"."]) d[k] = @(txt.doubleValue);
+            else d[k] = @(txt.longLongValue);
+        } else {
+            d[k] = txt;
+        }
+    }
+}
+
+-(void)rebuildBody {
+    for (UIView *v in [_pane.arrangedSubviews copy]) {
+        [_pane removeArrangedSubview:v];
+        [v removeFromSuperview];
+    }
+    [_fieldBindings removeAllObjects];
+    _rawTextView = nil;
+
+    if (_rawMode || !_rootDict) {
+        NSString *pretty = @"";
+        if (_rootDict) {
+            NSData *pd = [NSJSONSerialization dataWithJSONObject:_rootDict options:NSJSONWritingPrettyPrinted error:nil];
+            pretty = pd ? [[NSString alloc] initWithData:pd encoding:NSUTF8StringEncoding] : @"";
+        }
+        if (!pretty.length) {
+            pretty = [NSString stringWithContentsOfFile:self.configPath encoding:NSUTF8StringEncoding error:nil] ?: @"{}";
+        }
+        UITextView *tv = [UITextView new];
+        tv.font = [UIFont monospacedSystemFontOfSize:12.5 weight:UIFontWeightRegular];
+        tv.backgroundColor = rgb(0x0F172A);
+        tv.textColor = rgb(0xE2E8F0);
+        tv.layer.cornerRadius = 12;
+        tv.textContainerInset = UIEdgeInsetsMake(12, 12, 12, 12);
+        tv.text = pretty;
+        [tv.heightAnchor constraintEqualToConstant:MAX(240.0, self.view.bounds.size.height - 110.0)].active = YES;
+        _rawTextView = tv;
+        [_pane addArrangedSubview:tv];
+        return;
+    }
+
+    [_pane addArrangedSubview:mkSectionFooter(@"Chỉnh cấu hình trực tiếp trước khi vào game (thay thế GMCM trên 0% JIT). Bấm \"Lưu config\" ở góc trên phải sau khi chỉnh xong.")];
+    [self appendRowsForDict:_rootDict sectionTitle:@"Thiết lập chính"];
+}
+
+-(void)appendRowsForDict:(NSMutableDictionary *)dict sectionTitle:(NSString *)secTitle {
+    NSArray<NSString *> *keys = [[dict allKeys] sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
+    NSMutableArray<UIView *> *scalarRows = [NSMutableArray array];
+    NSMutableArray<NSString *> *subDictKeys = [NSMutableArray array];
+
+    for (NSString *k in keys) {
+        id val = dict[k];
+        if ([val isKindOfClass:NSMutableDictionary.class]) {
+            [subDictKeys addObject:k];
+            continue;
+        }
+        if ([val isKindOfClass:NSArray.class]) {
+            UIStackView *r = mkHStack(8);
+            [r addArrangedSubview:mkLabel(k, 13.5, UIFontWeightMedium, kInkPrimary)];
+            [r addArrangedSubview:[UIView new]];
+            [r addArrangedSubview:mkBadgePill([NSString stringWithFormat:@"Danh sách (%lu mục · dùng JSON thô)", (unsigned long)[(NSArray *)val count]], kBgCardSubtle, kInkSecondary, 11)];
+            [scalarRows addObject:r];
+            continue;
+        }
+        if ([val isKindOfClass:NSNumber.class] && CFGetTypeID((__bridge CFTypeRef)val) == CFBooleanGetTypeID()) {
+            UIStackView *r = mkHStack(10);
+            [r addArrangedSubview:mkLabel(k, 13.5, UIFontWeightMedium, kInkPrimary)];
+            [r addArrangedSubview:[UIView new]];
+            UISwitch *sw = [UISwitch new];
+            sw.on = [val boolValue];
+            sw.onTintColor = kTintGreen;
+            sw.transform = CGAffineTransformMakeScale(0.86, 0.86);
+            sw.accessibilityIdentifier = k;
+            objc_setAssociatedObject(sw, "cfgDict", dict, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [sw addTarget:self action:@selector(boolSwitchChanged:) forControlEvents:UIControlEventValueChanged];
+            [r addArrangedSubview:sw];
+            [scalarRows addObject:r];
+            continue;
+        }
+        BOOL isNum = [val isKindOfClass:NSNumber.class];
+        UIStackView *r = mkHStack(8);
+        UILabel *kl = mkLabel(k, 13.5, UIFontWeightMedium, kInkPrimary);
+        kl.numberOfLines = 1;
+        [r addArrangedSubview:kl];
+        [r addArrangedSubview:[UIView new]];
+
+        UITextField *tf = [UITextField new];
+        tf.text = [val description] ?: @"";
+        tf.font = iosMonoDigits(13, UIFontWeightSemibold);
+        tf.textColor = kTintBlue;
+        tf.textAlignment = NSTextAlignmentRight;
+        tf.backgroundColor = kBgCardSubtle;
+        tf.layer.cornerRadius = 7;
+        tf.returnKeyType = UIReturnKeyDone;
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        tf.keyboardType = isNum ? UIKeyboardTypeNumbersAndPunctuation : UIKeyboardTypeASCIICapable;
+        tf.delegate = self;
+        tf.translatesAutoresizingMaskIntoConstraints = NO;
+        [tf.widthAnchor constraintEqualToConstant:isNum ? 110 : 170].active = YES;
+        [tf.heightAnchor constraintEqualToConstant:30].active = YES;
+        [r addArrangedSubview:tf];
+
+        [_fieldBindings addObject:@{@"dict": dict, @"key": k, @"tf": tf, @"isNumber": @(isNum)}];
+        [scalarRows addObject:r];
+    }
+
+    if (scalarRows.count) {
+        [_pane addArrangedSubview:mkSectionTitle(secTitle)];
+        [_pane addArrangedSubview:mkGroupedRows(scalarRows, 14)];
+    }
+    for (NSString *sk in subDictKeys) {
+        NSMutableDictionary *sub = dict[sk];
+        if ([sub isKindOfClass:NSMutableDictionary.class]) {
+            [self appendRowsForDict:sub sectionTitle:sk];
+        }
+    }
+}
+
+-(void)boolSwitchChanged:(UISwitch *)sw {
+    NSMutableDictionary *d = objc_getAssociatedObject(sw, "cfgDict");
+    NSString *k = sw.accessibilityIdentifier;
+    if (d && k.length) {
+        d[k] = sw.isOn ? @YES : @NO;
+    }
+}
+
+-(BOOL)textFieldShouldReturn:(UITextField *)textField {
+    [textField resignFirstResponder];
+    return YES;
+}
+
+-(void)toggleModeTapped:(SDVAppleButton *)btn {
+    [self.view endEditing:YES];
+    if (_rawMode) {
+        NSData *d = [(_rawTextView.text ?: @"") dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *san = stripJson5ForIOS14(d);
+        NSError *je = nil;
+        id obj = san ? [NSJSONSerialization JSONObjectWithData:san options:NSJSONReadingMutableContainers | NSJSONReadingMutableLeaves error:&je] : nil;
+        if (![obj isKindOfClass:NSMutableDictionary.class]) {
+            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"JSON không hợp lệ" message:je.localizedDescription ?: @"Kiểm tra lại dấu phẩy hoặc ngoặc kép." preferredStyle:UIAlertControllerStyleAlert];
+            [a addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:a animated:YES completion:nil];
+            return;
+        }
+        _rootDict = obj;
+        _rawMode = NO;
+        [btn setTitle:@"JSON thô" forState:UIControlStateNormal];
+    } else {
+        [self syncTextFieldsIntoDict];
+        _rawMode = YES;
+        [btn setTitle:@"Trực quan" forState:UIControlStateNormal];
+    }
+    [self rebuildBody];
+}
+
+-(void)saveTapped {
+    [self.view endEditing:YES];
+    NSData *outData = nil;
+    if (_rawMode && _rawTextView) {
+        NSData *raw = [(_rawTextView.text ?: @"") dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *san = stripJson5ForIOS14(raw);
+        NSError *je = nil;
+        id parsed = san ? [NSJSONSerialization JSONObjectWithData:san options:NSJSONReadingAllowFragments error:&je] : nil;
+        if (!parsed) {
+            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Lỗi cú pháp JSON" message:je.localizedDescription ?: @"Không thể lưu tệp JSON lỗi." preferredStyle:UIAlertControllerStyleAlert];
+            [a addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:a animated:YES completion:nil];
+            return;
+        }
+        outData = [NSJSONSerialization dataWithJSONObject:parsed options:NSJSONWritingPrettyPrinted error:nil];
+    } else if (_rootDict) {
+        [self syncTextFieldsIntoDict];
+        outData = [NSJSONSerialization dataWithJSONObject:_rootDict options:NSJSONWritingPrettyPrinted error:nil];
+    }
+    if (!outData.length) return;
+    @try {
+        writeFile(outData, self.configPath);
+        [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];
+        if (self.onSaved) self.onSaved();
+        [self dismissViewControllerAnimated:YES completion:nil];
+    } @catch (NSException *ex) {
+        UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Không lưu được" message:ex.reason ?: @"Lỗi ghi tệp." preferredStyle:UIAlertControllerStyleAlert];
+        [a addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:a animated:YES completion:nil];
+    }
+}
+
+-(void)closeTapped {
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+@end
+
 #ifdef GARDEN_IN_GAME
 #define Home SDVGardenManagerController
 #endif
@@ -1100,6 +1396,11 @@ static void sdvSpawnDiscordSparkleBurst(UIView *hostView, CGPoint origin, CGFloa
     time_t _consoleLastMtime;
     NSString *_consoleRawCache;
     UILabel *_verPillLabel;
+
+    // v1.1.0 Library Search/Filter & QuickSave Browser state
+    NSString *_modSearchQuery;
+    NSInteger _modFilterMode; // 0=All, 1=Enabled, 2=Disabled
+    NSArray<NSDictionary *> *_quickSlotsList;
 }
 
 -(void)dealloc {
@@ -1817,13 +2118,41 @@ static void sdvSpawnDiscordSparkleBurst(UIView *hostView, CGPoint origin, CGFloa
     UILabel *secLbl = mkSectionHeader([NSString stringWithFormat:@"Đã cài đặt (%ld/%lu đang bật)", (long)onCount, (unsigned long)_catalog.count]);
     [hdr addArrangedSubview:secLbl];
     [hdr addArrangedSubview:[UIView new]];
-    SDVAppleButton *ref = mkIOSButton(@"Làm mới", @"arrow.clockwise", [kTintBlue colorWithAlphaComponent:0.12], kTintBlue, 12.5, UIEdgeInsetsMake(5, 10, 5, 10));
+    SDVAppleButton *profBtn = mkIOSButton(@"Hồ sơ Mod", @"square.stack.3d.up.fill", [kTintPurple colorWithAlphaComponent:0.14], kTintPurple, 12, UIEdgeInsetsMake(5, 9, 5, 9));
+    [profBtn addTarget:self action:@selector(openModProfilesSheet:) forControlEvents:UIControlEventTouchUpInside];
+    [hdr addArrangedSubview:profBtn];
+    SDVAppleButton *caseBtn = mkIOSButton(@"Sửa Hoa/Thường", @"textformat.abc", [kTintTeal colorWithAlphaComponent:0.14], kTintTeal, 12, UIEdgeInsetsMake(5, 9, 5, 9));
+    [caseBtn addTarget:self action:@selector(healCaseSensitivityTapped) forControlEvents:UIControlEventTouchUpInside];
+    [hdr addArrangedSubview:caseBtn];
+    SDVAppleButton *ref = mkIOSButton(@"Làm mới", @"arrow.clockwise", [kTintBlue colorWithAlphaComponent:0.12], kTintBlue, 12, UIEdgeInsetsMake(5, 9, 5, 9));
     [ref addTarget:self action:@selector(refresh) forControlEvents:UIControlEventTouchUpInside];
     [hdr addArrangedSubview:ref];
     UIView *hdrWrap = [UIView new];
     [hdrWrap addSubview:hdr];
     pinInsets(hdr, hdrWrap, UIEdgeInsetsMake(2, 12, 0, 4));
     [_pane addArrangedSubview:hdrWrap];
+
+    if (_catalog.count > 0) {
+        UIStackView *fltBox = mkHStack(8);
+        UITextField *searchTf = [UITextField new];
+        searchTf.placeholder = @"🔍 Tìm tên mod, tác giả, thư mục…";
+        searchTf.text = _modSearchQuery ?: @"";
+        searchTf.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
+        searchTf.textColor = kInkPrimary;
+        searchTf.clearButtonMode = UITextFieldViewModeWhileEditing;
+        searchTf.returnKeyType = UIReturnKeySearch;
+        searchTf.autocorrectionType = UITextAutocorrectionTypeNo;
+        searchTf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        [searchTf addTarget:self action:@selector(modSearchEditingEnded:) forControlEvents:UIControlEventEditingDidEnd | UIControlEventEditingDidEndOnExit];
+        [fltBox addArrangedSubview:searchTf];
+
+        UISegmentedControl *fSeg = [[UISegmentedControl alloc] initWithItems:@[@"Tất cả", @"Đang bật", @"Đang tắt"]];
+        fSeg.selectedSegmentIndex = MAX(0, MIN(2, _modFilterMode));
+        [fSeg setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        [fSeg addTarget:self action:@selector(modFilterSegChanged:) forControlEvents:UIControlEventValueChanged];
+        [fltBox addArrangedSubview:fSeg];
+        [_pane addArrangedSubview:mkGroupedCard(fltBox, UIEdgeInsetsMake(8, 12, 8, 12))];
+    }
 
     if (!_catalog.count && !_modIssues.count) {
         UILabel *empty = mkLabel(@"Chưa có mod nào ngoài mod hệ thống.", 13.5, UIFontWeightRegular, kInkSecondary);
@@ -1890,10 +2219,17 @@ static void sdvSpawnDiscordSparkleBurst(UIView *hostView, CGPoint origin, CGFloa
     }
 
     NSMutableArray<UIView *> *rows = [NSMutableArray array];
+    NSString *qLow = [[_modSearchQuery ?: @"" stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] lowercaseString];
     for (NSUInteger i = 0; i < _catalog.count; i++) {
         NSDictionary *m = _catalog[i];
         BOOL enabled = [m[@"enabled"] boolValue];
         BOOL sys = [m[@"protected"] boolValue];
+        if (_modFilterMode == 1 && !enabled) continue;
+        if (_modFilterMode == 2 && enabled) continue;
+        if (qLow.length) {
+            NSString *hay = [[NSString stringWithFormat:@"%@ %@ %@ %@", m[@"name"] ?: @"", m[@"author"] ?: @"", m[@"cleanFolder"] ?: @"", m[@"uniqueID"] ?: @""] lowercaseString];
+            if (![hay containsString:qLow]) continue;
+        }
 
         UIStackView *row = mkHStack(10);
         UIView *dot = [UIView new];
@@ -1925,6 +2261,14 @@ static void sdvSpawnDiscordSparkleBurst(UIView *hostView, CGPoint origin, CGFloa
         [info addArrangedSubview:subLbl];
         [row addArrangedSubview:info];
 
+        if ([m[@"hasConfig"] boolValue]) {
+            SDVAppleButton *cfgBtn = mkIOSButton(@"", @"slider.horizontal.3", [kTintBlue colorWithAlphaComponent:0.13], kTintBlue, 12.5, UIEdgeInsetsMake(7, 8, 7, 8));
+            cfgBtn.layer.cornerRadius = 9;
+            cfgBtn.tag = 9000 + (NSInteger)i;
+            [cfgBtn addTarget:self action:@selector(openModConfigEditorTapped:) forControlEvents:UIControlEventTouchUpInside];
+            [row addArrangedSubview:cfgBtn];
+        }
+
         if (sys) {
             [row addArrangedSubview:mkBadgePill(@"Hệ thống", [kTintOrange colorWithAlphaComponent:0.14], kTintOrange, 11)];
         } else {
@@ -1944,8 +2288,12 @@ static void sdvSpawnDiscordSparkleBurst(UIView *hostView, CGPoint origin, CGFloa
         }
         [rows addObject:row];
     }
-    [_pane addArrangedSubview:mkGroupedRows(rows, 32)];
-    [_pane addArrangedSubview:mkSectionFooter(@"Bật/tắt hoặc xóa mod sẽ có hiệu lực ở lần mở lại ứng dụng tiếp theo.")];
+    if (rows.count) {
+        [_pane addArrangedSubview:mkGroupedRows(rows, 32)];
+    } else {
+        [_pane addArrangedSubview:mkGroupedCard(mkLabel(@"Không có Mod nào khớp bộ lọc tìm kiếm hiện tại.", 13, UIFontWeightRegular, kInkSecondary), UIEdgeInsetsMake(12, 14, 12, 14))];
+    }
+    [_pane addArrangedSubview:mkSectionFooter(@"Mẹo: Bấm nút thanh trượt (⚙️) trên từng Mod để chỉnh config.json trước khi vào game, hoặc dùng Hồ sơ Mod để chuyển nhanh bộ Mod / Safe Mode.")];
 }
 
 // ============================================================
@@ -1953,6 +2301,7 @@ static void sdvSpawnDiscordSparkleBurst(UIView *hostView, CGPoint origin, CGFloa
 // ============================================================
 -(void)renderSavesTab {
     _savesList = sdvListSaves(_root.path);
+    _quickSlotsList = sdvListQuickSavesAndSlots(_root.path);
 
     // Card 1: Nhập File Save đa nền tảng (ZIP/RAR/7Z, thư mục, hoặc tệp Save rời)
     UIStackView *impBox = mkVStack(10);
@@ -2044,12 +2393,111 @@ static void sdvSpawnDiscordSparkleBurst(UIView *hostView, CGPoint origin, CGFloa
         [_pane addArrangedSubview:mkGroupedRows(rows, 48)];
         [_pane addArrangedSubview:mkSectionFooter(@"Bấm \"Xuất .ZIP\" để đóng gói chuẩn đa nền tảng (PC Windows / Mac / Linux / Android SMAPI / iOS) rồi lưu ra Tệp, iCloud Drive hoặc gửi qua AirDrop / Zalo / Telegram.")];
     }
+
+    // Card 3: QuickSave & 20-Slot SaveSlots Browser (v1.1.0)
+    if (_quickSlotsList.count > 0) {
+        [_pane addArrangedSubview:mkSectionTitle([NSString stringWithFormat:@"Mốc Lưu Nhanh & QuickSave (%lu)", (unsigned long)_quickSlotsList.count])];
+        NSMutableArray<UIView *> *qsRows = [NSMutableArray array];
+        for (NSUInteger i = 0; i < _quickSlotsList.count; i++) {
+            NSDictionary *qs = _quickSlotsList[i];
+            BOOL isQs = [qs[@"kind"] isEqualToString:@"quicksave"];
+            UIStackView *row = mkHStack(10);
+            [row addArrangedSubview:mkSettingsIconBadge(isQs ? @"bolt.fill" : @"clock.arrow.circlepath", isQs ? kTintPurple : kTintTeal, 28)];
+            UIStackView *info = mkVStack(1.5);
+            [info addArrangedSubview:mkLabel(qs[@"title"] ?: @"QuickSave", 13.5, UIFontWeightSemibold, kInkPrimary)];
+            [info addArrangedSubview:mkLabel(qs[@"subtitle"] ?: @"", 11.5, UIFontWeightRegular, kInkSecondary)];
+            [row addArrangedSubview:info];
+            [row addArrangedSubview:[UIView new]];
+
+            SDVAppleButton *shBtn = mkIOSButton(@"Chia sẻ", @"square.and.arrow.up", [kTintBlue colorWithAlphaComponent:0.13], kTintBlue, 12, UIEdgeInsetsMake(6, 9, 6, 9));
+            shBtn.layer.cornerRadius = 8.5;
+            shBtn.tag = 7800 + (NSInteger)i;
+            [shBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+            [shBtn addTarget:self action:@selector(shareQuickSlotTapped:) forControlEvents:UIControlEventTouchUpInside];
+            [row addArrangedSubview:shBtn];
+
+            SDVAppleButton *rmBtn = mkIOSButton(@"", @"trash.fill", [kTintRed colorWithAlphaComponent:0.12], kTintRed, 12, UIEdgeInsetsMake(6, 8, 6, 8));
+            rmBtn.layer.cornerRadius = 8.5;
+            rmBtn.tag = 7900 + (NSInteger)i;
+            [rmBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+            [rmBtn addTarget:self action:@selector(deleteQuickSlotTapped:) forControlEvents:UIControlEventTouchUpInside];
+            [row addArrangedSubview:rmBtn];
+            [qsRows addObject:row];
+        }
+        [_pane addArrangedSubview:mkGroupedRows(qsRows, 46)];
+        [_pane addArrangedSubview:mkSectionFooter(@"Quản lý trực tiếp các bản lưu giữa ngày (QuickSave) và 20 ô lưu nhanh (SaveSlots) mà không cần vào game.")];
+    }
 }
 
 -(void)refreshSavesTapped {
     _savesList = sdvListSaves(_root.path);
+    _quickSlotsList = sdvListQuickSavesAndSlots(_root.path);
     [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
     [self renderAll:NO];
+}
+
+-(void)shareQuickSlotTapped:(UIButton *)btn {
+    NSInteger idx = btn.tag - 7800;
+    if (idx < 0 || idx >= (NSInteger)_quickSlotsList.count) return;
+    NSDictionary *qs = _quickSlotsList[(NSUInteger)idx];
+    NSString *targetPath = qs[@"path"];
+    if (!targetPath.length || ![fm() fileExistsAtPath:targetPath]) return;
+
+    __block NSURL *shareUrl = nil;
+    [self work:@"Đang chuẩn bị tệp chia sẻ…" action:^{
+        if (!dir(targetPath)) {
+            shareUrl = [NSURL fileURLWithPath:targetPath];
+        } else {
+            NSString *expDir = join(NSTemporaryDirectory(), @"GardenSaveExports");
+            mkdirs(expDir);
+            NSString *zipName = [NSString stringWithFormat:@"%@.zip", sanitizeFolderName(qs[@"title"] ?: @"SaveSlot", @"SaveSlot")];
+            NSString *zipPath = join(expDir, zipName);
+            sdvRemoveItemQuiet(zipPath);
+            mz_zip_archive z = {0};
+            if (mz_zip_writer_init_file(&z, zipPath.fileSystemRepresentation, 0)) {
+                @try {
+                    for (NSString *rel in files(targetPath)) {
+                        NSData *d = [NSData dataWithContentsOfFile:join(targetPath, rel)];
+                        if (d.length) {
+                            mz_zip_writer_add_mem(&z, rel.UTF8String, d.bytes, d.length, MZ_DEFAULT_COMPRESSION);
+                        }
+                    }
+                    mz_zip_writer_finalize_archive(&z);
+                    shareUrl = [NSURL fileURLWithPath:zipPath];
+                } @finally {
+                    mz_zip_writer_end(&z);
+                }
+            }
+        }
+    } done:^{
+        if (!shareUrl) return;
+        UIActivityViewController *avc = [[UIActivityViewController alloc] initWithActivityItems:@[shareUrl] applicationActivities:nil];
+        [self presentSafely:avc];
+    }];
+}
+
+-(void)deleteQuickSlotTapped:(UIButton *)btn {
+    NSInteger idx = btn.tag - 7900;
+    if (idx < 0 || idx >= (NSInteger)_quickSlotsList.count) return;
+    NSDictionary *qs = _quickSlotsList[(NSUInteger)idx];
+    NSString *targetPath = qs[@"path"];
+    NSString *title = qs[@"title"] ?: @"Mốc lưu nhanh";
+    if (!targetPath.length) return;
+
+    UIAlertController *al = [UIAlertController alertControllerWithTitle:@"Xóa mốc lưu nhanh?"
+                                                                message:[NSString stringWithFormat:@"Xóa \"%@\"? File Save chính khi đi ngủ của nhân vật vẫn giữ nguyên 100%%.", title]
+                                                         preferredStyle:UIAlertControllerStyleAlert];
+    [al addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
+    [al addAction:[UIAlertAction actionWithTitle:@"Xóa" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+        (void)a;
+        sdvRemoveItemQuiet(targetPath);
+        self->_savesList = sdvListSaves(self->_root.path);
+        self->_quickSlotsList = sdvListQuickSavesAndSlots(self->_root.path);
+        self->_message = [NSString stringWithFormat:@"Đã xóa %@.", title];
+        self->_messageIsError = NO;
+        [self renderAll:NO];
+    }]];
+    [self presentSafely:al];
 }
 
 -(void)importSaveZipTapped {
@@ -2136,6 +2584,7 @@ static void sdvSpawnDiscordSparkleBurst(UIView *hostView, CGPoint origin, CGFloa
             sdvDeleteSaveFolder(folderPath, self->_root.path);
         } done:^{
             self->_savesList = sdvListSaves(self->_root.path);
+            self->_quickSlotsList = sdvListQuickSavesAndSlots(self->_root.path);
             self->_message = [NSString stringWithFormat:@"Đã xóa File Save %@.", folderName];
             self->_messageIsError = NO;
             [self renderAll:NO];
@@ -2383,7 +2832,36 @@ static void sdvSpawnDiscordSparkleBurst(UIView *hostView, CGPoint origin, CGFloa
         ], 14)];
 
     } else if (_ctrlSectionTab == 2) {
-        // ==================== TAB 2: PHÍM PC TÙY CHỌN (56 PHÍM) ====================
+        // ==================== TAB 2: PHÍM PC TÙY CHỌN (56 PHÍM + TỰ GẮN PHÍM MOD) ====================
+        NSArray<NSDictionary *> *detectedModKeys = [self detectInstalledModHotkeys];
+        if (detectedModKeys.count > 0) {
+            [_pane addArrangedSubview:mkSectionTitle(@"Tự động nhận diện Phím tắt Mod đã cài")];
+            UIStackView *smBox = mkVStack(8);
+            UIStackView *smHdr = mkHStack(10);
+            [smHdr addArrangedSubview:mkSettingsIconBadge(@"wand.and.stars", kTintGreen, 30)];
+            UIStackView *smTxt = mkVStack(1.5);
+            [smTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"Phát hiện %lu phím tắt từ Mod đang bật", (unsigned long)detectedModKeys.count], 14, UIFontWeightSemibold, kInkPrimary)];
+            NSMutableArray<NSString *> *summaryParts = [NSMutableArray array];
+            NSUInteger missingCnt = 0;
+            for (NSDictionary *mk in detectedModKeys) {
+                BOOL exists = [mk[@"alreadyBound"] boolValue];
+                if (!exists) missingCnt++;
+                [summaryParts addObject:[NSString stringWithFormat:@"%@ [%@%@]", mk[@"modName"], mk[@"label"], exists ? @" ✓" : @""]];
+            }
+            [smTxt addArrangedSubview:mkLabel([summaryParts componentsJoinedByString:@" · "], 12, UIFontWeightRegular, kInkSecondary)];
+            [smHdr addArrangedSubview:smTxt];
+            [smBox addArrangedSubview:smHdr];
+
+            if (missingCnt > 0) {
+                SDVAppleButton *autoBtn = mkIOSButton([NSString stringWithFormat:@"⚡ Tự gắn %lu phím tắt còn thiếu lên màn hình", (unsigned long)missingCnt], @"bolt.badge.checkmark.fill", kTintGreen, UIColor.whiteColor, 13, UIEdgeInsetsMake(9, 12, 9, 12));
+                [autoBtn addTarget:self action:@selector(autoBindModHotkeysTapped) forControlEvents:UIControlEventTouchUpInside];
+                [smBox addArrangedSubview:autoBtn];
+            } else {
+                [smBox addArrangedSubview:mkLabel(@"✓ Toàn bộ phím tắt của các Mod trên đã có sẵn trên màn hình!", 12, UIFontWeightSemibold, kTintGreen)];
+            }
+            [_pane addArrangedSubview:mkGroupedCard(smBox, UIEdgeInsetsMake(11, 14, 11, 14))];
+        }
+
         [_pane addArrangedSubview:mkSectionTitle(@"Nút phím máy tính tùy chọn (PC Keys)")];
         {
             NSMutableArray<UIView *> *ckRows = [NSMutableArray array];
@@ -2885,6 +3363,160 @@ static void sdvSpawnDiscordSparkleBurst(UIView *hostView, CGPoint origin, CGFloa
     [self renderAll:NO];
 }
 
+static BOOL sdvResolveXnaKeyString(NSString *rawKey, NSString **outLabel, NSInteger *outCode) {
+    if (![rawKey isKindOfClass:NSString.class] || !rawKey.length) return NO;
+    // Take first primary token if keybind list e.g. "LeftShift + F1, J" -> last key in chord or first standalone key
+    NSString *firstBind = [[rawKey componentsSeparatedByString:@","].firstObject stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    NSArray<NSString *> *chordParts = [firstBind componentsSeparatedByString:@"+"];
+    NSString *tok = [[chordParts.lastObject ?: firstBind stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] uppercaseString];
+    if (!tok.length || [tok isEqualToString:@"NONE"]) return NO;
+
+    if (tok.length == 1) {
+        unichar c = [tok characterAtIndex:0];
+        if (c >= 'A' && c <= 'Z') { *outLabel = tok; *outCode = (NSInteger)c; return YES; }
+        if (c >= '0' && c <= '9') { *outLabel = tok; *outCode = (NSInteger)c; return YES; }
+    }
+    if ([tok hasPrefix:@"D"] && tok.length == 2 && [tok characterAtIndex:1] >= '0' && [tok characterAtIndex:1] <= '9') {
+        NSString *d = [tok substringFromIndex:1];
+        *outLabel = d; *outCode = (NSInteger)[d characterAtIndex:0]; return YES;
+    }
+    if ([tok hasPrefix:@"F"] && tok.length >= 2 && tok.length <= 3) {
+        NSInteger fn = [[tok substringFromIndex:1] integerValue];
+        if (fn >= 1 && fn <= 12) { *outLabel = tok; *outCode = 111 + fn; return YES; }
+    }
+    NSDictionary<NSString *, NSArray *> *named = @{
+        @"BACK": @[@"BCK", @8], @"BACKSPACE": @[@"BCK", @8],
+        @"TAB": @[@"TAB", @9], @"ENTER": @[@"ENT", @13], @"RETURN": @[@"ENT", @13],
+        @"ESCAPE": @[@"ESC", @27], @"ESC": @[@"ESC", @27], @"SPACE": @[@"SPC", @32],
+        @"LEFTSHIFT": @[@"SHFT", @160], @"RIGHTSHIFT": @[@"SHFT", @160],
+        @"LEFTCONTROL": @[@"CTRL", @162], @"RIGHTCONTROL": @[@"CTRL", @162],
+        @"LEFTALT": @[@"ALT", @164], @"RIGHTALT": @[@"ALT", @164],
+        @"OEMTILDE": @[@"~", @192], @"OEMMINUS": @[@"-", @189], @"OEMPLUS": @[@"+", @187],
+        @"OEMOPENBRACKETS": @[@"[", @219], @"OEMCLOSEBRACKETS": @[@"]", @221]
+    };
+    NSArray *hit = named[tok];
+    if (hit) {
+        *outLabel = hit[0];
+        *outCode = [hit[1] integerValue];
+        return YES;
+    }
+    return NO;
+}
+
+-(NSArray<NSDictionary *> *)detectInstalledModHotkeys {
+    NSArray<NSDictionary *> *cat = _catalog.count ? _catalog : (_root.path.length ? modCatalog(_root.path) : @[]);
+    if (!cat.count) return @[];
+    if (!_mobileCfg) _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
+
+    NSMutableSet<NSNumber *> *existingCodes = [NSMutableSet set];
+    for (SDVCustomKeyEntry *ce in _mobileCfg.customKeys) [existingCodes addObject:@(ce.keyCode)];
+
+    NSDictionary<NSString *, NSDictionary *> *knownMods = @{
+        @"cjbok.cheatsmenu":          @{@"short": @"CJB Cheats",    @"keys": @[@"OpenMenuKey"],               @"defL": @"P",   @"defK": @80},
+        @"cjbok.itemspawner":         @{@"short": @"CJB Spawner",   @"keys": @[@"ShowMenuKey"],               @"defL": @"I",   @"defK": @73},
+        @"pathoschild.lookupanything":@{@"short": @"Lookup Anything",@"keys": @[@"ToggleLookup", @"Keys.ToggleLookup"], @"defL": @"F1", @"defK": @112},
+        @"annosz.uiinfosuite2":       @{@"short": @"UI Info Suite 2",@"keys": @[@"OpenCalendarAndQuestKeybind"], @"defL": @"F2", @"defK": @113},
+        @"bouhm.npcmaplocations":     @{@"short": @"NPC Map",       @"keys": @[@"MenuKey"],                   @"defL": @"M",   @"defK": @77},
+        @"pathoschild.tractormod":    @{@"short": @"Tractor Mod",   @"keys": @[@"SummonKey", @"Controls.SummonTractor"], @"defL": @"BCK", @"defK": @8},
+        @"pathoschild.automate":      @{@"short": @"Automate",      @"keys": @[@"ToggleOverlayKey", @"Controls.ToggleOverlay"], @"defL": @"U", @"defK": @85},
+        @"cantorsdust.timespeed":     @{@"short": @"TimeSpeed",     @"keys": @[@"FreezeTimeKey", @"Keys.FreezeTime"], @"defL": @"N", @"defK": @78}
+    };
+
+    NSMutableArray<NSDictionary *> *out = [NSMutableArray array];
+    NSMutableSet<NSNumber *> *seenCodes = [NSMutableSet set];
+    for (NSDictionary *m in cat) {
+        if (![m[@"enabled"] boolValue] || [m[@"protected"] boolValue]) continue;
+        NSString *uidLow = [m[@"uniqueID"] isKindOfClass:NSString.class] ? [m[@"uniqueID"] lowercaseString] : @"";
+        NSDictionary *spec = knownMods[uidLow];
+        NSString *cfgPath = [m[@"configPath"] isKindOfClass:NSString.class] ? m[@"configPath"] : @"";
+        NSDictionary *cfgJson = nil;
+        if (cfgPath.length && [fm() fileExistsAtPath:cfgPath]) {
+            @try {
+                id parsed = jsonAt(cfgPath);
+                if ([parsed isKindOfClass:NSDictionary.class]) cfgJson = parsed;
+            } @catch (NSException *ex) { }
+        }
+
+        if (spec) {
+            NSString *lbl = spec[@"defL"];
+            NSInteger code = [spec[@"defK"] integerValue];
+            if (cfgJson) {
+                for (NSString *kp in spec[@"keys"]) {
+                    NSArray<NSString *> *segs = [kp componentsSeparatedByString:@"."];
+                    id cur = cfgJson;
+                    for (NSString *s in segs) {
+                        if ([cur isKindOfClass:NSDictionary.class]) cur = dictValueCI(cur, s);
+                        else { cur = nil; break; }
+                    }
+                    NSString *candL = nil; NSInteger candK = 0;
+                    if ([cur isKindOfClass:NSString.class] && sdvResolveXnaKeyString(cur, &candL, &candK)) {
+                        lbl = candL; code = candK; break;
+                    }
+                }
+            }
+            if (code > 0 && ![seenCodes containsObject:@(code)]) {
+                [seenCodes addObject:@(code)];
+                [out addObject:@{
+                    @"modName": spec[@"short"],
+                    @"label": lbl,
+                    @"keyCode": @(code),
+                    @"alreadyBound": @([existingCodes containsObject:@(code)])
+                }];
+            }
+        } else if (cfgJson) {
+            for (NSString *k in cfgJson.allKeys) {
+                if (![k isKindOfClass:NSString.class]) continue;
+                NSString *kl = k.lowercaseString;
+                if ([kl hasSuffix:@"key"] || [kl hasSuffix:@"keybind"] || [kl hasSuffix:@"hotkey"]) {
+                    NSString *candL = nil; NSInteger candK = 0;
+                    if ([cfgJson[k] isKindOfClass:NSString.class] && sdvResolveXnaKeyString(cfgJson[k], &candL, &candK)) {
+                        if (candK > 0 && ![seenCodes containsObject:@(candK)]) {
+                            [seenCodes addObject:@(candK)];
+                            [out addObject:@{
+                                @"modName": m[@"name"] ?: uidLow,
+                                @"label": candL,
+                                @"keyCode": @(candK),
+                                @"alreadyBound": @([existingCodes containsObject:@(candK)])
+                            }];
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    return out;
+}
+
+-(void)autoBindModHotkeysTapped {
+    if (_veil) return;
+    _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
+    NSArray<NSDictionary *> *detected = [self detectInstalledModHotkeys];
+    NSUInteger added = 0;
+    NSMutableArray<NSString *> *addedLabels = [NSMutableArray array];
+    for (NSDictionary *mk in detected) {
+        if ([mk[@"alreadyBound"] boolValue]) continue;
+        if (_mobileCfg.customKeys.count >= 16) break;
+        NSString *lbl = mk[@"label"] ?: @"KEY";
+        NSInteger kc = [mk[@"keyCode"] integerValue];
+        if (kc > 0) {
+            [_mobileCfg addCustomKeyLabel:lbl keyCode:kc];
+            [addedLabels addObject:lbl];
+            added++;
+        }
+    }
+    if (added > 0) {
+        [_mobileCfg saveToDocuments:_root.path];
+        _message = [NSString stringWithFormat:@"⚡ Đã tự gắn %lu phím tắt Mod (%@) lên màn hình! Bấm Edit Layout nếu muốn dời vị trí.", (unsigned long)added, [addedLabels componentsJoinedByString:@", "]];
+        _messageIsError = NO;
+        [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];
+    } else {
+        _message = (_mobileCfg.customKeys.count >= 16) ? @"Đã đầy tối đa 16 nút phím PC trên màn hình." : @"Tất cả phím tắt Mod đã có sẵn trên màn hình.";
+        _messageIsError = (_mobileCfg.customKeys.count >= 16);
+    }
+    [self renderAll:NO];
+}
+
 -(void)applyPreset:(UIButton *)btn {
     float presetVals[4] = {0.75f, 1.00f, 1.35f, 1.75f};
     NSInteger idx = btn.tag - 100;
@@ -3088,6 +3720,32 @@ static void sdvSpawnDiscordSparkleBurst(UIView *hostView, CGPoint origin, CGFloa
         [_pane addArrangedSubview:mkGroupedRows(ipRows, 14)];
     }
 
+    // Co-op Modpack Compatibility Fingerprint (#COOP-XXXXXX)
+    if (_root.path.length) {
+        NSDictionary *mpInfo = sdvComputeCoopModpackInfo(_root.path);
+        NSString *mpCode = mpInfo[@"code"] ?: @"#COOP-VANILLA";
+        NSInteger mpCnt = [mpInfo[@"count"] integerValue];
+        [_pane addArrangedSubview:mkSectionTitle(@"Mã Đồng Bộ Bộ Mod Co-op (Chống lệch Mod)")];
+        UIStackView *mpBox = mkVStack(8);
+        UIStackView *mpTop = mkHStack(10);
+        [mpTop addArrangedSubview:mkSettingsIconBadge(@"checkmark.seal.fill", kTintPurple, 30)];
+        UIStackView *mpTxt = mkVStack(1.5);
+        UILabel *codeLbl = mkLabel(mpCode, 16, UIFontWeightBold, kTintPurple);
+        codeLbl.font = iosMonoDigits(16, UIFontWeightBold);
+        [mpTxt addArrangedSubview:codeLbl];
+        [mpTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"Đang tính trên %ld Mod gameplay đang bật (tự bỏ qua mod điều khiển riêng của máy).", (long)mpCnt], 12, UIFontWeightRegular, kInkSecondary)];
+        [mpTop addArrangedSubview:mpTxt];
+        [mpTop addArrangedSubview:[UIView new]];
+        SDVAppleButton *cpMp = mkIOSButton(@"Chép Mã & Modlist", @"doc.on.doc.fill", [kTintPurple colorWithAlphaComponent:0.15], kTintPurple, 12.5, UIEdgeInsetsMake(8, 11, 8, 11));
+        cpMp.accessibilityValue = mpInfo[@"copyText"];
+        [cpMp setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        [cpMp addTarget:self action:@selector(copyCoopModpackTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [mpTop addArrangedSubview:cpMp];
+        [mpBox addArrangedSubview:mpTop];
+        [mpBox addArrangedSubview:mkLabel(@"So sánh mã #COOP-... giữa máy Host và máy Tham gia trước khi vào phòng: trùng mã nghĩa là 100% khớp phiên bản Mod gameplay!", 12, UIFontWeightRegular, kInkSecondary)];
+        [_pane addArrangedSubview:mkGroupedCard(mpBox, UIEdgeInsetsMake(12, 14, 12, 14))];
+    }
+
     [_pane addArrangedSubview:mkSectionTitle(@"Hướng dẫn kết nối")];
     UILabel *guide = mkLabel(@"1. Cùng Wi-Fi (LAN): Chủ phòng vào Co-op → Tạo phòng (Host) và gửi IP Wi-Fi ở trên. Máy kia vào Co-op → Tham gia LAN → bấm KEY để gõ IP → OK.\n2. Online khác mạng: Cả 2 máy cài Tailscale hoặc ZeroTier, vào chung 1 mạng ảo rồi nhập IP mạng ảo (100.x.x.x).\nLưu ý: Các máy cần trùng bản 1.6.15, trùng mod gameplay và farm máy Host phải có sẵn nhà phụ (Cabin).", 13, UIFontWeightRegular, kInkSecondary);
     [_pane addArrangedSubview:mkGroupedCard(guide, UIEdgeInsetsMake(12, 14, 12, 14))];
@@ -3112,6 +3770,16 @@ static void sdvSpawnDiscordSparkleBurst(UIView *hostView, CGPoint origin, CGFloa
     [self renderAll:NO];
 }
 
+-(void)copyCoopModpackTapped:(UIButton *)btn {
+    NSString *txt = btn.accessibilityValue;
+    if (!txt.length) return;
+    UIPasteboard.generalPasteboard.string = txt;
+    [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];
+    _message = @"Đã sao chép Mã đồng bộ #COOP kèm danh sách Mod đang bật vào bộ nhớ tạm!";
+    _messageIsError = NO;
+    [self renderAll:NO];
+}
+
 -(void)runLanProbe {
     NSString *res = sdvProbeLocalNetwork();
     _message = res;
@@ -3121,7 +3789,7 @@ static void sdvSpawnDiscordSparkleBurst(UIView *hostView, CGPoint origin, CGFloa
 }
 
 // ============================================================
-// TAB 4: HƯỚNG DẪN SỬ DỤNG (CẬP NHẬT v1.0.3)
+// TAB 4: HƯỚNG DẪN SỬ DỤNG (v1.1.0)
 // ============================================================
 -(UIView *)mkGuideStep:(NSString *)num title:(NSString *)title body:(NSString *)body color:(UIColor *)col {
     UIStackView *row = mkHStack(11);
@@ -3799,6 +4467,167 @@ static void sdvSpawnDiscordSparkleBurst(UIView *hostView, CGPoint origin, CGFloa
 #endif
 
 // ---- Mod Library Actions ----
+-(void)modSearchEditingEnded:(UITextField *)tf {
+    _modSearchQuery = tf.text ?: @"";
+    [self renderAll:NO];
+}
+
+-(void)modFilterSegChanged:(UISegmentedControl *)seg {
+    _modFilterMode = seg.selectedSegmentIndex;
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+    [self renderAll:NO];
+}
+
+-(void)openModConfigEditorTapped:(UIButton *)btn {
+    NSInteger idx = btn.tag - 9000;
+    if (idx < 0 || idx >= (NSInteger)_catalog.count) return;
+    NSDictionary *m = _catalog[(NSUInteger)idx];
+    NSString *cfgPath = m[@"configPath"];
+    if (![cfgPath isKindOfClass:NSString.class] || !cfgPath.length || ![fm() fileExistsAtPath:cfgPath]) {
+        [self alert:@"Chưa có config.json" text:@"Mod này chưa sinh tệp config.json. Hãy vào game chạy Mod 1 lần rồi mở lại trình chỉnh sửa."];
+        return;
+    }
+    SDVModConfigEditorController *ed = [SDVModConfigEditorController new];
+    ed.modName = m[@"name"] ?: m[@"cleanFolder"];
+    ed.configPath = cfgPath;
+    __weak typeof(self) weakSelf = self;
+    ed.onSaved = ^{
+        __strong typeof(weakSelf) s = weakSelf;
+        if (!s) return;
+        s->_message = [NSString stringWithFormat:@"Đã lưu config.json của %@! Mở lại game nếu Mod cần nạp lại cấu hình từ đầu.", ed.modName];
+        s->_messageIsError = NO;
+        [s renderAll:NO];
+    };
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:ed];
+    nav.modalPresentationStyle = UIModalPresentationFormSheet;
+    [self presentSafely:nav];
+}
+
+-(void)healCaseSensitivityTapped {
+    if (_veil) return;
+    __block NSDictionary *res = nil;
+    [self work:@"Đang quét & sửa lệch chữ Hoa/Thường APFS…" action:^{
+        [self access:YES block:^(NSURL *r) {
+            res = sdvHealInstalledCaseSensitivity(r.path);
+            syncContentPackLocaleFallbacks(r.path);
+            [self scan:r];
+        }];
+    } done:^{
+        NSUInteger fj = [res[@"fixedJson"] unsignedIntegerValue];
+        NSUInteger fd = [res[@"fixedDll"] unsignedIntegerValue];
+        NSUInteger fc = [res[@"fixedContent"] unsignedIntegerValue];
+        NSUInteger tot = fj + fd + fc;
+        self->_message = (tot > 0)
+            ? [NSString stringWithFormat:@"Đã tự sửa %lu tệp/thư mục lệch chữ Hoa/Thường (%lu JSON/i18n, %lu EntryDll, %lu Content)!", (unsigned long)tot, (unsigned long)fj, (unsigned long)fd, (unsigned long)fc]
+            : @"Toàn bộ thư mục Mods/ và Content/ đã chuẩn chữ Hoa/Thường APFS 100%.";
+        self->_messageIsError = NO;
+        [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];
+        [self renderAll:NO];
+    }];
+}
+
+-(void)openModProfilesSheet:(UIButton *)sender {
+    (void)sender;
+    if (_veil || !_root.path.length) return;
+    NSArray<NSDictionary *> *profiles = sdvListSavedModProfiles(_root.path);
+    UIAlertController *sh = [UIAlertController alertControllerWithTitle:@"Hồ sơ Bộ Mod & Chế độ An toàn"
+        message:@"Chuyển nhanh giữa các bộ Mod (Vanilla, SVE, Co-op…) hoặc bật Safe Mode tắt tạm toàn bộ Mod ngoài để kiểm tra lỗi mà không xóa tệp."
+        preferredStyle:UIAlertControllerStyleActionSheet];
+
+    __weak typeof(self) weakSelf = self;
+    void (^applyMode)(NSString *, NSString *) = ^(NSString *mode, NSString *doneText) {
+        __strong typeof(weakSelf) s = weakSelf;
+        if (!s) return;
+        __block NSUInteger changed = 0;
+        [s work:@"Đang chuyển đổi Hồ sơ Mod…" action:^{
+            [s access:YES block:^(NSURL *r) {
+                changed = sdvApplyModProfileMode(r.path, mode);
+                [s scan:r];
+            }];
+        } done:^{
+            s->_message = [NSString stringWithFormat:@"%@ (đã đổi trạng thái %lu mod). Mở lại game để áp dụng.", doneText, (unsigned long)changed];
+            s->_messageIsError = NO;
+            [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];
+            [s renderAll:NO];
+        }];
+    };
+
+    [sh addAction:[UIAlertAction actionWithTitle:@"💾 Lưu bộ Mod đang bật thành Hồ sơ mới…" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        (void)a;
+        __strong typeof(weakSelf) s = weakSelf;
+        if (!s) return;
+        UIAlertController *inp = [UIAlertController alertControllerWithTitle:@"Lưu Hồ sơ Mod mới"
+            message:@"Đặt tên cho bộ Mod đang bật hiện tại (VD: Nông trại SVE, Chơi Co-op, Gọn nhẹ 4GB…):"
+            preferredStyle:UIAlertControllerStyleAlert];
+        [inp addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+            tf.placeholder = @"Tên hồ sơ Mod";
+            tf.autocapitalizationType = UITextAutocapitalizationTypeWords;
+        }];
+        [inp addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
+        [inp addAction:[UIAlertAction actionWithTitle:@"Lưu Hồ sơ" style:UIAlertActionStyleDefault handler:^(UIAlertAction *ac) {
+            (void)ac;
+            NSString *pName = [inp.textFields.firstObject.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            if (!pName.length) return;
+            [s work:@"Đang lưu Hồ sơ Mod…" action:^{
+                [s access:YES block:^(NSURL *r) {
+                    sdvSaveModProfileNamed(r.path, pName);
+                }];
+            } done:^{
+                s->_message = [NSString stringWithFormat:@"Đã lưu hồ sơ Mod \"%@\" thành công!", pName];
+                s->_messageIsError = NO;
+                [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];
+                [s renderAll:NO];
+            }];
+        }]];
+        [s presentSafely:inp];
+    }]];
+
+    for (NSDictionary *pr in profiles) {
+        NSString *pName = pr[@"name"] ?: @"Hồ sơ";
+        NSInteger cnt = [pr[@"count"] integerValue];
+        NSString *title = [NSString stringWithFormat:@"📂 Nạp hồ sơ \"%@\" (%ld mod)", pName, (long)cnt];
+        [sh addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            (void)a;
+            applyMode([@"profile:" stringByAppendingString:pName], [NSString stringWithFormat:@"Đã nạp hồ sơ \"%@\"", pName]);
+        }]];
+    }
+
+    [sh addAction:[UIAlertAction actionWithTitle:@"⚡ Bật tất cả Mod đã cài" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        (void)a;
+        applyMode(@"all_on", @"Đã bật tất cả Mod");
+    }]];
+
+    [sh addAction:[UIAlertAction actionWithTitle:@"🛡️ Chế độ An toàn (Safe Mode — tắt tạm Mod ngoài)" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+        (void)a;
+        applyMode(@"safe_mode", @"Đã bật Chế độ An toàn (chỉ giữ điều khiển hệ thống)");
+    }]];
+
+    if (profiles.count > 0) {
+        [sh addAction:[UIAlertAction actionWithTitle:@"🗑️ Xóa Hồ sơ đã lưu…" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+            (void)a;
+            __strong typeof(weakSelf) s = weakSelf;
+            if (!s) return;
+            UIAlertController *delSh = [UIAlertController alertControllerWithTitle:@"Chọn Hồ sơ cần xóa" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+            for (NSDictionary *pr in profiles) {
+                NSString *pName = pr[@"name"] ?: @"";
+                if (!pName.length) continue;
+                [delSh addAction:[UIAlertAction actionWithTitle:[@"Xóa \"" stringByAppendingFormat:@"%@\"", pName] style:UIAlertActionStyleDestructive handler:^(UIAlertAction *da) {
+                    (void)da;
+                    sdvDeleteModProfileNamed(s->_root.path, pName);
+                    s->_message = [NSString stringWithFormat:@"Đã xóa hồ sơ \"%@\".", pName];
+                    s->_messageIsError = NO;
+                    [s renderAll:NO];
+                }]];
+            }
+            [delSh addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
+            [s presentSafely:delSh];
+        }]];
+    }
+
+    [sh addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentSafely:sh];
+}
+
 -(void)toggleModSwitch:(UISwitch *)sw {
     NSInteger idx = sw.tag;
     if (idx < 0 || idx >= (NSInteger)_catalog.count) return;
@@ -3927,12 +4756,21 @@ static void sdvSpawnDiscordSparkleBurst(UIView *hostView, CGPoint origin, CGFloa
 }
 
 -(void)scan:(NSURL *)r {
-    _library = installed(r.path);
-    _catalog = modCatalog(r.path);
-    _modIssues = sdvDiagnoseMods(r.path);
-    _savesList = sdvListSaves(r.path);
+    NSDictionary *lib = installed(r.path);
+    NSArray<NSDictionary *> *cat = modCatalog(r.path);
+    NSArray<NSDictionary *> *issues = sdvDiagnoseMods(r.path);
+    NSArray<NSDictionary *> *saves = sdvListSaves(r.path);
+    NSArray<NSDictionary *> *qslots = sdvListQuickSavesAndSlots(r.path);
     NSString *h = latest(r);
-    _last = h ? journal(h)[@"name"] : nil;
+    NSString *lastName = h ? journal(h)[@"name"] : nil;
+    @synchronized(self) {
+        _library = lib;
+        _catalog = cat;
+        _modIssues = issues;
+        _savesList = saves;
+        _quickSlotsList = qslots;
+        _last = lastName;
+    }
 }
 
 -(void)cleanOrphanModFolderTapped:(UIButton *)btn {

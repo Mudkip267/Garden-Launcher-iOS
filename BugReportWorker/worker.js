@@ -5,12 +5,10 @@
 //   - logs/*                   (all sanitized log files extracted losslessly from ErrorLogs.zip)
 //   - media/*                  (up to 3 attached images/videos: JPG/PNG/WEBP/GIF/MP4/MOV)
 //
-// Required Secret in Worker Settings -> Variables & Secrets:
+// Required Secrets in Worker Settings -> Variables & Secrets:
 //   DISCORD_WEBHOOK_URL = https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN
-// Optional Secret/Var:
-//   REPORT_CLIENT_KEY   = your-secret-client-key (must match SDV_BUG_REPORT_CLIENT_KEY at build time)
+//   REPORT_CLIENT_KEY   = your-secret-client-key (must match SDV_BUG_REPORT_CLIENT_KEY at build time; fails closed if unset!)
 
-const DEFAULT_CLIENT_KEY = "CHANGE_ME_CLIENT_KEY";
 const MAX_ZIP_BYTES = 7.5 * 1024 * 1024;   // 7.5 MB cap for incoming ErrorLogs.zip
 const MAX_MEDIA_BYTES = 7.5 * 1024 * 1024; // 7.5 MB per image/video
 const MAX_TOTAL_BYTES = 9.0 * 1024 * 1024; // 9.0 MB combined (safe margin under Discord 10 MB limit)
@@ -311,10 +309,18 @@ function detectAllowedMedia(buf, origName) {
   ) {
     return { ext: "webp", mime: "image/webp" };
   }
-  if (b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70) {
+  if (b.length >= 12 && b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70) {
+    const brand = String.fromCharCode(b[8], b[9], b[10], b[11]);
     const low = (origName || "").toLowerCase();
-    const isMov = low.endsWith(".mov") || (b.length >= 10 && b[8] === 0x71 && b[9] === 0x74);
-    return isMov ? { ext: "mov", mime: "video/quicktime" } : { ext: "mp4", mime: "video/mp4" };
+    if (brand === "qt  ") {
+      return { ext: "mov", mime: "video/quicktime" };
+    }
+    const allowedMp4Brands = ["isom", "iso2", "mp41", "mp42", "avc1", "M4V ", "3gp4", "3gp5", "mmp4", "MSNV"];
+    if (allowedMp4Brands.includes(brand)) {
+      const isMov = low.endsWith(".mov");
+      return isMov ? { ext: "mov", mime: "video/quicktime" } : { ext: "mp4", mime: "video/mp4" };
+    }
+    return null;
   }
   return null;
 }
@@ -391,10 +397,10 @@ export default {
       return jsonResp({
         ok: true,
         service: "Garden Launcher Bug Report Bridge",
-        version: "2.0",
+        version: "2.1",
         consolidatedBundle: true,
         mediaSupport: true,
-        configured: Boolean(env.DISCORD_WEBHOOK_URL),
+        configured: Boolean(env.DISCORD_WEBHOOK_URL && env.REPORT_CLIENT_KEY),
         endpoint: `${url.origin}/report`,
       });
     }
@@ -403,14 +409,13 @@ export default {
       return jsonResp({ ok: false, error: "Method not allowed" }, 405);
     }
 
-    if (!env.DISCORD_WEBHOOK_URL) {
-      return jsonResp({ ok: false, error: "Máy chủ chưa cấu hình DISCORD_WEBHOOK_URL." }, 503);
+    if (!env.DISCORD_WEBHOOK_URL || !env.REPORT_CLIENT_KEY) {
+      return jsonResp({ ok: false, error: "Máy chủ chưa cấu hình đầy đủ khóa bảo mật báo lỗi." }, 503);
     }
 
     const appHdr = request.headers.get("X-Garden-App") || "";
     const keyHdr = request.headers.get("X-Garden-Key") || "";
-    const expectedKey = env.REPORT_CLIENT_KEY || DEFAULT_CLIENT_KEY;
-    if (appHdr !== "GardenLauncher-iOS" || keyHdr !== expectedKey) {
+    if (appHdr !== "GardenLauncher-iOS" || keyHdr !== env.REPORT_CLIENT_KEY) {
       return jsonResp({ ok: false, error: "Yêu cầu không hợp lệ." }, 403);
     }
 
@@ -428,7 +433,7 @@ export default {
     const fullDescription = clampStr(form.get("description"), 8000, "");
     const embedDescription = clampStr(fullDescription, 2000, "");
     const contact = clampStr(form.get("contact"), 140, "Không cung cấp");
-    const appVersion = clampStr(form.get("appVersion"), 40, "1.0.6");
+    const appVersion = clampStr(form.get("appVersion"), 40, "1.1.0");
     const iosVersion = clampStr(form.get("iosVersion"), 40, "?");
     const device = clampStr(form.get("device"), 64, "iPhone");
     const ramInfo = clampStr(form.get("ramInfo"), 120, "?");

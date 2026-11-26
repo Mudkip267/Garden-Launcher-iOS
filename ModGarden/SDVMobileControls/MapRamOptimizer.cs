@@ -38,6 +38,7 @@ namespace SDVMobileControls
         private readonly IModHelper _helper;
         private readonly IMonitor _monitor;
         private readonly string _pruneFlagPath;
+        private readonly string _gcFlagPath;
 
         // Track pure Pathoschild.ContentPatcher content packs (zero C# code -> safe to prune dead copies)
         private readonly HashSet<string> _cpPackNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -75,6 +76,7 @@ namespace SDVMobileControls
             string gardenDir = Path.Combine(docs, ".garden");
             try { Directory.CreateDirectory(gardenDir); } catch { }
             _pruneFlagPath = Path.Combine(gardenDir, "sdv_prune_now.flag");
+            _gcFlagPath = Path.Combine(gardenDir, "sdv_gc_now.flag");
         }
 
         public void OnGameLaunched()
@@ -156,7 +158,7 @@ namespace SDVMobileControls
         {
             if (!Context.IsWorldReady)
                 return;
-            if (++_flagPollCounter < 60)
+            if (++_flagPollCounter < 30)
                 return;
             _flagPollCounter = 0;
             try
@@ -165,7 +167,9 @@ namespace SDVMobileControls
                     return;
                 string mode = "";
                 try { mode = File.ReadAllText(_pruneFlagPath)?.Trim() ?? ""; } catch { }
-                File.Delete(_pruneFlagPath);
+                try { File.Delete(_pruneFlagPath); } catch { }
+                // Consume companion sdv_gc_now.flag if also present so TouchVirtualPad.CheckManualGcFlag never runs a duplicate blocking Gen2 GC!
+                try { if (File.Exists(_gcFlagPath)) File.Delete(_gcFlagPath); } catch { }
                 bool critical = string.Equals(mode, "CRIT", StringComparison.OrdinalIgnoreCase);
                 RunPrune(keepRecentOffscreen: 0, runGc: true, blockingGc: critical, reason: critical ? "AutoCritGC" : "ManualGC");
             }

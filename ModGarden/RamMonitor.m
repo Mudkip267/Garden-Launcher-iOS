@@ -196,12 +196,12 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
     NSString *docsCopy = [docsPath copy];
     dispatch_async([self ioQueue], ^{
         NSString *gd = sdvHiddenGardenDir(docsCopy);
+        NSString *pruneFlag = [gd stringByAppendingPathComponent:@"sdv_prune_now.flag"];
+        [(critical ? @"CRIT" : @"1") writeToFile:pruneFlag atomically:YES encoding:NSUTF8StringEncoding error:nil];
         if (critical) {
             NSString *flag = [gd stringByAppendingPathComponent:@"sdv_gc_now.flag"];
             [@"1" writeToFile:flag atomically:YES encoding:NSUTF8StringEncoding error:nil];
         }
-        NSString *pruneFlag = [gd stringByAppendingPathComponent:@"sdv_prune_now.flag"];
-        [(critical ? @"CRIT" : @"1") writeToFile:pruneFlag atomically:YES encoding:NSUTF8StringEncoding error:nil];
     });
 }
 

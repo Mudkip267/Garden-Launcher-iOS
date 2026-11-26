@@ -30,6 +30,8 @@ namespace SDVMobileControls
         internal static ExternalInputBridge ExternalInput;
         private static IMonitor _monitor;
         private static readonly HashSet<Type> BoundPadTypes = new HashSet<Type>();
+        private static readonly List<FieldInfo> BoundExtGamepadFields = new List<FieldInfo>(2);
+        private static bool _lastSyncedExtGamepadActive;
         private static readonly HashSet<Type> PatchedTouchHookTypes = new HashSet<Type>();
         private static PropertyInfo _delegatingParentProp;
         private static MethodInfo _modHooksUpdateControlInput;
@@ -83,6 +85,13 @@ namespace SDVMobileControls
         private static bool _pendingReloadAllPortraits;
         private static int _portraitSyncDelayTicks = -1;
         private static string _portraitSyncReason;
+        private static int _openAlWatchdogTicks;
+        private static bool _openAlWatchdogResolved;
+        private static PropertyInfo _oalInstProp;
+        private static FieldInfo _oalCtxField;
+        private static Delegate _alcGetCurDel;
+        private static Delegate _alcMakeCurDel;
+        private static Delegate _alcProcDel;
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate void BootReportDelegate(
@@ -696,6 +705,27 @@ namespace SDVMobileControls
                                         SpriteEffects.None,
                                         1f);
                                 }
+
+                                // Stardew 1.6 Desert Festival Skull Cavern Calico Egg Rating HUD (hidden when takingMapScreenshot==true in World_AlwaysFront!)
+                                if (area == 121 && Utility.IsPassiveFestivalDay("DesertFestival") && Game1.player?.team != null)
+                                {
+                                    int eggRating = Game1.player.team.calicoEggSkullCavernRating.Value + 1;
+                                    int eggY = fy + height + 12;
+                                    if (Game1.mouseCursors_1_6 != null && !Game1.mouseCursors_1_6.IsDisposed)
+                                    {
+                                        e.SpriteBatch.Draw(
+                                            Game1.mouseCursors_1_6,
+                                            new Vector2(fx, eggY),
+                                            new Rectangle(0, 19, 16, 15),
+                                            Color.White,
+                                            0f,
+                                            Vector2.Zero,
+                                            4f,
+                                            SpriteEffects.None,
+                                            1f);
+                                    }
+                                    SpriteText.drawString(e.SpriteBatch, eggRating.ToString(), fx + 72, eggY + 4, 999999, -1, height, 1f, 1f, false, 2, "", SpriteText.color_Red);
+                                }
                             }
                             else if (Game1.currentLocation is VolcanoDungeon vd && vd.level.Value > 0)
                             {
@@ -746,6 +776,16 @@ namespace SDVMobileControls
                     // CRITICAL: Poll & push SInputState.<ControllerState>k__BackingField AFTER SInputState.TrueUpdate()
                     // and BEFORE Game1._update() -> Game1.updateActiveMenu() so Gamepad UI menus work 100% on 0% JIT!
                     ExternalInput.PollFrame();
+                    bool extGpNow = ExternalInput.IsPhysicalGamepadActive || (Engine != null && Engine.IsPureGamepadMode);
+                    if (extGpNow != _lastSyncedExtGamepadActive && BoundExtGamepadFields.Count > 0)
+                    {
+                        _lastSyncedExtGamepadActive = extGpNow;
+                        object boxedBool = extGpNow ? (object)true : (object)false;
+                        for (int i = 0; i < BoundExtGamepadFields.Count; i++)
+                        {
+                            try { BoundExtGamepadFields[i].SetValue(null, boxedBool); } catch { }
+                        }
+                    }
                 }
             }
             catch { }
@@ -807,6 +847,7 @@ namespace SDVMobileControls
             try { RamOptimizer?.PollManualPruneFlag(); } catch { }
             FlushPendingPortraitSync();
             PollMailboxWatchdog();
+            PollOpenAlAudioResumeWatchdog();
             if (!_audioDiagRanLaunch && ++_audioDiagTicks >= 120)
             {
                 _audioDiagRanLaunch = true;
@@ -827,6 +868,49 @@ namespace SDVMobileControls
                 EnsureGardenModHooksInstalled("UpdateTicked");
                 InstallExternalInputHarmonyPatches("UpdateTicked");
             }
+        }
+
+        private static void PollOpenAlAudioResumeWatchdog()
+        {
+            if (!_bootGameLaunched || ++_openAlWatchdogTicks < 90)
+                return;
+            _openAlWatchdogTicks = 0;
+            try
+            {
+                if (!_openAlWatchdogResolved)
+                {
+                    _openAlWatchdogResolved = true;
+                    const BindingFlags any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+                    Assembly mgAsm = typeof(SoundEffect).Assembly;
+                    Type oalType = mgAsm.GetType("Microsoft.Xna.Framework.Audio.OpenALSoundController");
+                    Type alcType = mgAsm.GetType("MonoGame.OpenAL.Alc");
+                    _oalInstProp = oalType?.GetProperty("Instance", any);
+                    _oalCtxField = oalType?.GetField("_context", any);
+                    _alcGetCurDel = alcType?.GetField("GetCurrentContext", any)?.GetValue(null) as Delegate;
+                    _alcMakeCurDel = alcType?.GetField("MakeContextCurrent", any)?.GetValue(null) as Delegate;
+                    _alcProcDel = alcType?.GetField("ProcessContext", any)?.GetValue(null) as Delegate;
+                }
+                if (_oalInstProp == null || _oalCtxField == null || _alcGetCurDel == null || _alcMakeCurDel == null)
+                    return;
+
+                object inst = _oalInstProp.GetValue(null);
+                if (inst == null)
+                    return;
+                IntPtr ctx = (IntPtr)(_oalCtxField.GetValue(inst) ?? IntPtr.Zero);
+                if (ctx == IntPtr.Zero)
+                    return;
+
+                IntPtr curCtx = (IntPtr)(_alcGetCurDel.DynamicInvoke() ?? IntPtr.Zero);
+                if (curCtx == IntPtr.Zero)
+                {
+                    _alcMakeCurDel.DynamicInvoke(ctx);
+                    _alcProcDel?.DynamicInvoke(ctx);
+                    if (SoundEffect.MasterVolume < 0.01f)
+                        SoundEffect.MasterVolume = 1.0f;
+                    _monitor?.Log("[AudioAutoHeal] Restored suspended OpenAL context after iOS phone/Siri/alarm interruption!", LogLevel.Info);
+                }
+            }
+            catch { }
         }
 
         private void RunAudioDiagnosticAndRepair(string phase)
@@ -1027,6 +1111,12 @@ namespace SDVMobileControls
                     FieldInfo fKeys = tvp.GetField("MobileExtraKeysHook", stat);
                     FieldInfo fKeysList = tvp.GetField("MobileExtraKeysListHook", stat);
                     FieldInfo fHasKeys = tvp.GetField("MobileHasExtraKeysHook", stat);
+                    FieldInfo fExtGpAct = tvp.GetField("ExternalGamepadActive", stat);
+                    if (fExtGpAct != null && !BoundExtGamepadFields.Contains(fExtGpAct))
+                    {
+                        BoundExtGamepadFields.Add(fExtGpAct);
+                        try { fExtGpAct.SetValue(null, _lastSyncedExtGamepadActive); } catch { }
+                    }
                     if (fUpd == null || fDrw == null)
                     {
                         _monitor.Log($"[{phase}] Found {tvp.FullName} in {asm.GetName().Name}, but MobileUpdateHook/MobileDrawHook fields missing!", LogLevel.Warn);

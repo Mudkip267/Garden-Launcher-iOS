@@ -23,6 +23,8 @@ namespace SDVMobileControls
             typeof(ShopMenu).GetMethod("tryToPurchaseItem", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
         private static readonly FieldInfo ShopIsStorageField =
             typeof(ShopMenu).GetField("_isStorageShop", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly FieldInfo ShopSellPctField =
+            typeof(ShopMenu).GetField("sellPercentage", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
         private static readonly FieldInfo ShopScrollRunnerField =
             typeof(ShopMenu).GetField("scrollBarRunner", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
         private static readonly MethodInfo ShopSetScrollBarMethod =
@@ -61,7 +63,13 @@ namespace SDVMobileControls
         private int _popupStock = ShopMenu.infiniteStock;
         private string _popupTradeItemId;
         private int _popupTradeCount;
+        private int _popupBundlePerPurchase = 1;
         private bool _popupCanAfford = true;
+        private IList<Item> _cachedCraftExtraItems;
+        private string _wrapCacheText;
+        private int _wrapCacheMaxW;
+        private float _wrapCacheScale;
+        private readonly List<string> _wrapCacheLines = new List<string>(8);
 
         // Popup interactive rects (viewport pixel space)
         private Rectangle _popPanel;
@@ -139,9 +147,37 @@ namespace SDVMobileControls
             _popupDstInv = null;
             _popupSrcSlot = -1;
             _popupStock = ShopMenu.infiniteStock;
+            _popupBundlePerPurchase = 1;
+            _cachedCraftExtraItems = null;
             _popSliderTouchId = -1;
             _popHoldTouchId = -1;
             _popHoldDelta = 0;
+        }
+
+        private static bool IsSpecialWalletTradeCurrency(string tradeId)
+        {
+            if (string.IsNullOrEmpty(tradeId)) return false;
+            return string.Equals(tradeId, "(O)858", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(tradeId, "858", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(tradeId, "(O)73", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(tradeId, "73", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static int GetPlayerTradeItemCount(Farmer who, string tradeId)
+        {
+            if (who == null || string.IsNullOrEmpty(tradeId))
+                return 0;
+            if (string.Equals(tradeId, "(O)858", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(tradeId, "858", StringComparison.OrdinalIgnoreCase))
+            {
+                return Math.Max(0, who.QiGems);
+            }
+            if (string.Equals(tradeId, "(O)73", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(tradeId, "73", StringComparison.OrdinalIgnoreCase))
+            {
+                return Math.Max(0, Game1.netWorldState?.Value?.GoldenWalnuts ?? 0);
+            }
+            return who.Items?.CountId(tradeId) ?? 0;
         }
 
         private static bool IsStorageShop(ShopMenu shop)
@@ -166,6 +202,7 @@ namespace SDVMobileControls
 
             int craftable = 0;
             IList<Item> matItems = GetContainerItemsList(cp._materialContainers);
+            _cachedCraftExtraItems = matItems;
             try { craftable = recipe.getCraftableCount(matItems); } catch { craftable = 0; }
             if (craftable <= 0)
             {
@@ -793,11 +830,13 @@ namespace SDVMobileControls
                 : 999;
 
             int maxByTrade = (!string.IsNullOrEmpty(tradeId) && tradeCount > 0)
-                ? Game1.player.Items.CountId(tradeId) / tradeCount
+                ? GetPlayerTradeItemCount(Game1.player, tradeId) / tradeCount
                 : 999;
 
+            int bundleStack = Math.Max(1, sale.Stack);
             int maxByStock = (stock == ShopMenu.infiniteStock) ? 999 : Math.Max(0, stock);
-            int maxStack = (sale.IsRecipe || sale.maximumStackSize() <= 1) ? 1 : sale.maximumStackSize();
+            int rawMaxStack = (sale.IsRecipe || sale.maximumStackSize() <= 1) ? 1 : sale.maximumStackSize();
+            int maxStack = Math.Max(1, rawMaxStack / bundleStack);
             int affordable = Math.Min(maxByMoney, maxByTrade);
             int maxBuy = Math.Min(Math.Min(maxByStock, maxStack), Math.Max(1, affordable));
             maxBuy = Math.Clamp(maxBuy, 1, 999);
@@ -815,6 +854,7 @@ namespace SDVMobileControls
             _popupStock = stock;
             _popupTradeItemId = tradeId;
             _popupTradeCount = tradeCount;
+            _popupBundlePerPurchase = bundleStack;
             _popupCanAfford = (affordable >= 1 && maxByStock >= 1);
 
             try { Game1.playSound("smallSelect"); } catch { }
@@ -823,7 +863,14 @@ namespace SDVMobileControls
         private void OpenShopSellPopup(ShopMenu shop, InventoryMenu inv, int slot, Item item, Point uiCenter)
         {
             int unitPrice = 0;
-            try { unitPrice = Utility.getSellToStorePriceOfItem(item, countStack: false); } catch { }
+            try
+            {
+                float rawSell = Utility.getSellToStorePriceOfItem(item, countStack: false);
+                if (shop != null && ShopSellPctField?.GetValue(shop) is float sp && Math.Abs(sp - 1f) > 0.001f)
+                    rawSell *= sp;
+                unitPrice = (int)rawSell;
+            }
+            catch { }
             if (unitPrice < 0) unitPrice = 0;
 
             _popupKind = PopupKind.ShopSell;
@@ -869,8 +916,9 @@ namespace SDVMobileControls
                 if (!isUpgradeOrService && _popupSaleItem is Item checkItem)
                 {
                     Item probe = checkItem.getOne();
-                    probe.Stack = _popupQty;
+                    probe.Stack = _popupQty * Math.Max(1, _popupBundlePerPurchase);
                     bool freesTradeSlot = !string.IsNullOrEmpty(_popupTradeItemId) && _popupTradeCount > 0 &&
+                                          !IsSpecialWalletTradeCurrency(_popupTradeItemId) &&
                                           Game1.player.Items.CountId(_popupTradeItemId) == _popupQty * _popupTradeCount;
                     if (!freesTradeSlot && !Game1.player.couldInventoryAcceptThisItem(probe))
                     {
@@ -2430,7 +2478,33 @@ namespace SDVMobileControls
 
             if (_popupKind == PopupKind.ShopBuy)
             {
-                if (!string.IsNullOrEmpty(_popupTradeItemId) && _popupTradeCount > 0)
+                bool hasTradeCost = !string.IsNullOrEmpty(_popupTradeItemId) && _popupTradeCount > 0;
+                bool hasMoneyCost = _popupUnitPrice > 0;
+                if (hasMoneyCost || !hasTradeCost)
+                {
+                    string unitTag = _popupCurrency == 1 ? "★" : (_popupCurrency == 2 ? "QC" : (_popupCurrency == 4 ? "Qi" : "g"));
+                    string priceSub = _popupUnitPrice <= 0
+                        ? $"Miễn phí · SL: {_popupQty * Math.Max(1, _popupBundlePerPurchase)}"
+                        : $"Giá: {_popupUnitPrice:N0}{unitTag} × {_popupQty} = {(_popupUnitPrice * (long)_popupQty):N0}{unitTag}";
+                    if (_popupStock != ShopMenu.infiniteStock && _popupStock > 0)
+                        priceSub += $"  (Còn {_popupStock})";
+                    DrawStardewText(sb, priceSub, new Vector2(textX, curY), subInk, fontScale * 0.88f);
+                    curY += lineH;
+
+                    if (hasMoneyCost && !hasTradeCost)
+                    {
+                        int have = ShopMenu.getPlayerCurrencyAmount(Game1.player, _popupCurrency);
+                        int coinSz = Math.Max(18, (int)(22f * fontScale));
+                        Rectangle coinSrc = _popupCurrency == 1
+                            ? new Rectangle(338, 400, 8, 8)
+                            : new Rectangle(193, 373, 9, 10);
+                        try { sb.Draw(Game1.mouseCursors, new Rectangle((int)textX, (int)curY + 2, coinSz, coinSz), coinSrc, Color.White); } catch { }
+                        Color haveCol = _popupCanAfford ? new Color(36, 118, 42) : new Color(180, 32, 24);
+                        DrawStardewText(sb, $"Hiện có: {have:N0}{unitTag}", new Vector2(textX + coinSz + 8, curY), haveCol, fontScale * 0.84f);
+                        curY += lineH;
+                    }
+                }
+                if (hasTradeCost)
                 {
                     int trSz = Math.Max(22, (int)(26f * fontScale));
                     string trName = "vật phẩm";
@@ -2444,35 +2518,12 @@ namespace SDVMobileControls
                         }
                     }
                     catch { }
-                    int haveTrade = Game1.player?.Items?.CountId(_popupTradeItemId) ?? 0;
+                    int haveTrade = GetPlayerTradeItemCount(Game1.player, _popupTradeItemId);
                     int needTrade = _popupTradeCount * _popupQty;
                     Color trCol = haveTrade >= needTrade ? new Color(36, 118, 42) : new Color(180, 32, 24);
-                    DrawStardewText(sb, $"{trName}: {haveTrade}/{needTrade}", new Vector2(textX + trSz + 8, curY), trCol, fontScale * 0.86f);
+                    string stockSuffix = (!hasMoneyCost && _popupStock != ShopMenu.infiniteStock && _popupStock > 0) ? $"  (Còn {_popupStock})" : "";
+                    DrawStardewText(sb, $"{trName}: {haveTrade}/{needTrade}{stockSuffix}", new Vector2(textX + trSz + 8, curY), trCol, fontScale * 0.86f);
                     curY += lineH;
-                }
-                else
-                {
-                    string unitTag = _popupCurrency == 1 ? "★" : (_popupCurrency == 2 ? "QC" : (_popupCurrency == 4 ? "Qi" : "g"));
-                    string priceSub = _popupUnitPrice <= 0
-                        ? $"Miễn phí · SL: {_popupQty}"
-                        : $"Giá: {_popupUnitPrice:N0}{unitTag} × {_popupQty} = {(_popupUnitPrice * (long)_popupQty):N0}{unitTag}";
-                    if (_popupStock != ShopMenu.infiniteStock && _popupStock > 0)
-                        priceSub += $"  (Còn {_popupStock})";
-                    DrawStardewText(sb, priceSub, new Vector2(textX, curY), subInk, fontScale * 0.88f);
-                    curY += lineH;
-
-                    if (_popupUnitPrice > 0)
-                    {
-                        int have = ShopMenu.getPlayerCurrencyAmount(Game1.player, _popupCurrency);
-                        int coinSz = Math.Max(18, (int)(22f * fontScale));
-                        Rectangle coinSrc = _popupCurrency == 1
-                            ? new Rectangle(338, 400, 8, 8)
-                            : new Rectangle(193, 373, 9, 10);
-                        try { sb.Draw(Game1.mouseCursors, new Rectangle((int)textX, (int)curY + 2, coinSz, coinSz), coinSrc, Color.White); } catch { }
-                        Color haveCol = _popupCanAfford ? new Color(36, 118, 42) : new Color(180, 32, 24);
-                        DrawStardewText(sb, $"Hiện có: {have:N0}{unitTag}", new Vector2(textX + coinSz + 8, curY), haveCol, fontScale * 0.84f);
-                        curY += lineH;
-                    }
                 }
             }
             else if (_popupKind == PopupKind.ShopSell)
@@ -2604,8 +2655,9 @@ namespace SDVMobileControls
             Color confirmTint;
             if (_popupKind == PopupKind.ShopBuy)
             {
+                int totalUnits = _popupQty * Math.Max(1, _popupBundlePerPurchase);
                 if (!_popupCanAfford) { confirmLbl = "Không đủ điều kiện"; confirmTint = new Color(245, 210, 208); }
-                else { confirmLbl = $"Mua ×{_popupQty}"; confirmTint = new Color(235, 255, 232); }
+                else { confirmLbl = $"Mua ×{totalUnits}"; confirmTint = new Color(235, 255, 232); }
             }
             else if (_popupKind == PopupKind.ShopSell)
             {
@@ -2654,7 +2706,7 @@ namespace SDVMobileControls
             int cellW = cols == 2 ? (w - 14) / 2 : w;
             int iconSz = Math.Clamp((int)(cellH * 0.76f), 20, 34);
 
-            IList<Item> extraItems = GetContainerItemsList(cp?._materialContainers);
+            IList<Item> extraItems = _cachedCraftExtraItems ?? GetContainerItemsList(cp?._materialContainers);
             int idx = 0;
             foreach (var kv in recipe.recipeList)
             {
@@ -2710,33 +2762,46 @@ namespace SDVMobileControls
             try { return Game1.smallFont.MeasureString(text).X * scale; } catch { return text.Length * 12f * scale; }
         }
 
-        private static float DrawWrappedStardewText(SpriteBatch sb, string text, int x, int y, int maxW, int maxH, Color color, float scale)
+        private float DrawWrappedStardewText(SpriteBatch sb, string text, int x, int y, int maxW, int maxH, Color color, float scale)
         {
             if (string.IsNullOrEmpty(text) || Game1.smallFont == null || maxH <= 10) return 0f;
-            string[] words = text.Split(' ');
-            string line = "";
+            if (!string.Equals(_wrapCacheText, text, StringComparison.Ordinal) ||
+                _wrapCacheMaxW != maxW ||
+                Math.Abs(_wrapCacheScale - scale) > 0.002f)
+            {
+                _wrapCacheText = text;
+                _wrapCacheMaxW = maxW;
+                _wrapCacheScale = scale;
+                _wrapCacheLines.Clear();
+                string[] words = text.Split(' ');
+                string line = "";
+                for (int i = 0; i < words.Length; i++)
+                {
+                    string cand = string.IsNullOrEmpty(line) ? words[i] : (line + " " + words[i]);
+                    if (MeasureWidth(cand, scale) > maxW && !string.IsNullOrEmpty(line))
+                    {
+                        _wrapCacheLines.Add(line);
+                        line = words[i];
+                    }
+                    else
+                    {
+                        line = cand;
+                    }
+                }
+                if (!string.IsNullOrEmpty(line))
+                    _wrapCacheLines.Add(line);
+            }
+
             float curY = y;
             float lh = Math.Max(18f, 26f * scale);
-            for (int i = 0; i < words.Length; i++)
+            for (int i = 0; i < _wrapCacheLines.Count; i++)
             {
-                string cand = string.IsNullOrEmpty(line) ? words[i] : (line + " " + words[i]);
-                if (MeasureWidth(cand, scale) > maxW && !string.IsNullOrEmpty(line))
-                {
-                    DrawStardewText(sb, line, new Vector2(x, curY), color, scale);
-                    curY += lh;
-                    if (curY + lh > y + maxH)
-                        return curY - y;
-                    line = words[i];
-                }
-                else
-                {
-                    line = cand;
-                }
-            }
-            if (!string.IsNullOrEmpty(line) && curY + lh * 0.6f <= y + maxH)
-            {
-                DrawStardewText(sb, line, new Vector2(x, curY), color, scale);
+                if (curY + lh * 0.6f > y + maxH)
+                    break;
+                DrawStardewText(sb, _wrapCacheLines[i], new Vector2(x, curY), color, scale);
                 curY += lh;
+                if (curY + lh > y + maxH && i + 1 < _wrapCacheLines.Count)
+                    break;
             }
             return curY - y;
         }

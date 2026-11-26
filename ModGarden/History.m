@@ -2,8 +2,32 @@
 
 static NSString *history(NSURL *root) {
     NSString *support = [fm() URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject.path;
+    NSString *histRoot = join(support, @"GardenHistory");
+    static dispatch_once_t onceBackupExcl;
+    dispatch_once(&onceBackupExcl, ^{
+        mkdirs(histRoot);
+        NSURL *u = [NSURL fileURLWithPath:histRoot isDirectory:YES];
+        [u setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
+    });
     NSString *key = hashData([root.path.stringByStandardizingPath dataUsingEncoding:NSUTF8StringEncoding]);
-    return join(join(support, @"GardenHistory"), key);
+    return join(histRoot, key);
+}
+
+static void pruneOldCompletedHistory(NSURL *root, NSUInteger keepMax) {
+    NSString *base = history(root);
+    if (!dir(base)) return;
+    NSArray<NSString *> *sorted = [[fm() contentsOfDirectoryAtPath:base error:nil] sortedArrayUsingSelector:@selector(compare:)];
+    NSMutableArray<NSString *> *donePaths = [NSMutableArray array];
+    for (NSString *d in sorted) {
+        NSString *hp = join(base, d);
+        if (dir(hp) && [fm() fileExistsAtPath:join(hp, @"done")]) {
+            [donePaths addObject:hp];
+        }
+    }
+    while (donePaths.count > keepMax) {
+        sdvRemoveItemQuiet(donePaths.firstObject);
+        [donePaths removeObjectAtIndex:0];
+    }
 }
 
 static NSString *safeHistoryFileHash(NSString *p, BOOL *outIsDir) {
@@ -205,6 +229,7 @@ static NSUInteger installBatch(NSURL *root, NSString *stage, NSDictionary *map, 
             writeFile(readFile(inside(stage, map[r])), gamePath(root.path, r));
         }}
         writeFile(NSData.data, join(h, @"done"));
+        pruneOldCompletedHistory(root, 8);
         return rows.count;
     } @catch (NSException *ex) {
         @try {

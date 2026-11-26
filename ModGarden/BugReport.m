@@ -232,7 +232,18 @@ static NSDictionary *sdvBuildBugReportBundle(NSString *docsPath) {
         for (NSString *il in issueLines) [sysTxt appendFormat:@"  %@\n", il];
     }
 
-    NSString *zipPath = join(NSTemporaryDirectory(), @"GardenLauncher-ErrorLogs.zip");
+    NSString *tmpDir = NSTemporaryDirectory();
+    NSDate *nowSweep = NSDate.date;
+    for (NSString *fn in ([fm() contentsOfDirectoryAtPath:tmpDir error:nil] ?: @[])) {
+        if ([fn hasPrefix:@"GardenLauncher-ErrorLogs"] && [fn hasSuffix:@".zip"]) {
+            NSString *oldP = join(tmpDir, fn);
+            NSDate *mdt = [fm() attributesOfItemAtPath:oldP error:nil][NSFileModificationDate];
+            if (mdt && [nowSweep timeIntervalSinceDate:mdt] > 600.0) {
+                [fm() removeItemAtPath:oldP error:nil];
+            }
+        }
+    }
+    NSString *zipPath = join(tmpDir, [NSString stringWithFormat:@"GardenLauncher-ErrorLogs-%@.zip", NSUUID.UUID.UUIDString]);
     [fm() removeItemAtPath:zipPath error:nil];
 
     NSUInteger fileCount = 0;
@@ -798,36 +809,60 @@ static NSData *sdvBuildMultipartBody(
 }
 
 -(void)processPickedVideoAtTempUrl:(NSURL *)tempUrl suggestedExt:(NSString *)extHint cleanupTemp:(BOOL)cleanupTemp {
+    unsigned long long rawBytes = [[fm() attributesOfItemAtPath:tempUrl.path error:nil][NSFileSize] unsignedLongLongValue];
+    if (rawBytes == 0 || rawBytes > 200ULL * 1024ULL * 1024ULL) {
+        if (cleanupTemp) [fm() removeItemAtURL:tempUrl error:nil];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self endMediaLoad];
+            if (rawBytes > 200ULL * 1024ULL * 1024ULL) {
+                [self showAlertTitle:@"Video quá lớn (> 200 MB)"
+                    msg:@"Để tránh tràn RAM văng game trên iOS, vui lòng cắt ngắn đoạn video quay lỗi dưới ~25 giây trước khi đính kèm."
+                    closeAfter:NO];
+            } else {
+                [self showAlertTitle:@"Không đọc được video" msg:@"Tệp video trống hoặc không truy cập được." closeAfter:NO];
+            }
+        });
+        return;
+    }
+
     UIImage *thumb = sdvMakeVideoThumb(tempUrl);
-    NSData *rawData = [NSData dataWithContentsOfURL:tempUrl];
     NSString *ext = (extHint.length ? extHint : tempUrl.pathExtension).lowercaseString;
     BOOL isMp4 = [ext isEqualToString:@"mp4"] || [ext isEqualToString:@"m4v"];
 
     void (^finishWithData)(NSData *, BOOL) = ^(NSData *finalData, BOOL forceMp4) {
         if (cleanupTemp) [fm() removeItemAtURL:tempUrl error:nil];
         dispatch_async(dispatch_get_main_queue(), ^{
+            [self endMediaLoad];
+            if (!finalData.length || finalData.length > kSDVBugReportMaxSingleMediaBytes) {
+                [self showAlertTitle:@"Video vượt giới hạn 7.5 MB"
+                    msg:@"Sau khi nén tối đa, video vẫn lớn hơn 7.5 MB. Vui lòng cắt ngắn đoạn video (khoảng 10–20 giây) rồi thử lại."
+                    closeAfter:NO];
+                return;
+            }
             self->_mediaSeq++;
             BOOL outMp4 = forceMp4 || isMp4;
             NSString *fn = [NSString stringWithFormat:@"video_%lu.%@", (unsigned long)self->_mediaSeq, outMp4 ? @"mp4" : @"mov"];
             NSString *mime = outMp4 ? @"video/mp4" : @"video/quicktime";
-            [self endMediaLoad];
             [self appendPreparedMediaData:finalData name:fn mime:mime thumb:thumb isVideo:YES];
         });
     };
 
-    if (rawData.length > 0 && rawData.length <= kSDVBugReportMaxSingleMediaBytes) {
-        finishWithData(rawData, NO);
-        return;
+    if (rawBytes <= kSDVBugReportMaxSingleMediaBytes) {
+        NSData *smallRaw = [NSData dataWithContentsOfURL:tempUrl options:NSDataReadingMappedIfSafe error:nil];
+        if (smallRaw.length > 0 && smallRaw.length <= kSDVBugReportMaxSingleMediaBytes) {
+            finishWithData(smallRaw, NO);
+            return;
+        }
     }
 
-    // Video exceeds 7.5 MB (e.g. Retina iPhone screen recording) -> auto-compress to MP4 (Medium -> Low fallback)!
+    // Video exceeds 7.5 MB (up to 200 MB): stream-transcode directly from disk URL without reading raw video into RAM!
     sdvCompressVideoToMp4(tempUrl, AVAssetExportPresetMediumQuality, ^(NSData *medData) {
         if (medData.length > 0 && medData.length <= kSDVBugReportMaxSingleMediaBytes) {
             finishWithData(medData, YES);
             return;
         }
         sdvCompressVideoToMp4(tempUrl, AVAssetExportPresetLowQuality, ^(NSData *lowData) {
-            finishWithData(lowData.length ? lowData : (medData.length ? medData : rawData), YES);
+            finishWithData((lowData.length > 0 && lowData.length <= kSDVBugReportMaxSingleMediaBytes) ? lowData : nil, YES);
         });
     });
 }
@@ -925,8 +960,11 @@ static NSData *sdvBuildMultipartBody(
                     NSError *cpErr = nil;
                     BOOL copied = [fm() copyItemAtPath:url.path toPath:tmpPath error:&cpErr];
                     if (!copied) {
-                        NSData *fallback = [NSData dataWithContentsOfURL:url];
-                        copied = fallback.length && [fallback writeToFile:tmpPath atomically:YES];
+                        unsigned long long fbSz = [[fm() attributesOfItemAtPath:url.path error:nil][NSFileSize] unsignedLongLongValue];
+                        if (fbSz > 0 && fbSz <= 32ULL * 1024ULL * 1024ULL) {
+                            NSData *fallback = [NSData dataWithContentsOfURL:url options:NSDataReadingMappedIfSafe error:nil];
+                            copied = fallback.length && [fallback writeToFile:tmpPath atomically:YES];
+                        }
                     }
                     if (!copied) {
                         dispatch_async(dispatch_get_main_queue(), ^{

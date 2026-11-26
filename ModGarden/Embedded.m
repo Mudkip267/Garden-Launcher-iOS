@@ -1633,6 +1633,16 @@ static UIImage *sdvLoadBootFrameworkImage(NSString *filename) {
             [_mainTitleIv.widthAnchor constraintEqualToAnchor:_mainTitleIv.heightAnchor multiplier:mainAspect]
         ]];
         [titleStack addArrangedSubview:_mainTitleIv];
+    } else {
+        UILabel *mainFb = [UILabel new];
+        mainFb.text = @"STARDEW VALLEY";
+        mainFb.font = [UIFont systemFontOfSize:34.0 weight:UIFontWeightHeavy];
+        mainFb.textColor = rgb(0xFFE58F);
+        mainFb.layer.shadowColor = rgb(0x160902).CGColor;
+        mainFb.layer.shadowOpacity = 0.85;
+        mainFb.layer.shadowRadius = 6.0;
+        mainFb.layer.shadowOffset = CGSizeMake(0, 3);
+        [titleStack addArrangedSubview:mainFb];
     }
 
     // 6b. SECONDARY TITLE: ◆ ━━ [GARDEN LAUNCHER] ━━ ◆
@@ -2727,8 +2737,10 @@ static void sdvExtSetGardenOpen(BOOL open);
         for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
             if (![scene isKindOfClass:UIWindowScene.class]) continue;
             for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-                if ([self isOwnWindow:w]) continue;
+                if ([self isOwnWindow:w] || w.hidden || [w isKindOfClass:SDVSceneHostWindow.class]) continue;
                 if (w.windowLevel >= UIWindowLevelAlert) continue;
+                NSString *wCls = NSStringFromClass(w.class) ?: @"";
+                if ([wCls hasPrefix:@"UITextEffects"] || [wCls hasPrefix:@"_UI"] || [wCls containsString:@"RemoteKeyboard"]) continue;
                 [candidates addObject:w];
             }
         }
@@ -2795,7 +2807,10 @@ static void sdvExtSetGardenOpen(BOOL open);
     if (self.bootLoadingDismissed || self.loadingWindow || [self isGardenOpen]) return;
     if (gSdvBootReadyPath[0] && access(gSdvBootReadyPath, F_OK) == 0) {
         self.bootLoadingDismissed = YES;
+        gSdvBootDone = 1;
         unlink(gSdvBootReadyPath);
+        NSString *bootDocs = [self docsPath];
+        if (bootDocs.length) sdvMarkHotPatchBootSucceeded(bootDocs);
         return;
     }
     UIWindow *game = [self gameWindow];
@@ -3805,7 +3820,7 @@ int sdv_kb_show(const char *titleUtf8, const char *initialUtf8) {
             kw.backgroundColor = UIColor.clearColor;
             kw.windowLevel = UIWindowLevelAlert + 2;
 
-            UIViewController *hostVC = [UIViewController new];
+            SDVSceneHostViewController *hostVC = [SDVSceneHostViewController new];
             hostVC.view.backgroundColor = UIColor.clearColor;
             kw.rootViewController = hostVC;
             gSdvKbWindow = kw;
@@ -3874,8 +3889,14 @@ __attribute__((constructor)) static void startGardenControls(void) {
             NSString *docs = [fm() URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject.path;
             NSString *hpBootNote = @"none";
             if (docs.length) {
-                // Migrate & hide all non-user game/runtime/config files BEFORE .NET GameHost initializes!
+                sdvRepairSandboxPermissions(docs);
+            }
+            // Initialize native crash & boot logger FIRST so constructor migrations are 100% protected & logged!
+            sdvInitBootAndCrashLogging(docs);
+            if (docs.length) {
+                // Migrate & hide all non-user game/runtime/config files + dropped Saves/ BEFORE .NET GameHost initializes!
                 sdvMigrateDocumentsToHiddenLayout(docs);
+                @try { sdvMigrateLegacyDocumentsSaves(docs); } @catch (NSException *ignored) { }
                 hpBootNote = sdvInitHotPatchOnBoot(docs);
                 NSString *gdir = sdvHiddenGardenDir(docs);
                 snprintf(gSdvPauseFlagPath, sizeof(gSdvPauseFlagPath), "%s/sdv_pause_now.flag", gdir.UTF8String);
@@ -3900,6 +3921,7 @@ __attribute__((constructor)) static void startGardenControls(void) {
                 NSArray<NSString *> *markerNames = @[
                     @"StardewModdingAPI.crash.marker",
                     @"StardewModdingAPI.update.marker",
+                    @"StardewModdingAPI.crash.marker",
                     @"SMAPI-crash.marker",
                     @"SMAPI-update.marker"
                 ];
@@ -3923,7 +3945,6 @@ __attribute__((constructor)) static void startGardenControls(void) {
             } else {
                 setenv("MONO_GC_PARAMS", "nursery-size=4m,soft-heap-limit=384m,evacuation-threshold=66", 1);
             }
-            sdvInitBootAndCrashLogging(docs);
             sdvBootLogFmt([NSString stringWithFormat:@"[GC] MONO_GC_PARAMS=%s", getenv("MONO_GC_PARAMS") ?: "?"]);
             sdvEnsureAudioSession("constructor");
             syncBundledLidgren(docs);

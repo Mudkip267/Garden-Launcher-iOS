@@ -561,16 +561,98 @@ $mActionInvoke.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition($action
 $mListActionInvoke = Find-Ref $tMod "System.Void System.Action``1<System.Collections.Generic.List``1<Microsoft.Xna.Framework.Input.Keys>>::Invoke(!0)"
 if (-not $mListActionInvoke) { throw "Missing Action<List<Keys>>::Invoke reference" }
 
-# 1) get_HasActiveHotkeyInput: if (MobileExtraKeysHook != null) return true;
+# 1) get_HasActiveHotkeyInput: if (MobileHasExtraKeysHook != null && MobileHasExtraKeysHook()) return true;
+$func1Ref = New-Object Mono.Cecil.TypeReference("System", "Func``1", $tMod, $coreScope, $false)
+$func1Ref.GenericParameters.Add((New-Object Mono.Cecil.GenericParameter("TResult", $func1Ref)))
+$funcBoolInst = New-Object Mono.Cecil.GenericInstanceType($func1Ref)
+$funcBoolInst.GenericArguments.Add($tMod.TypeSystem.Boolean)
+$fHasExtraKeys = New-Object Mono.Cecil.FieldDefinition("MobileHasExtraKeysHook", [Mono.Cecil.FieldAttributes]"Public, Static", $funcBoolInst)
+$padType.Fields.Add($fHasExtraKeys)
+$mFuncBoolInvoke = New-Object Mono.Cecil.MethodReference("Invoke", $func1Ref.GenericParameters[0], $funcBoolInst)
+$mFuncBoolInvoke.HasThis = $true
+
 $mHasHotkey = $padType.Methods | Where-Object { $_.Name -eq "get_HasActiveHotkeyInput" }
 if (-not $mHasHotkey) { throw "Missing get_HasActiveHotkeyInput" }
 Expand-ShortBranches $mHasHotkey
 $hhp = $mHasHotkey.Body.GetILProcessor()
 $hh0 = $mHasHotkey.Body.Instructions[0]
-$hhp.InsertBefore($hh0, $hhp.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fExtraKeys))
+$hhp.InsertBefore($hh0, $hhp.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fHasExtraKeys))
+$hhp.InsertBefore($hh0, $hhp.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $hh0))
+$hhp.InsertBefore($hh0, $hhp.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fHasExtraKeys))
+$hhp.InsertBefore($hh0, $hhp.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mFuncBoolInvoke))
 $hhp.InsertBefore($hh0, $hhp.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $hh0))
 $hhp.InsertBefore($hh0, $hhp.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_1))
 $hhp.InsertBefore($hh0, $hhp.Create([Mono.Cecil.Cil.OpCodes]::Ret))
+
+# 1b) QuickSaveManager safety hooks: MobileCanSaveBlockReasonHook (Func<object, string>) & MobileOnSaveLoadedHook (Func<object, bool>)
+$qsType = $tMod.Types | Where-Object { $_.Name -eq "QuickSaveManager" }
+if ($qsType) {
+    $func2Ref = New-Object Mono.Cecil.TypeReference("System", "Func``2", $tMod, $coreScope, $false)
+    $func2Ref.GenericParameters.Add((New-Object Mono.Cecil.GenericParameter("T", $func2Ref)))
+    $func2Ref.GenericParameters.Add((New-Object Mono.Cecil.GenericParameter("TResult", $func2Ref)))
+
+    $funcObjStr = New-Object Mono.Cecil.GenericInstanceType($func2Ref)
+    $funcObjStr.GenericArguments.Add($tMod.TypeSystem.Object)
+    $funcObjStr.GenericArguments.Add($tMod.TypeSystem.String)
+    $fQsCanSave = New-Object Mono.Cecil.FieldDefinition("MobileCanSaveBlockReasonHook", [Mono.Cecil.FieldAttributes]"Public, Static", $funcObjStr)
+    $qsType.Fields.Add($fQsCanSave)
+    $mFuncObjStrInv = New-Object Mono.Cecil.MethodReference("Invoke", $func2Ref.GenericParameters[1], $funcObjStr)
+    $mFuncObjStrInv.HasThis = $true
+    $mFuncObjStrInv.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition($func2Ref.GenericParameters[0])))
+
+    $funcObjBool = New-Object Mono.Cecil.GenericInstanceType($func2Ref)
+    $funcObjBool.GenericArguments.Add($tMod.TypeSystem.Object)
+    $funcObjBool.GenericArguments.Add($tMod.TypeSystem.Boolean)
+    $fQsOnLoaded = New-Object Mono.Cecil.FieldDefinition("MobileOnSaveLoadedHook", [Mono.Cecil.FieldAttributes]"Public, Static", $funcObjBool)
+    $qsType.Fields.Add($fQsOnLoaded)
+    $mFuncObjBoolInv = New-Object Mono.Cecil.MethodReference("Invoke", $func2Ref.GenericParameters[1], $funcObjBool)
+    $mFuncObjBoolInv.HasThis = $true
+    $mFuncObjBoolInv.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition($func2Ref.GenericParameters[0])))
+
+    $mQsCanSave = $qsType.Methods | Where-Object { $_.Name -eq "CanSaveNow" -and $_.Parameters.Count -eq 1 }
+    $mIsNullOrEmptyQs = Find-Ref $tMod "System.Boolean System.String::IsNullOrEmpty(System.String)"
+    if ($mQsCanSave -and $mIsNullOrEmptyQs) {
+        Expand-ShortBranches $mQsCanSave
+        $vBlk = New-Object Mono.Cecil.Cil.VariableDefinition($tMod.TypeSystem.String)
+        $mQsCanSave.Body.Variables.Add($vBlk)
+        $mQsCanSave.Body.InitLocals = $true
+        $qsp = $mQsCanSave.Body.GetILProcessor()
+        $qs0 = $mQsCanSave.Body.Instructions[0]
+        foreach ($ins in @(
+            $qsp.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fQsCanSave),
+            $qsp.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $qs0),
+            $qsp.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fQsCanSave),
+            $qsp.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0),
+            $qsp.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mFuncObjStrInv),
+            $qsp.Create([Mono.Cecil.Cil.OpCodes]::Stloc, $vBlk),
+            $qsp.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vBlk),
+            $qsp.Create([Mono.Cecil.Cil.OpCodes]::Call, $mIsNullOrEmptyQs),
+            $qsp.Create([Mono.Cecil.Cil.OpCodes]::Brtrue, $qs0),
+            $qsp.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1),
+            $qsp.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vBlk),
+            $qsp.Create([Mono.Cecil.Cil.OpCodes]::Stind_Ref),
+            $qsp.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0),
+            $qsp.Create([Mono.Cecil.Cil.OpCodes]::Ret)
+        )) { $qsp.InsertBefore($qs0, $ins) }
+    }
+
+    $mQsOnLoaded = $qsType.Methods | Where-Object { $_.Name -eq "OnSaveLoaded" -and $_.Parameters.Count -eq 0 }
+    if ($mQsOnLoaded) {
+        Expand-ShortBranches $mQsOnLoaded
+        $olp = $mQsOnLoaded.Body.GetILProcessor()
+        $ol0 = $mQsOnLoaded.Body.Instructions[0]
+        foreach ($ins in @(
+            $olp.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fQsOnLoaded),
+            $olp.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $ol0),
+            $olp.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fQsOnLoaded),
+            $olp.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0),
+            $olp.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mFuncObjBoolInv),
+            $olp.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $ol0),
+            $olp.Create([Mono.Cecil.Cil.OpCodes]::Ret)
+        )) { $olp.InsertBefore($ol0, $ins) }
+    }
+    Write-Host "  QuickSave Safety Hooks (TouchControls): Injected MobileCanSaveBlockReasonHook + MobileOnSaveLoadedHook!"
+}
 
 # 2) get_CurrentSimulatedKeyboardState: right before final _simKeysSet.get_Count(), invoke MobileExtraKeysHook(_simKeysSet)
 $mSimKb = $padType.Methods | Where-Object { $_.Name -eq "get_CurrentSimulatedKeyboardState" }
@@ -1192,13 +1274,20 @@ if ($adType -and $mFl -and $mB46 -and $mCreateTimer -and $mActTimerCtor) {
     }
 }
 
-# EngineLogger.Log TRACE filter + 10s flush timer
+# EngineLogger.Log TRACE filter (lazy-initializes _v6TrimLogs from .garden/sdv_perf.cfg on 1st log line!) + 10s flush timer
 $mDropTrace = New-Object Mono.Cecil.MethodDefinition("ShouldDropTrace", [Mono.Cecil.MethodAttributes]"Private, Static", $hMod.TypeSystem.Boolean)
 $mDropTrace.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition("msg", [Mono.Cecil.ParameterAttributes]::None, $hMod.TypeSystem.String)))
 $mDropTrace.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition("lvl", [Mono.Cecil.ParameterAttributes]::None, $hMod.TypeSystem.String)))
 $il3 = $mDropTrace.Body.GetILProcessor()
+$lInitTrimDone = $il3.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fTrimLogs)
 $lRetFalse = $il3.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0)
 $il3.Append($il3.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fTrimLogs))
+$il3.Append($il3.Create([Mono.Cecil.Cil.OpCodes]::Brtrue, $lInitTrimDone))
+$il3.Append($il3.Create([Mono.Cecil.Cil.OpCodes]::Ldc_R4, [float]2.0))
+$il3.Append($il3.Create([Mono.Cecil.Cil.OpCodes]::Call, $hNFloatFromF))
+$il3.Append($il3.Create([Mono.Cecil.Cil.OpCodes]::Call, $mApplyScale))
+$il3.Append($il3.Create([Mono.Cecil.Cil.OpCodes]::Pop))
+$il3.Append($lInitTrimDone)
 $il3.Append($il3.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_2))
 $il3.Append($il3.Create([Mono.Cecil.Cil.OpCodes]::Beq, $lRetFalse))
 $il3.Append($il3.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
@@ -1356,9 +1445,24 @@ Verify-Assembly $outHost
 Write-Host "Patching MonoGame.Framework.dll -> $outMG ..."
 $rp = New-Object Mono.Cecil.ReaderParameters
 $res = New-Object Mono.Cecil.DefaultAssemblyResolver
+# Self-healing reference extraction: ensure System.Private.CoreLib.dll, System.Runtime.InteropServices.dll & Microsoft.iOS.dll exist in $env:TEMP\sdv-clean-ui
+$baseCleanIpa = Join-Path (Split-Path $PSScriptRoot -Parent) "SVE-iOS\Stardew-Valley-Base-Clean-UI.ipa"
+if ((!(Test-Path "$env:TEMP\sdv-clean-ui\System.Private.CoreLib.dll") -or !(Test-Path "$env:TEMP\sdv-clean-ui\System.Runtime.InteropServices.dll") -or !(Test-Path "$env:TEMP\sdv-clean-ui\Microsoft.iOS.dll")) -and (Test-Path $baseCleanIpa)) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $z = [System.IO.Compression.ZipFile]::OpenRead($baseCleanIpa)
+    try {
+        foreach ($needDll in @("System.Private.CoreLib.dll", "System.Runtime.InteropServices.dll", "Microsoft.iOS.dll")) {
+            $dstDll = Join-Path "$env:TEMP\sdv-clean-ui" $needDll
+            if (!(Test-Path $dstDll)) {
+                $ze = $z.GetEntry("Payload/SDViOS.app/$needDll")
+                if ($ze) { [System.IO.Compression.ZipFileExtensions]::ExtractToFile($ze, $dstDll, $true) }
+            }
+        }
+    } finally { $z.Dispose() }
+}
 $res.AddSearchDirectory("$env:TEMP\sdv-clean-ui")
-if (Test-Path "$env:TEMP\tmpf4sv1zm1\Payload\SDViOS.app") {
-    $res.AddSearchDirectory("$env:TEMP\tmpf4sv1zm1\Payload\SDViOS.app")
+if (Test-Path "$env:TEMP\sdv-refs") {
+    $res.AddSearchDirectory("$env:TEMP\sdv-refs")
 }
 $rp.AssemblyResolver = $res
 $mgAsm = [Mono.Cecil.AssemblyDefinition]::ReadAssembly($srcMG, $rp)
@@ -1593,7 +1697,12 @@ if ($tShader -and $mStrReplace -and $mStrContains -and $mStrConcat2) {
     $lRetG = $ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0)
     $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
     $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $lRetG))
-    foreach ($ver in @("#version 110", "#version 120", "#version 130", "#version 140", "#version 150", "#version 330")) {
+    # Strip longer desktop `#version XXX core/compatibility` directives BEFORE bare `#version XXX` so " core" never dangles!
+    foreach ($ver in @(
+        "#version 150 core", "#version 330 core", "#version 400 core", "#version 410 core",
+        "#version 150 compatibility", "#version 330 compatibility",
+        "#version 110", "#version 120", "#version 130", "#version 140", "#version 150", "#version 330", "#version 400", "#version 410"
+    )) {
         $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
         $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, $ver))
         $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, ""))
@@ -1610,6 +1719,11 @@ if ($tShader -and $mStrReplace -and $mStrContains -and $mStrConcat2) {
     $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, "precision highp int;"))
     $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mStrReplace))
     $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Starg, $mPatchGlsl.Parameters[0]))
+    # If shader already declares explicit GLSL ES `#version` (e.g. `#version 300 es` or `#version 100`), never prepend lines before `#version`!
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, "#version "))
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mStrContains))
+    $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Brtrue, $lRetG))
     $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
     $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, "precision "))
     $ilG.Append($ilG.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mStrContains))
@@ -2208,6 +2322,51 @@ foreach ($sndType in @($tSoundEffect, $tSoundEffectArr)) {
     }
 }
 Write-Host "  iOS UI Info Suite 2 Audio Fix (MonoGame): CueDefinition(LimitBehavior, instanceLimit, limitBehavior, SetSound, 5-arg .ctors) added!"
+
+# 3.12 Direct IL Hook GamePad.ExternalGetStateHook (Func<int, GamePadState>) in GamePad.PlatformGetState:
+#      Feeds physical Xbox/DualSense/Switch/MFi controller state directly into SMAPI SInputState.TrueUpdate() on 0% JIT!
+$tGamePad = $mgMod.GetType("Microsoft.Xna.Framework.Input.GamePad")
+$tGpState = $mgMod.GetType("Microsoft.Xna.Framework.Input.GamePadState")
+$mPlatGpState = if ($tGamePad) { $tGamePad.Methods | Where-Object { $_.Name -eq "PlatformGetState" -and $_.Parameters.Count -eq 3 } | Select-Object -First 1 } else { $null }
+$mGpIsConn = if ($tGpState) { $tGpState.Methods | Where-Object { $_.Name -eq "get_IsConnected" } | Select-Object -First 1 } else { $null }
+if (-not $tGamePad -or -not $tGpState -or -not $mPlatGpState -or -not $mGpIsConn) {
+    throw "Missing GamePad.PlatformGetState or GamePadState.get_IsConnected in MonoGame.Framework.dll!"
+}
+$mgCoreScope = $mgMod.TypeSystem.Object.Scope
+$mgFunc2Ref = New-Object Mono.Cecil.TypeReference("System", "Func``2", $mgMod, $mgCoreScope, $false)
+$mgFunc2Ref.GenericParameters.Add((New-Object Mono.Cecil.GenericParameter("T", $mgFunc2Ref)))
+$mgFunc2Ref.GenericParameters.Add((New-Object Mono.Cecil.GenericParameter("TResult", $mgFunc2Ref)))
+$mgFuncIntGp = New-Object Mono.Cecil.GenericInstanceType($mgFunc2Ref)
+$mgFuncIntGp.GenericArguments.Add($mgMod.TypeSystem.Int32)
+$mgFuncIntGp.GenericArguments.Add($tGpState)
+$fExtGpHook = New-Object Mono.Cecil.FieldDefinition("ExternalGetStateHook", [Mono.Cecil.FieldAttributes]"Public, Static", $mgFuncIntGp)
+$tGamePad.Fields.Add($fExtGpHook)
+$mExtGpInvoke = New-Object Mono.Cecil.MethodReference("Invoke", $mgFunc2Ref.GenericParameters[1], $mgFuncIntGp)
+$mExtGpInvoke.HasThis = $true
+$mExtGpInvoke.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition($mgFunc2Ref.GenericParameters[0])))
+
+Expand-ShortBranches $mPlatGpState
+$vHookGp = New-Object Mono.Cecil.Cil.VariableDefinition($tGpState)
+$mPlatGpState.Body.Variables.Add($vHookGp)
+$mPlatGpState.Body.InitLocals = $true
+$gpIL = $mPlatGpState.Body.GetILProcessor()
+$gp0 = $mPlatGpState.Body.Instructions[0]
+foreach ($ins in @(
+    $gpIL.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0),
+    $gpIL.Create([Mono.Cecil.Cil.OpCodes]::Brtrue, $gp0),
+    $gpIL.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fExtGpHook),
+    $gpIL.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $gp0),
+    $gpIL.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fExtGpHook),
+    $gpIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0),
+    $gpIL.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mExtGpInvoke),
+    $gpIL.Create([Mono.Cecil.Cil.OpCodes]::Stloc, $vHookGp),
+    $gpIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloca, $vHookGp),
+    $gpIL.Create([Mono.Cecil.Cil.OpCodes]::Call, $mGpIsConn),
+    $gpIL.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $gp0),
+    $gpIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vHookGp),
+    $gpIL.Create([Mono.Cecil.Cil.OpCodes]::Ret)
+)) { $gpIL.InsertBefore($gp0, $ins) }
+Write-Host "  iOS 0% JIT GamePad Fix (MonoGame): Injected GamePad.ExternalGetStateHook into PlatformGetState!"
 
 $mgAsm.Write($outMG)
 $mgAsm.Dispose()

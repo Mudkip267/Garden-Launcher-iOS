@@ -59,9 +59,8 @@ static NSString *sdvReadFilePrefixUtf8(NSString *path, NSUInteger maxBytes) {
     NSData *d = [fh readDataOfLength:maxBytes];
     [fh closeFile];
     if (!d.length) return nil;
-    d = sdvStripUtf8Bom(d);
-    return [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding]
-        ?: [[NSString alloc] initWithData:d encoding:NSISOLatin1StringEncoding];
+    NSString *s = sdvDecodeUtf8Slice(d, NO, YES);
+    return s.length ? s : nil;
 }
 
 // Reads the last `maxBytes` of a Stardew SaveGame XML where <dayOfMonth>, <currentSeason>, <year>,
@@ -77,9 +76,8 @@ static NSString *sdvReadFileTailUtf8(NSString *path, NSUInteger maxBytes) {
     NSData *d = [fh readDataOfLength:maxBytes];
     [fh closeFile];
     if (!d.length) return nil;
-    if (off == 0) d = sdvStripUtf8Bom(d);
-    return [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding]
-        ?: [[NSString alloc] initWithData:d encoding:NSISOLatin1StringEncoding];
+    NSString *s = sdvDecodeUtf8Slice(d, off > 0, NO);
+    return s.length ? s : nil;
 }
 
 static BOOL sdvLooksLikeMainSaveXml(NSString *path) {
@@ -187,8 +185,11 @@ static NSString *sdvFormatFileSizeMB(unsigned long long bytes) {
     return [NSString stringWithFormat:@"%.2f MB", (double)bytes / (1024.0 * 1024.0)];
 }
 
+static NSString *sdvRepairSaveFolder(NSString *folderPath);
+
 // Auto-migrate any save folders users manually dropped into visible Documents/Saves/
-// (since .config/StardewValley/Saves is hidden in the iOS Files app!) into the real live directory.
+// (since .config/StardewValley/Saves is hidden in the iOS Files app!) into the real live directory,
+// backing up any older existing save with the same name and normalizing SaveGameInfo/BOM/casing!
 static void sdvMigrateLegacyDocumentsSaves(NSString *docsPath) {
     if (!docsPath.length) return;
     NSString *legacyDir = join(docsPath, @"Saves");
@@ -197,6 +198,7 @@ static void sdvMigrateLegacyDocumentsSaves(NSString *docsPath) {
     if (!entries.count) return;
 
     NSString *liveDir = sdvLiveSavesDir(docsPath);
+    NSString *backupRoot = join(docsPath, @"Saves_Backup");
     for (NSString *entry in entries) {
         if ([entry hasPrefix:@"."] || [entry isEqualToString:@"__MACOSX"]) continue;
         NSString *srcFolder = join(legacyDir, entry);
@@ -210,9 +212,17 @@ static void sdvMigrateLegacyDocumentsSaves(NSString *docsPath) {
 
         mkdirs(liveDir);
         NSString *dstFolder = join(liveDir, entry);
-        if (![fm() fileExistsAtPath:dstFolder]) {
-            NSError *me = nil;
-            [fm() moveItemAtPath:srcFolder toPath:dstFolder error:&me];
+        if ([fm() fileExistsAtPath:dstFolder]) {
+            mkdirs(backupRoot);
+            NSDateFormatter *df = [NSDateFormatter new];
+            df.dateFormat = @"yyyyMMdd_HHmmss";
+            NSString *bk = join(backupRoot, [NSString stringWithFormat:@"%@_%@", entry, [df stringFromDate:NSDate.date]]);
+            sdvRemoveItemQuiet(bk);
+            [fm() moveItemAtPath:dstFolder toPath:bk error:nil];
+            sdvRemoveItemQuiet(dstFolder);
+        }
+        if ([fm() moveItemAtPath:srcFolder toPath:dstFolder error:nil]) {
+            @try { (void)sdvRepairSaveFolder(dstFolder); } @catch (NSException *ignored) { }
         }
     }
 }

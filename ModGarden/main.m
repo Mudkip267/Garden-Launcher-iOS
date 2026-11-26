@@ -2449,8 +2449,7 @@ static NSString *sdvProbeLocalNetwork(void) {
     close(fd);
     if (n <= 0) return @"";
     buf.length = (NSUInteger)n;
-    NSString *txt = [[NSString alloc] initWithData:buf encoding:NSUTF8StringEncoding];
-    if (!txt) txt = [[NSString alloc] initWithData:buf encoding:NSISOLatin1StringEncoding] ?: @"";
+    NSString *txt = sdvDecodeUtf8Slice(buf, startOff > 0, NO);
     if (startOff > 0) {
         NSRange nl = [txt rangeOfString:@"\n"];
         if (nl.location != NSNotFound && nl.location + 1 < txt.length) {
@@ -2651,7 +2650,8 @@ static NSString *sdvProbeLocalNetwork(void) {
     tv.textContainerInset = UIEdgeInsetsMake(10, 10, 10, 10);
     tv.indicatorStyle = UIScrollViewIndicatorStyleWhite;
     tv.translatesAutoresizingMaskIntoConstraints = NO;
-    CGFloat tvH = MAX(220.0, MIN(480.0, UIScreen.mainScreen.bounds.size.height * 0.56));
+    CGFloat availH = self.view.bounds.size.height > 160.0 ? self.view.bounds.size.height : 420.0;
+    CGFloat tvH = MAX(220.0, MIN(480.0, availH * 0.56));
     [tv.heightAnchor constraintEqualToConstant:tvH].active = YES;
     _consoleTextView = tv;
     [_pane addArrangedSubview:tv];
@@ -2752,7 +2752,7 @@ static NSString *sdvProbeLocalNetwork(void) {
 
 -(void)onLauncherUpdateNotification:(NSNotification *)n {
     (void)n;
-    if (!self.isViewLoaded || !_pane) return;
+    if (!self.isViewLoaded || !_pane || _veil) return;
     [self updateSidebarChrome];
     if (_tab != 6 && _tab != 8) {
         [self renderAll:NO];

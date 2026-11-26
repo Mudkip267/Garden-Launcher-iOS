@@ -11,7 +11,7 @@
 //   REPORT_CLIENT_KEY   = your-secret-client-key (must match SDV_BUG_REPORT_CLIENT_KEY at build time)
 
 const DEFAULT_CLIENT_KEY = "CHANGE_ME_CLIENT_KEY";
-const MAX_ZIP_BYTES = 4 * 1024 * 1024;     // 4 MB cap for incoming ErrorLogs.zip
+const MAX_ZIP_BYTES = 7.5 * 1024 * 1024;   // 7.5 MB cap for incoming ErrorLogs.zip
 const MAX_MEDIA_BYTES = 7.5 * 1024 * 1024; // 7.5 MB per image/video
 const MAX_TOTAL_BYTES = 9.0 * 1024 * 1024; // 9.0 MB combined (safe margin under Discord 10 MB limit)
 const MIN_COOLDOWN_MS = 45 * 1000;         // 45s minimum between reports from same IP/device
@@ -423,16 +423,12 @@ export default {
     }
 
     const deviceHash = clampStr(form.get("deviceHash"), 64, "anon");
-    const rl = checkRateLimit(`${ip}|${deviceHash}`);
-    if (!rl.ok) {
-      return jsonResp({ ok: false, error: rl.reason }, 429);
-    }
 
     const category = clampStr(form.get("category"), 80, "Khác");
     const fullDescription = clampStr(form.get("description"), 8000, "");
     const embedDescription = clampStr(fullDescription, 2000, "");
     const contact = clampStr(form.get("contact"), 140, "Không cung cấp");
-    const appVersion = clampStr(form.get("appVersion"), 40, "1.0.3");
+    const appVersion = clampStr(form.get("appVersion"), 40, "1.0.6");
     const iosVersion = clampStr(form.get("iosVersion"), 40, "?");
     const device = clampStr(form.get("device"), 64, "iPhone");
     const ramInfo = clampStr(form.get("ramInfo"), 120, "?");
@@ -454,7 +450,7 @@ export default {
     const rawFile = form.get("file");
     if (rawFile && typeof rawFile === "object" && typeof rawFile.arrayBuffer === "function" && rawFile.size > 0) {
       if (rawFile.size > MAX_ZIP_BYTES) {
-        return jsonResp({ ok: false, error: "Tệp ErrorLogs.zip vượt quá giới hạn 4 MB." }, 413);
+        return jsonResp({ ok: false, error: "Tệp ErrorLogs.zip vượt quá giới hạn 7.5 MB." }, 413);
       }
       const buf = await rawFile.arrayBuffer();
       const head = new Uint8Array(buf, 0, Math.min(4, buf.byteLength));
@@ -483,6 +479,12 @@ export default {
       }
       totalBytes += mbuf.byteLength;
       mediaList.push({ buf: mbuf, ext: det.ext, mime: det.mime });
+    }
+
+    // Only consume rate-limit quota AFTER payload validation passes!
+    const rl = checkRateLimit(`${ip}|${deviceHash}`);
+    if (!rl.ok) {
+      return jsonResp({ ok: false, error: rl.reason }, 429);
     }
 
     const now = new Date();

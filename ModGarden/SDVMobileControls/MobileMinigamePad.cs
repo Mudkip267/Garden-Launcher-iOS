@@ -247,9 +247,11 @@ namespace SDVMobileControls
                 {
                     if (_bigActionRect.Contains(pt) || vp.X >= vpW * 0.55f)
                     {
-                        _activeKeys.Add(Keys.C);
+                        // CRITICAL for 0% JIT: ONLY hold MouseLeft (do NOT add Keys.C to _activeKeys, because
+                        // Game1._UpdateControlInput fires currentMinigame.receiveKeyPress(Keys.C) every held frame,
+                        // which re-invokes FishingGame.handleCastInput -> FishingRod.DoFunction and cancels isTimingCast!)
                         _mouseLeftDown = true;
-                        _mousePos = pt;
+                        _mousePos = new Point(vpW / 2, vpH / 2);
                     }
                 }
                 else if (_kind == ArcadeKind.TargetGame)

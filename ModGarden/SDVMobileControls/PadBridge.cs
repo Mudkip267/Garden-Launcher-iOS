@@ -478,11 +478,14 @@ namespace SDVMobileControls
                     simSet.Clear();
                 if (ModEntry.ExternalInput == null || !ModEntry.ExternalInput.HasPhysicalKeysPressed)
                 {
-                    object inp = _inputInstanceField?.GetValue(null);
-                    if (inp != null && _currentKeyboardStateFieldInfo?.GetValue(null) is FieldInfo curKbFld)
+                    object inp = _inputInstanceField?.GetValue(null) ?? StardewValley.Game1.input;
+                    if (inp != null)
                     {
                         object emptyKb = _emptyKeyboardStateField?.GetValue(null) ?? default(KeyboardState);
-                        curKbFld.SetValue(inp, emptyKb);
+                        if (_currentKeyboardStateFieldInfo?.GetValue(null) is FieldInfo curKbFld)
+                            curKbFld.SetValue(inp, emptyKb);
+                        FieldInfo sInputKb = inp.GetType().GetField("<KeyboardState>k__BackingField", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                        sInputKb?.SetValue(inp, emptyKb);
                     }
                 }
             }

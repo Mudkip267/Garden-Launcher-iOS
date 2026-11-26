@@ -47,6 +47,7 @@ def main() -> int:
     ap.add_argument("--repo", default="hanprm9-dot/Garden-Launcher-iOS", help="GitHub owner/repo for download URLs")
     ap.add_argument("--release-tag", default=None, help="Release tag hosting the hotpatch asset (default: v<version>)")
     args = ap.parse_args()
+    args.version = args.version.strip().lstrip("vV")
 
     script_dir = Path(__file__).resolve().parent
     mc_base = script_dir / "SDVMobileControls"
@@ -69,11 +70,11 @@ def main() -> int:
 
     if mc_manifest.is_file():
         mf_obj = json.loads(mc_manifest.read_text(encoding="utf-8-sig"))
-        raw_core = args.version.lstrip("vV").split("-")[0].split("+")[0]
+        raw_core = args.version.split("-")[0].split("+")[0]
         parts = [p for p in raw_core.split(".") if p.isdigit()]
         while len(parts) < 3:
             parts.append("0")
-        mf_obj["Version"] = ".".join(parts[:3])
+        mf_obj["Version"] = f"{'.'.join(parts[:3])}+build.{args.build}"
         staged["Mods/SDVMobileControls/manifest.json"] = (json.dumps(mf_obj, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
 
     if args.include_touch:

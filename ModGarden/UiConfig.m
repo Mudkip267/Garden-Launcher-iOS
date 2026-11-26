@@ -189,56 +189,48 @@ static long long sdvNextRev(void) {
     NSString *gd = sdvHiddenGardenDir(docsPath);
 
     NSString *ovPath = [gd stringByAppendingPathComponent:@"touch_overlay_config.json"];
-    NSString *mouseStr = (_mouseMode == 1) ? @"\"Trackpad\"" : ((_mouseMode == 2) ? @"\"Disabled\"" : @"\"PointAndClick\"");
-    NSDictionary<NSString *, NSString *> *updates = @{
-        @"Opacity": [NSString stringWithFormat:@"%.2f", sdvClampf(_opacity, 0.15f, 1.00f)],
-        @"Scale": [NSString stringWithFormat:@"%.2f", sdvClampf(_padScale, 0.50f, 2.00f)],
-        @"LeftHanded": _leftHanded ? @"true" : @"false",
-        @"ShowKeyboardBtn": _showKeyboardBtn ? @"true" : @"false",
-        @"ShowMenuBtn": _showMenuBtn ? @"true" : @"false",
-        @"ShowHotkeyDrawerBtn": _showHotkeyDrawerBtn ? @"true" : @"false",
-        @"MouseControlMode": mouseStr
-    };
+    NSString *mouseStr = (_mouseMode == 1) ? @"Trackpad" : ((_mouseMode == 2) ? @"Disabled" : @"PointAndClick");
 
-    NSMutableArray<NSString *> *keys = [NSMutableArray array];
-    NSMutableDictionary<NSString *, NSString *> *vals = [NSMutableDictionary dictionary];
-    NSMutableDictionary<NSString *, NSString *> *lowerToKey = [NSMutableDictionary dictionary];
-
-    NSString *existing = [NSString stringWithContentsOfFile:ovPath encoding:NSUTF8StringEncoding error:nil];
-    if (existing.length) {
-        NSCharacterSet *trim = [NSCharacterSet whitespaceAndNewlineCharacterSet];
-        NSCharacterSet *quotes = [NSCharacterSet characterSetWithCharactersInString:@"\" "];
-        for (NSString *rawLine in [existing componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
-            NSString *line = [rawLine stringByTrimmingCharactersInSet:trim];
-            if ([line hasSuffix:@","]) line = [line substringToIndex:line.length - 1];
-            NSRange colon = [line rangeOfString:@":"];
-            if (colon.location == NSNotFound) continue;
-            NSString *k = [[line substringToIndex:colon.location] stringByTrimmingCharactersInSet:quotes];
-            NSString *v = [[line substringFromIndex:colon.location + 1] stringByTrimmingCharactersInSet:trim];
-            if (!k.length || !v.length) continue;
-            if (!lowerToKey[k.lowercaseString]) {
-                [keys addObject:k];
-                lowerToKey[k.lowercaseString] = k;
-            }
-            vals[lowerToKey[k.lowercaseString]] = v;
+    NSMutableDictionary *rootObj = nil;
+    NSData *existingData = [NSData dataWithContentsOfFile:ovPath options:0 error:nil];
+    if (existingData.length) {
+        id parsed = [NSJSONSerialization JSONObjectWithData:existingData options:NSJSONReadingMutableContainers error:nil];
+        if (![parsed isKindOfClass:NSMutableDictionary.class]) {
+            NSData *san = stripJson5ForIOS14(existingData);
+            parsed = [NSJSONSerialization JSONObjectWithData:san options:NSJSONReadingMutableContainers error:nil];
+        }
+        if ([parsed isKindOfClass:NSMutableDictionary.class]) {
+            rootObj = (NSMutableDictionary *)parsed;
         }
     }
+    if (!rootObj) rootObj = [NSMutableDictionary dictionary];
 
-    NSArray<NSString *> *orderedUpdates = @[@"Opacity", @"Scale", @"LeftHanded", @"ShowKeyboardBtn", @"ShowMenuBtn", @"ShowHotkeyDrawerBtn", @"MouseControlMode"];
-    for (NSString *uk in orderedUpdates) {
-        NSString *existingKey = lowerToKey[uk.lowercaseString];
-        if (existingKey) vals[existingKey] = updates[uk];
-        else { [keys addObject:uk]; lowerToKey[uk.lowercaseString] = uk; vals[uk] = updates[uk]; }
+    // Preserve case-insensitive existing keys while keeping HotkeyKeys / HotkeyLabels JSON arrays 100% intact!
+    NSDictionary<NSString *, id> *typedUpdates = @{
+        @"Opacity": @(round(sdvClampf(_opacity, 0.15f, 1.00f) * 100.0) / 100.0),
+        @"Scale": @(round(sdvClampf(_padScale, 0.50f, 2.00f) * 100.0) / 100.0),
+        @"LeftHanded": @(_leftHanded),
+        @"ShowKeyboardBtn": @(_showKeyboardBtn),
+        @"ShowMenuBtn": @(_showMenuBtn),
+        @"ShowHotkeyDrawerBtn": @(_showHotkeyDrawerBtn),
+        @"MouseControlMode": mouseStr
+    };
+    for (NSString *uk in @[@"Opacity", @"Scale", @"LeftHanded", @"ShowKeyboardBtn", @"ShowMenuBtn", @"ShowHotkeyDrawerBtn", @"MouseControlMode"]) {
+        NSString *matchKey = nil;
+        for (id ek in rootObj.allKeys) {
+            if ([ek isKindOfClass:NSString.class] && [(NSString *)ek caseInsensitiveCompare:uk] == NSOrderedSame) {
+                matchKey = (NSString *)ek;
+                break;
+            }
+        }
+        rootObj[matchKey ?: uk] = typedUpdates[uk];
     }
 
-    NSMutableString *outJson = [NSMutableString stringWithString:@"{\n"];
-    for (NSUInteger i = 0; i < keys.count; i++) {
-        NSString *k = keys[i];
-        NSString *comma = (i + 1 < keys.count) ? @"," : @"";
-        [outJson appendFormat:@"  \"%@\": %@%@\n", k, vals[k], comma];
+    NSData *outJsonData = [NSJSONSerialization dataWithJSONObject:rootObj options:NSJSONWritingPrettyPrinted error:nil];
+    if (outJsonData.length) {
+        sdvPrepareWritableFileTarget(ovPath);
+        [outJsonData writeToFile:ovPath options:NSDataWritingAtomic error:nil];
     }
-    [outJson appendString:@"}\n"];
-    [outJson writeToFile:ovPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
 
     [self saveLiveCfgOnlyToDocuments:docsPath];
 }

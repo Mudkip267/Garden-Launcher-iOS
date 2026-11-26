@@ -61,9 +61,17 @@ namespace SDVMobileControls
         private static readonly List<HUDMessage> _stashedHudMessages = new List<HUDMessage>(8);
         private static bool _hudMessagesStashed;
         private static bool _mineFloorRelocateSuppressed;
+        private static bool _mineFloorPendingHudDraw;
         private static FieldInfo _soundBankSoundsField;
         private static FieldInfo _game1HooksField;
         private static FieldInfo _inputCurrentMouseStateField;
+        private static FieldInfo _inputCurrentGamepadStateField;
+        private static FieldInfo _sInputMouseStateField;
+        private static FieldInfo _sInputControllerStateField;
+        private static FieldInfo _rodUsedGamePadToCastField;
+        private static bool _sInputFieldsResolved;
+        private static bool _monoGamePadHookBound;
+        private static readonly HashSet<Type> BoundQuickSaveTypes = new HashSet<Type>();
         private static bool _gardenHooksInstalled;
         private static Dictionary<string, string> _vanillaBaseMailCache;
         private static bool _vanillaBaseMailLoaded;
@@ -205,6 +213,7 @@ namespace SDVMobileControls
             helper.Events.GameLoop.UpdateTicking += OnUpdateTicking;
             helper.Events.GameLoop.UpdateTicked += OnUpdateTicked;
             helper.Events.Display.Rendered += OnRenderedBootCheck;
+            helper.Events.Display.RenderedWorld += OnRenderedWorldRestoreMineFloor;
             helper.Events.Display.RenderingStep += OnRenderingStepHudRelocate;
             helper.Events.Display.RenderedStep += OnRenderedStepHudRelocate;
             helper.Events.GameLoop.Saved += OnSaved;
@@ -591,6 +600,13 @@ namespace SDVMobileControls
             catch { }
         }
 
+        private void OnRenderedWorldRestoreMineFloor(object sender, RenderedWorldEventArgs e)
+        {
+            // Fires right AFTER GameLocation.drawAboveAlwaysFrontLayer() finishes, so vanilla clipped corner floor text was skipped
+            // while normal HUD rendering proceeds with takingMapScreenshot == false!
+            RestoreMineFloorRelocateIfNeeded();
+        }
+
         private void OnRenderingStepHudRelocate(object sender, RenderingStepEventArgs e)
         {
             if (e == null || Engine == null)
@@ -607,9 +623,13 @@ namespace SDVMobileControls
                 {
                     Game1.game1.takingMapScreenshot = true;
                     _mineFloorRelocateSuppressed = true;
+                    _mineFloorPendingHudDraw = true;
                 }
                 return;
             }
+
+            if (e.Step == RenderSteps.HUD)
+                RestoreMineFloorRelocateIfNeeded();
 
             if (e.Step != RenderSteps.HUD || (Game1.game1 != null && Game1.game1.takingMapScreenshot))
                 return;
@@ -636,57 +656,59 @@ namespace SDVMobileControls
 
         private void OnRenderedStepHudRelocate(object sender, RenderedStepEventArgs e)
         {
-            if (e == null)
+            if (e == null || e.Step != RenderSteps.HUD)
                 return;
 
-            if (e.Step == RenderSteps.World_AlwaysFront && _mineFloorRelocateSuppressed)
+            RestoreMineFloorRelocateIfNeeded();
+
+            if (_mineFloorPendingHudDraw)
             {
-                RestoreMineFloorRelocateIfNeeded();
+                _mineFloorPendingHudDraw = false;
                 try
                 {
-                    if (e.SpriteBatch == null || Engine == null || !Context.IsWorldReady)
-                        return;
-                    Rectangle tsarea = Game1.graphics.GraphicsDevice.Viewport.GetTitleSafeArea();
-                    if (!Engine.TryGetMineFloorSafePosition(tsarea, out int fx, out int fy))
-                        return;
-
-                    if (Game1.currentLocation is MineShaft ms && !ms.isSideBranch())
+                    if (e.SpriteBatch != null && Engine != null && Context.IsWorldReady && (Game1.game1 == null || !Game1.game1.takingMapScreenshot))
                     {
-                        int area = ms.getMineArea(-1);
-                        Color color = (area == 0 || (ms.isDarkArea() && area != 121)) ? SpriteText.color_White
-                            : area == 10 ? SpriteText.color_Green
-                            : area == 40 ? SpriteText.color_Cyan
-                            : area == 80 ? SpriteText.color_Red
-                            : SpriteText.color_Purple;
-                        string levelStr = (ms.mineLevel + (area == 121 ? -120 : 0)).ToString();
-                        int height = SpriteText.getHeightOfString(levelStr);
-                        SpriteText.drawString(e.SpriteBatch, levelStr, fx, fy, 999999, -1, height, 1f, 1f, false, 2, "", color);
-                        if (ms.mustKillAllMonstersToAdvance() && Game1.mouseCursors != null && !Game1.mouseCursors.IsDisposed)
+                        Rectangle tsarea = Game1.graphics.GraphicsDevice.Viewport.GetTitleSafeArea();
+                        if (Engine.TryGetMineFloorSafePosition(tsarea, out int fx, out int fy))
                         {
-                            int width = SpriteText.getWidthOfString(levelStr);
-                            e.SpriteBatch.Draw(
-                                Game1.mouseCursors,
-                                new Vector2(fx + width + 16, fy) + new Vector2(4f, 6f) * 4f,
-                                new Rectangle(192, 324, 7, 10),
-                                Color.White,
-                                0f,
-                                new Vector2(3f, 5f),
-                                4f + Game1.dialogueButtonScale / 25f,
-                                SpriteEffects.None,
-                                1f);
+                            if (Game1.currentLocation is MineShaft ms && !ms.isSideBranch())
+                            {
+                                int area = ms.getMineArea(-1);
+                                Color color = (area == 0 || (ms.isDarkArea() && area != 121)) ? SpriteText.color_White
+                                    : area == 10 ? SpriteText.color_Green
+                                    : area == 40 ? SpriteText.color_Cyan
+                                    : area == 80 ? SpriteText.color_Red
+                                    : SpriteText.color_Purple;
+                                string levelStr = (ms.mineLevel + (area == 121 ? -120 : 0)).ToString();
+                                int height = SpriteText.getHeightOfString(levelStr);
+                                SpriteText.drawString(e.SpriteBatch, levelStr, fx, fy, 999999, -1, height, 1f, 1f, false, 2, "", color);
+                                if (ms.mustKillAllMonstersToAdvance() && Game1.mouseCursors != null && !Game1.mouseCursors.IsDisposed)
+                                {
+                                    int width = SpriteText.getWidthOfString(levelStr);
+                                    e.SpriteBatch.Draw(
+                                        Game1.mouseCursors,
+                                        new Vector2(fx + width + 16, fy) + new Vector2(4f, 6f) * 4f,
+                                        new Rectangle(192, 324, 7, 10),
+                                        Color.White,
+                                        0f,
+                                        new Vector2(3f, 5f),
+                                        4f + Game1.dialogueButtonScale / 25f,
+                                        SpriteEffects.None,
+                                        1f);
+                                }
+                            }
+                            else if (Game1.currentLocation is VolcanoDungeon vd && vd.level.Value > 0)
+                            {
+                                string levelStr = vd.level.Value.ToString();
+                                SpriteText.drawString(e.SpriteBatch, levelStr, fx, fy, 999999, -1, 999999, 1f, 1f, false, 2, "", SpriteText.color_Red);
+                            }
                         }
-                    }
-                    else if (Game1.currentLocation is VolcanoDungeon vd && vd.level.Value > 0)
-                    {
-                        string levelStr = vd.level.Value.ToString();
-                        SpriteText.drawString(e.SpriteBatch, levelStr, fx, fy, 999999, -1, 999999, 1f, 1f, false, 2, "", SpriteText.color_Red);
                     }
                 }
                 catch { }
-                return;
             }
 
-            if (e.Step != RenderSteps.HUD || !_hudMessagesStashed)
+            if (!_hudMessagesStashed)
                 return;
 
             RestoreStashedHudMessagesIfNeeded();
@@ -700,8 +722,10 @@ namespace SDVMobileControls
                 for (int i = list.Count - 1; i >= 0; i--)
                 {
                     HUDMessage m = list[i];
-                    if (m != null)
-                        PrefixHudMessageDraw(m, e.SpriteBatch, i, ref heightUsed);
+                    if (m != null && PrefixHudMessageDraw(m, e.SpriteBatch, i, ref heightUsed))
+                    {
+                        try { m.draw(e.SpriteBatch, i, ref heightUsed); } catch { }
+                    }
                 }
             }
             catch { }
@@ -730,6 +754,7 @@ namespace SDVMobileControls
         private void OnUpdateTicked(object sender, UpdateTickedEventArgs e)
         {
             RestoreMineFloorRelocateIfNeeded();
+            _mineFloorPendingHudDraw = false;
             RestoreStashedHudMessagesIfNeeded();
             try
             {
@@ -766,7 +791,8 @@ namespace SDVMobileControls
                          !curRod.fishCaught &&
                          !curRod.showingTreasure)
                 {
-                    if (++_stuckReelingTicks >= 15)
+                    int stuckLimit = (Context.IsMultiplayer && !Context.IsMainPlayer) ? 120 : 60;
+                    if (++_stuckReelingTicks >= stuckLimit)
                     {
                         _stuckReelingTicks = 0;
                         curRod.doneFishing(Game1.player, consumeBaitAndTackle: false);
@@ -791,7 +817,7 @@ namespace SDVMobileControls
                 _shaderDiagWaitingSave = false;
                 RunShaderDiagnostic("SaveLoaded+3s");
             }
-            if (BoundPadTypes.Count >= 2 && _extHarmonyPatchesInstalled && (_gardenHooksInstalled || PatchedTouchHookTypes.Count >= 1))
+            if (BoundPadTypes.Count >= 2 && _monoGamePadHookBound && _extHarmonyPatchesInstalled && (_gardenHooksInstalled || PatchedTouchHookTypes.Count >= 1))
                 return;
             if (BoundPadTypes.Count > 0 && _retryTicks > 300)
                 return;
@@ -938,8 +964,52 @@ namespace SDVMobileControls
         private void BindAllLoadedTouchVirtualPads(string phase)
         {
             const BindingFlags stat = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+
+            if (!_monoGamePadHookBound)
+            {
+                try
+                {
+                    FieldInfo fExtGp = typeof(GamePad).GetField("ExternalGetStateHook", stat);
+                    if (fExtGp != null)
+                    {
+                        Func<int, GamePadState> gpDel = OnExternalGamePadGetStateHook;
+                        fExtGp.SetValue(null, gpDel);
+                        _monoGamePadHookBound = true;
+                        _monitor?.Log($"[{phase}] BOUND Direct IL GamePad.ExternalGetStateHook on MonoGame.Framework (0% JIT SMAPI GamePad events active)!", LogLevel.Info);
+                    }
+                }
+                catch { }
+            }
+
             foreach (Assembly asm in AppDomain.CurrentDomain.GetAssemblies())
             {
+                Type qsm = null;
+                try { qsm = asm.GetType("SDViOSTouchControls.QuickSaveManager", throwOnError: false); } catch { }
+                if (qsm != null && !BoundQuickSaveTypes.Contains(qsm))
+                {
+                    try
+                    {
+                        FieldInfo fCanSave = qsm.GetField("MobileCanSaveBlockReasonHook", stat);
+                        FieldInfo fOnLoaded = qsm.GetField("MobileOnSaveLoadedHook", stat);
+                        if (fCanSave != null)
+                        {
+                            Func<object, string> csDel = OnMobileQuickSaveBlockReason;
+                            fCanSave.SetValue(null, csDel);
+                        }
+                        if (fOnLoaded != null)
+                        {
+                            Func<object, bool> olDel = OnMobileQuickSaveLoaded;
+                            fOnLoaded.SetValue(null, olDel);
+                        }
+                        if (fCanSave != null || fOnLoaded != null)
+                        {
+                            BoundQuickSaveTypes.Add(qsm);
+                            _monitor?.Log($"[{phase}] BOUND Direct IL QuickSave safety hooks on {asm.GetName().Name}!", LogLevel.Info);
+                        }
+                    }
+                    catch { }
+                }
+
                 Type tvp = null;
                 try
                 {
@@ -956,6 +1026,7 @@ namespace SDVMobileControls
                     FieldInfo fDrw = tvp.GetField("MobileDrawHook", stat);
                     FieldInfo fKeys = tvp.GetField("MobileExtraKeysHook", stat);
                     FieldInfo fKeysList = tvp.GetField("MobileExtraKeysListHook", stat);
+                    FieldInfo fHasKeys = tvp.GetField("MobileHasExtraKeysHook", stat);
                     if (fUpd == null || fDrw == null)
                     {
                         _monitor.Log($"[{phase}] Found {tvp.FullName} in {asm.GetName().Name}, but MobileUpdateHook/MobileDrawHook fields missing!", LogLevel.Warn);
@@ -976,14 +1047,245 @@ namespace SDVMobileControls
                         Action<List<Keys>> keysListDel = OnPopulateExtraKeysList;
                         fKeysList.SetValue(null, keysListDel);
                     }
+                    if (fHasKeys != null)
+                    {
+                        Func<bool> hasKeysDel = OnHasActiveExtraKeys;
+                        fHasKeys.SetValue(null, hasKeysDel);
+                    }
 
                     BoundPadTypes.Add(tvp);
-                    _monitor.Log($"[{phase}] BOUND DIRECT IL HOOKS on {asm.GetName().Name} (ExtraKeys={fKeys != null}, ExtraKeysList={fKeysList != null})! Mode={Engine.CurrentMode}", LogLevel.Info);
+                    _monitor.Log($"[{phase}] BOUND DIRECT IL HOOKS on {asm.GetName().Name} (ExtraKeys={fKeys != null}, ExtraKeysList={fKeysList != null}, HasKeys={fHasKeys != null})! Mode={Engine.CurrentMode}", LogLevel.Info);
                 }
                 catch (Exception ex)
                 {
                     _monitor.Log($"[{phase}] Failed binding hooks on {asm.GetName().Name}: {ex}", LogLevel.Error);
                 }
+            }
+        }
+
+        private static GamePadState OnExternalGamePadGetStateHook(int index)
+        {
+            var ext = ExternalInput;
+            return (index == 0 && ext != null) ? ext.PollAndGetStateForMonoGameHook(0) : default;
+        }
+
+        private static bool OnHasActiveExtraKeys()
+        {
+            return (Engine != null && Engine.HasActiveExtraKeys()) ||
+                   (ExternalInput != null && ExternalInput.HasPhysicalKeysPressed);
+        }
+
+        private static string OnMobileQuickSaveBlockReason(object qsm)
+        {
+            if (Game1.player == null)
+                return null;
+            if (Game1.player.isRidingHorse() || Game1.player.mount != null)
+                return "Please dismount your horse before quick saving.";
+            if (Game1.isWarping || Game1.fadeToBlack || Game1.currentMinigame != null || Game1.CurrentEvent != null)
+                return "Cannot quick save during a warp, event, or minigame.";
+            if (Game1.player.UsingTool || Game1.player.isEating)
+                return "Please wait for current action to finish before quick saving.";
+            return null;
+        }
+
+        private static bool IsTileSafeForQuickLoad(GameLocation loc, int tx, int ty)
+        {
+            if (loc == null || tx < 0 || ty < 0)
+                return false;
+            try
+            {
+                if (loc.Map?.Layers != null && loc.Map.Layers.Count > 0)
+                {
+                    var l0 = loc.Map.Layers[0];
+                    if (tx >= l0.LayerWidth || ty >= l0.LayerHeight)
+                        return false;
+                }
+                Vector2 tv = new Vector2(tx, ty);
+                if (!loc.isTilePlaceable(tv, false) && !loc.isTilePassable(new xTile.Dimensions.Location(tx, ty), Game1.viewport))
+                    return false;
+                if (loc.isWaterTile(tx, ty) || loc.isOpenWater(tx, ty))
+                    return false;
+                Rectangle box = new Rectangle(tx * 64 + 8, ty * 64 + 8, 48, 48);
+                if (loc.isCollidingPosition(box, Game1.viewport, true, 0, false, Game1.player))
+                    return false;
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool OnMobileQuickSaveLoaded(object qsm)
+        {
+            if (qsm == null)
+                return false;
+            const BindingFlags any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+            try
+            {
+                Type qsmType = qsm.GetType();
+                object state = qsmType.GetMethod("LoadStateData", any)?.Invoke(qsm, null);
+                IMonitor qMon = qsmType.GetField("_monitor", any)?.GetValue(qsm) as IMonitor ?? _monitor;
+                if (state == null)
+                {
+                    qMon?.Log("[QuickSave] No midday save state found for this save (starting at regular morning).", LogLevel.Trace);
+                    return true;
+                }
+
+                Type stType = state.GetType();
+                string locName = stType.GetProperty("LocationName", any)?.GetValue(state) as string ?? "";
+                int tileX = (int)(stType.GetProperty("TileX", any)?.GetValue(state) ?? 0);
+                int tileY = (int)(stType.GetProperty("TileY", any)?.GetValue(state) ?? 0);
+                float posX = (float)(stType.GetProperty("PositionX", any)?.GetValue(state) ?? 0f);
+                float posY = (float)(stType.GetProperty("PositionY", any)?.GetValue(state) ?? 0f);
+                int facing = (int)(stType.GetProperty("FacingDirection", any)?.GetValue(state) ?? 2);
+                int health = (int)(stType.GetProperty("Health", any)?.GetValue(state) ?? 0);
+                float stamina = (float)(stType.GetProperty("Stamina", any)?.GetValue(state) ?? 0f);
+                bool swimming = (bool)(stType.GetProperty("IsSwimming", any)?.GetValue(state) ?? false);
+                int timeOfDay = (int)(stType.GetProperty("TimeOfDay", any)?.GetValue(state) ?? 600);
+                int mineLevel = (int)(stType.GetProperty("MineLevel", any)?.GetValue(state) ?? 0);
+                string tsText = stType.GetProperty("TimestampText", any)?.GetValue(state) as string ?? "";
+
+                qMon?.Log($"[QuickSave] Restoring midday state (v1.0.6 safe): {tsText} at {locName} ({posX:F0},{posY:F0})...", LogLevel.Info);
+                qsmType.GetMethod("RestoreShippingBin", any)?.Invoke(qsm, null);
+
+                FieldInfo fPendingPos = qsmType.GetField("_pendingPositionRestore", any);
+                FieldInfo fPendingFace = qsmType.GetField("_pendingFacingDirection", any);
+                fPendingPos?.SetValue(qsm, null);
+
+                bool usedExactPos = false;
+                GameLocation targetLoc = !string.IsNullOrEmpty(locName) ? Game1.getLocationFromName(locName) : null;
+                if (targetLoc is MineShaft ms)
+                {
+                    // Procedural mine/Skull Cavern layout regenerates on load: spawn safely on the floor's entrance ladder!
+                    Vector2 rawLadder = ms.tileBeneathLadder;
+                    Point safeLadder = new Point((int)rawLadder.X, (int)rawLadder.Y);
+                    if (safeLadder.X <= 0 && safeLadder.Y <= 0)
+                        safeLadder = new Point(Math.Max(1, tileX), Math.Max(1, tileY));
+                    Game1.warpFarmer(locName, safeLadder.X, safeLadder.Y, false);
+                }
+                else if (targetLoc is VolcanoDungeon vd)
+                {
+                    if (IsTileSafeForQuickLoad(vd, tileX, tileY))
+                    {
+                        Game1.warpFarmer(locName, tileX, tileY, false);
+                        usedExactPos = true;
+                    }
+                    else
+                    {
+                        Game1.warpFarmer("IslandNorth", 40, 23, false);
+                    }
+                }
+                else if (targetLoc != null)
+                {
+                    if (swimming || IsTileSafeForQuickLoad(targetLoc, tileX, tileY))
+                    {
+                        Game1.warpFarmer(locName, tileX, tileY, false);
+                        usedExactPos = true;
+                    }
+                    else
+                    {
+                        int safeX = tileX, safeY = tileY;
+                        bool found = false;
+                        for (int r = 1; r <= 4 && !found; r++)
+                        {
+                            for (int dy = -r; dy <= r && !found; dy++)
+                            {
+                                for (int dx = -r; dx <= r && !found; dx++)
+                                {
+                                    if (IsTileSafeForQuickLoad(targetLoc, tileX + dx, tileY + dy))
+                                    {
+                                        safeX = tileX + dx;
+                                        safeY = tileY + dy;
+                                        found = true;
+                                    }
+                                }
+                            }
+                        }
+                        Game1.warpFarmer(locName, safeX, safeY, false);
+                    }
+                }
+                else if (locName.StartsWith("UndergroundMine", StringComparison.OrdinalIgnoreCase) && mineLevel > 0)
+                {
+                    Game1.warpFarmer("Mine", 18, 13, false);
+                }
+                else
+                {
+                    var home = Game1.player != null ? Utility.getHomeOfFarmer(Game1.player) : null;
+                    Point entry = home != null ? home.getEntryLocation() : new Point(9, 9);
+                    Game1.warpFarmer(home?.NameOrUniqueName ?? "FarmHouse", entry.X, entry.Y, false);
+                }
+
+                if (Game1.player != null)
+                {
+                    if (usedExactPos && posX > 0f && posY > 0f)
+                    {
+                        Vector2 exactVec = new Vector2(posX, posY);
+                        Game1.player.Position = exactVec;
+                        fPendingPos?.SetValue(qsm, (Vector2?)exactVec);
+                    }
+                    fPendingFace?.SetValue(qsm, facing);
+                    Game1.player.faceDirection(facing);
+                    if (health > 0)
+                        Game1.player.health = Math.Min(health, Game1.player.maxHealth);
+                    if (stamina > 0f)
+                        Game1.player.Stamina = Math.Min(stamina, Game1.player.MaxStamina);
+                    if (swimming && usedExactPos)
+                    {
+                        try
+                        {
+                            Game1.player.changeIntoSwimsuit();
+                            Game1.player.swimming.Value = true;
+                        }
+                        catch { }
+                    }
+                }
+
+                // Advance clock to saved TimeOfDay while preserving all world machine timers (prevents 2x Keg/Cask/Jar processing!)
+                if (timeOfDay >= 600 && timeOfDay <= 2600)
+                {
+                    var machineSnap = new List<(StardewValley.Object obj, int mins, bool ready)>(256);
+                    try
+                    {
+                        Utility.ForEachLocation(loc =>
+                        {
+                            if (loc?.objects != null)
+                            {
+                                foreach (var kv in loc.objects.Pairs)
+                                {
+                                    var o = kv.Value;
+                                    if (o != null)
+                                        machineSnap.Add((o, o.minutesUntilReady.Value, o.readyForHarvest.Value));
+                                    if (o is StardewValley.Objects.IndoorPot pot && pot.heldObject.Value != null)
+                                        machineSnap.Add((pot.heldObject.Value, pot.heldObject.Value.minutesUntilReady.Value, pot.heldObject.Value.readyForHarvest.Value));
+                                }
+                            }
+                            return true;
+                        });
+                    }
+                    catch { }
+
+                    qsmType.GetMethod("SafelySetTime", any)?.Invoke(qsm, new object[] { timeOfDay });
+
+                    for (int i = 0; i < machineSnap.Count; i++)
+                    {
+                        var (o, mins, ready) = machineSnap[i];
+                        if (o != null)
+                        {
+                            o.minutesUntilReady.Value = mins;
+                            o.readyForHarvest.Value = ready;
+                        }
+                    }
+                }
+
+                Game1.addHUDMessage(new HUDMessage("Quick Load: " + tsText, 1));
+                qMon?.Log("[QuickSave] Midday state restored safely (machine timers preserved).", LogLevel.Info);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _monitor?.Log($"[QuickSave] Safe OnSaveLoaded fallback error: {ex}", LogLevel.Warn);
+                return false;
             }
         }
 
@@ -1632,21 +1934,43 @@ namespace SDVMobileControls
                 {
                     ApplyExternalControlInputStates(ext, ref keyboardState, ref mouseState, ref gamePadState);
                 }
-                bool holdFishingCast = Context.IsWorldReady &&
-                                       Game1.player?.CurrentTool is FishingRod timingRod &&
-                                       timingRod.isTimingCast &&
-                                       ShouldBlockPrematureFishingRelease(timingRod, logRelease: true);
-                if (holdFishingCast && mouseState.LeftButton != ButtonState.Pressed)
+                FishingRod activeTimingRod = Context.IsWorldReady ? (Game1.player?.CurrentTool as FishingRod) : null;
+                bool holdFishingCast = activeTimingRod != null &&
+                                       activeTimingRod.isTimingCast &&
+                                       ShouldBlockPrematureFishingRelease(activeTimingRod, logRelease: true);
+                bool usedGpForCast = false;
+                if (holdFishingCast)
                 {
-                    mouseState = new MouseState(
-                        mouseState.X,
-                        mouseState.Y,
-                        mouseState.ScrollWheelValue,
-                        ButtonState.Pressed,
-                        mouseState.MiddleButton,
-                        mouseState.RightButton,
-                        mouseState.XButton1,
-                        mouseState.XButton2);
+                    try
+                    {
+                        _rodUsedGamePadToCastField ??= typeof(FishingRod).GetField("usedGamePadToCast", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                        if (_rodUsedGamePadToCastField != null && _rodUsedGamePadToCastField.GetValue(activeTimingRod) is bool ugp)
+                            usedGpForCast = ugp;
+                    }
+                    catch { }
+                }
+                if (holdFishingCast)
+                {
+                    if (mouseState.LeftButton != ButtonState.Pressed)
+                    {
+                        mouseState = new MouseState(
+                            mouseState.X,
+                            mouseState.Y,
+                            mouseState.ScrollWheelValue,
+                            ButtonState.Pressed,
+                            mouseState.MiddleButton,
+                            mouseState.RightButton,
+                            mouseState.XButton1,
+                            mouseState.XButton2);
+                    }
+                    if (usedGpForCast && gamePadState.Buttons.X != ButtonState.Pressed)
+                    {
+                        gamePadState = new GamePadState(
+                            gamePadState.ThumbSticks,
+                            gamePadState.Triggers,
+                            new GamePadButtons(Buttons.X),
+                            gamePadState.DPad);
+                    }
                 }
                 if (!holdFishingCast || action == null)
                 {
@@ -1660,11 +1984,20 @@ namespace SDVMobileControls
                     {
                         if (Game1.input != null)
                         {
+                            if (!_sInputFieldsResolved)
+                            {
+                                _sInputFieldsResolved = true;
+                                const BindingFlags bf = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                                _inputCurrentMouseStateField ??= typeof(InputState).GetField("_currentMouseState", bf);
+                                _inputCurrentGamepadStateField ??= typeof(InputState).GetField("_currentGamepadState", bf);
+                                Type sit = Game1.input.GetType();
+                                _sInputMouseStateField = sit.GetField("<MouseState>k__BackingField", bf);
+                                _sInputControllerStateField = sit.GetField("<ControllerState>k__BackingField", bf);
+                            }
                             MouseState committed = Game1.input.GetMouseState();
                             if (committed.LeftButton != ButtonState.Pressed)
                             {
-                                var mf = _inputCurrentMouseStateField ?? (_inputCurrentMouseStateField = typeof(InputState).GetField("_currentMouseState", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic));
-                                mf?.SetValue(Game1.input, new MouseState(
+                                var heldMs = new MouseState(
                                     committed.X,
                                     committed.Y,
                                     committed.ScrollWheelValue,
@@ -1672,7 +2005,23 @@ namespace SDVMobileControls
                                     committed.MiddleButton,
                                     committed.RightButton,
                                     committed.XButton1,
-                                    committed.XButton2));
+                                    committed.XButton2);
+                                _inputCurrentMouseStateField?.SetValue(Game1.input, heldMs);
+                                _sInputMouseStateField?.SetValue(Game1.input, heldMs);
+                            }
+                            if (usedGpForCast)
+                            {
+                                GamePadState committedGp = Game1.input.GetGamePadState();
+                                if (committedGp.Buttons.X != ButtonState.Pressed)
+                                {
+                                    var heldGp = new GamePadState(
+                                        committedGp.ThumbSticks,
+                                        committedGp.Triggers,
+                                        new GamePadButtons(Buttons.X),
+                                        committedGp.DPad);
+                                    _inputCurrentGamepadStateField?.SetValue(Game1.input, heldGp);
+                                    _sInputControllerStateField?.SetValue(Game1.input, heldGp);
+                                }
                             }
                         }
                     }
@@ -1785,7 +2134,7 @@ namespace SDVMobileControls
 
         private static void PostfixBobberBarUpdate(BobberBar __instance)
         {
-            if (__instance == null || Engine == null || !Engine.IsMobileModeForBobberPhysics)
+            if (__instance == null || Game1.paused || Engine == null || !Engine.IsMobileModeForBobberPhysics)
                 return;
             if (__instance.fadeIn || __instance.fadeOut)
                 return;

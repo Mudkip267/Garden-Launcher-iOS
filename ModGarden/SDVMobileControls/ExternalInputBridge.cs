@@ -864,8 +864,9 @@ namespace SDVMobileControls
                     {
                         SuppressGamepadShoulderThisFrame = true;
                         IsRightStickMenuCursorActive = false;
-                        int maxTab = (gm.pages != null && gm.pages.Count > 0)
-                            ? Math.Min(GameMenu.numberOfTabs, gm.pages.Count - 1)
+                        int tabsMax = (gm.tabs != null && gm.tabs.Count > 0) ? (gm.tabs.Count - 1) : -1;
+                        int maxTab = (gm.pages != null && gm.pages.Count > 0 && tabsMax >= 0)
+                            ? Math.Min(GameMenu.numberOfTabs, Math.Min(gm.pages.Count - 1, tabsMax))
                             : -1;
                         if (maxTab < 0)
                             return;
@@ -874,7 +875,7 @@ namespace SDVMobileControls
                             int nextFromMap = dir > 0 ? (GameMenu.mapTab + 1) : (GameMenu.mapTab - 1);
                             if (nextFromMap >= 0 && nextFromMap <= maxTab)
                             {
-                                Game1.activeClickableMenu = new GameMenu(nextFromMap, -1, playOpeningSound: true);
+                                Game1.activeClickableMenu = new GameMenu(nextFromMap, -1, playOpeningSound: false);
                                 Game1.playSound("smallSelect");
                             }
                             return;
@@ -1115,8 +1116,12 @@ namespace SDVMobileControls
                 }
             }
 
-            // Universal smooth analog Right-Stick cursor in BOTH free gameplay AND ALL non-BobberBar menus!
-            bool canFreeCursor = (!inMenu && Game1.currentMinigame == null && Game1.emoteMenu == null) || (inMenu && !isFishingBar);
+            // Universal smooth analog Right-Stick cursor in BOTH free gameplay AND ALL non-BobberBar/non-Museum menus!
+            // (In MuseumMenu, SnappyMenus uses ThumbSticks.Right natively to pan the Museum camera to East/South tables!)
+            bool isMuseumPanMenu = rawMenu is MuseumMenu;
+            if (isMuseumPanMenu)
+                IsRightStickMenuCursorActive = false;
+            bool canFreeCursor = (!inMenu && Game1.currentMinigame == null && Game1.emoteMenu == null) || (inMenu && !isFishingBar && !isMuseumPanMenu);
             float magSq = rx * rx + ry * ry;
             float entryThresholdSq = (inMenu && !IsRightStickMenuCursorActive) ? 0.0625f : 0.0001f;
             if (canFreeCursor && magSq > entryThresholdSq)
@@ -1839,20 +1844,44 @@ namespace SDVMobileControls
                 new GamePadDPad(dUp, dDown, dLeft, dRight));
         }
 
+        public GamePadState PollAndGetStateForMonoGameHook(int index)
+        {
+            if (index != 0)
+                return default;
+            try
+            {
+                PollFrame();
+                if (IsPhysicalGamepadActive)
+                    return GetEffectiveGamePadStateForGame();
+            }
+            catch { }
+            return default;
+        }
+
         private void SyncMonoGameKeyboardKeys(bool forceClear = false)
         {
             if (KeyboardSetKeysMethod == null) return;
+            // Never overwrite TouchVirtualPad's virtual/custom keys when Touch mode is active and no physical keys are held!
+            if (!forceClear && ActiveMode == ExternalInputMode.Touch && _physicalKeys.Count == 0 && _syncedEmptyMonoGameKeys)
+                return;
             try
             {
                 if (!forceClear && _physicalKeys.Count > 0)
                 {
-                    _kbSetKeysArg[0] = _physicalKeys;
+                    var merged = new List<Keys>(_physicalKeys.Count + 8);
+                    for (int i = 0; i < _physicalKeys.Count; i++)
+                        merged.Add(_physicalKeys[i]);
+                    try { ModEntry.Engine?.PopulateExtraKeysList(merged); } catch { }
+                    _kbSetKeysArg[0] = merged;
                     KeyboardSetKeysMethod.Invoke(null, _kbSetKeysArg);
                     _syncedEmptyMonoGameKeys = false;
                 }
                 else if (forceClear || !_syncedEmptyMonoGameKeys)
                 {
-                    KeyboardSetKeysMethod.Invoke(null, EmptyKeysArg);
+                    var touchOnly = new List<Keys>(8);
+                    try { ModEntry.Engine?.PopulateExtraKeysList(touchOnly); } catch { }
+                    _kbSetKeysArg[0] = touchOnly;
+                    KeyboardSetKeysMethod.Invoke(null, touchOnly.Count > 0 ? _kbSetKeysArg : EmptyKeysArg);
                     _syncedEmptyMonoGameKeys = true;
                 }
             }

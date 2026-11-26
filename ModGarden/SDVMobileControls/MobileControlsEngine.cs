@@ -159,9 +159,12 @@ namespace SDVMobileControls
 
         // Slingshot touch drag-to-aim state
         private int _slingshotTouchId = -1;
+        private int _slingshotReleaseHoldFrames;
         private Vector2 _slingshotRawPos;
         private Vector2 _slingshotVpPos;
         private Vector2 _slingshotNorm;
+        private int _pendingWeaponSpecTicks;
+        private readonly HashSet<Keys> _scratchExtraCheckSet = new HashSet<Keys>();
 
         // Auto-attack state (default OFF)
         private int _autoAttackCooldown;
@@ -270,6 +273,8 @@ namespace SDVMobileControls
             typeof(TextBox).GetField("OnEnterPressed", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
         private static readonly FieldInfo InputCurrentMouseStateField =
             typeof(InputState).GetField("_currentMouseState", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        private static FieldInfo _sInputMouseStateField;
+        private static bool _sInputMouseStateResolved;
         private static readonly FieldInfo LevelUpProfessionsField =
             typeof(LevelUpMenu).GetField("professionsToChoose", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
         private static readonly FieldInfo SkillsHoverTextField =
@@ -543,6 +548,30 @@ namespace SDVMobileControls
                         targetList.Add(k);
                 }
             }
+        }
+
+        public bool HasActiveExtraKeys()
+        {
+            if (!IsMobileModeActive || _editMode)
+                return false;
+
+            if (Game1.currentMinigame != null)
+            {
+                _scratchExtraCheckSet.Clear();
+                _minigamePad.PopulateKeys(_scratchExtraCheckSet);
+                return _scratchExtraCheckSet.Count > 0;
+            }
+
+            for (int i = 0; i < _cfg.CustomKeys.Count; i++)
+            {
+                var btn = _cfg.CustomKeys[i];
+                if (btn.KeyCode <= 0) continue;
+                bool held = _customBtnsHeldNow.Contains(btn.Id);
+                bool pulsing = _customBtnPulseFrames.TryGetValue(btn.Id, out int rem) && rem > 0;
+                if (IsContinuousHoldKey(btn.KeyCode) ? (held || pulsing) : pulsing)
+                    return true;
+            }
+            return false;
         }
 
         public bool ShouldSuppressOriginalDraw(object pad)
@@ -1460,15 +1489,30 @@ namespace SDVMobileControls
             return null;
         }
 
+        private static bool LocationHasAnyMonster(GameLocation loc)
+        {
+            if (loc?.characters == null) return false;
+            for (int i = 0; i < loc.characters.Count; i++)
+            {
+                if (loc.characters[i] is StardewValley.Monsters.Monster)
+                    return true;
+            }
+            return false;
+        }
+
         private MeleeWeapon GetHeldSpecialWeapon()
         {
             if (!_cfg.ShowSpecButton || Game1.player?.CurrentTool is not MeleeWeapon mw || mw.isScythe())
                 return null;
 
+            var loc = Game1.currentLocation;
             bool combatCtx = (EffectiveMode == MobileControlMode.TapToMove || EffectiveMode == MobileControlMode.TapAndJoystick) ||
-                             Game1.currentLocation is MineShaft ||
-                             Game1.currentLocation is VolcanoDungeon ||
-                             AutoToolAndCombat.FindMonsterNear(Game1.currentLocation, Game1.player.GetBoundingBox().Center.ToVector2(), 360f) != null;
+                             loc is MineShaft ||
+                             loc is VolcanoDungeon ||
+                             loc is SlimeHutch ||
+                             loc is Woods ||
+                             loc is BugLand ||
+                             LocationHasAnyMonster(loc);
             return combatCtx ? mw : null;
         }
 
@@ -1894,17 +1938,55 @@ namespace SDVMobileControls
                 bool inGrab = sc.ItemsToGrabMenu != null && sc.ItemsToGrabMenu.isWithinBounds(ui.X, ui.Y);
                 if (inInv || inGrab)
                 {
-                    var prevKb = Game1.oldKBState;
                     try
                     {
-                        // Leverage StorageContainer's built-in Shift+LeftClick 1-tap auto-transfer (fires itemChangeBehavior cleanly for Fair Grange Display!)
-                        Game1.oldKBState = new KeyboardState(Keys.LeftShift);
-                        sc.receiveLeftClick(ui.X, ui.Y, true);
-                        if (sc.heldItem != null)
+                        InventoryMenu destMenu = inInv ? sc.ItemsToGrabMenu : sc.inventory;
+                        // In Fair Grange Display (9 slots), pick up 1 item from backpack so stacks aren't dumped into 1 slot
+                        if (inInv && destMenu != null && destMenu.capacity == 9)
+                        {
+                            sc.receiveRightClick(ui.X, ui.Y, true);
+                            if (sc.heldItem == null)
+                                sc.receiveLeftClick(ui.X, ui.Y, true);
+                        }
+                        else
+                        {
                             sc.receiveLeftClick(ui.X, ui.Y, true);
+                        }
+
+                        if (sc.heldItem != null && destMenu?.inventory != null && destMenu.actualInventory != null)
+                        {
+                            int lim = Math.Min(destMenu.inventory.Count, destMenu.capacity);
+                            // 1. Stack onto matching partial slot first (when transferring back to backpack or non-Grange container)
+                            if (!(inInv && destMenu.capacity == 9))
+                            {
+                                for (int s = 0; s < lim && sc.heldItem != null; s++)
+                                {
+                                    Item ex = s < destMenu.actualInventory.Count ? destMenu.actualInventory[s] : null;
+                                    if (ex != null && ex.canStackWith(sc.heldItem) && ex.Stack < ex.maximumStackSize())
+                                    {
+                                        Point c = destMenu.inventory[s].bounds.Center;
+                                        sc.receiveLeftClick(c.X, c.Y, true);
+                                    }
+                                }
+                            }
+                            // 2. Place into first open slot in opposite InventoryMenu (fires StorageContainer.itemChangeBehavior!)
+                            for (int s = 0; s < lim && sc.heldItem != null; s++)
+                            {
+                                Item ex = s < destMenu.actualInventory.Count ? destMenu.actualInventory[s] : null;
+                                if (ex == null)
+                                {
+                                    Point c = destMenu.inventory[s].bounds.Center;
+                                    sc.receiveLeftClick(c.X, c.Y, true);
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Return safely to source slot if target container is full or rejected item
+                        if (sc.heldItem != null)
+                            sc.receiveLeftClick(ui.X, ui.Y, false);
                     }
                     catch { }
-                    finally { Game1.oldKBState = prevKb; }
                     return true;
                 }
             }
@@ -2196,6 +2278,8 @@ namespace SDVMobileControls
         private static bool IsImmediateDragMenu(IClickableMenu menu, Point uiPt, out int clampDragX)
         {
             clampDragX = -1;
+            if (menu is StrengthGame)
+                return true;
             if (menu is GameMenu gm)
             {
                 try
@@ -2706,7 +2790,27 @@ namespace SDVMobileControls
                     return true;
                 }
                 // Keep simulated mouse position at last tapped point in RAW BackBuffer pixels (LeftDown=false) so Carpenter/Museum/Tooltips stay aligned!
-                EnsureBridge(pad)?.ApplyInputWithMouse(pad, Vector2.Zero, false, false, false, _lastMenuMouseRaw, false, false, _rawW, _rawH);
+                // Clamp away from screen borders when idle in CarpenterMenu/MuseumMenu so vanilla edge-scroll (<64px / >=-128px) never pans uncontrollably!
+                Point? idlePos = _lastMenuMouseRaw;
+                if ((topMenu is CarpenterMenu cmIdle && cmIdle.onFarm) || topMenu is MuseumMenu)
+                {
+                    int safeMarginX = Math.Min(192, Math.Max(64, _rawW / 5));
+                    int safeMarginY = Math.Min(160, Math.Max(64, _rawH / 5));
+                    int baseX = idlePos?.X ?? (_rawW / 2);
+                    int baseY = idlePos?.Y ?? (_rawH / 2);
+                    Point safePt = new Point(
+                        Math.Clamp(baseX, safeMarginX, Math.Max(safeMarginX, _rawW - safeMarginX)),
+                        Math.Clamp(baseY, safeMarginY, Math.Max(safeMarginY, _rawH - safeMarginY)));
+                    idlePos = safePt;
+                    _lastMenuMouseRaw = safePt;
+                    try
+                    {
+                        var prev = Game1.oldMouseState;
+                        Game1.oldMouseState = new MouseState(safePt.X, safePt.Y, prev.ScrollWheelValue, ButtonState.Released, prev.MiddleButton, prev.RightButton, prev.XButton1, prev.XButton2);
+                    }
+                    catch { }
+                }
+                EnsureBridge(pad)?.ApplyInputWithMouse(pad, Vector2.Zero, false, false, false, idlePos, false, false, _rawW, _rawH);
                 return true;
             }
 
@@ -2858,9 +2962,13 @@ namespace SDVMobileControls
                                 TryAutoDepositJunimoItem(jnm, ui);
                             }
                         }
-                        else if (topMenu is CarpenterMenu cmFarm && cmFarm.onFarm && !cmFarm.freeze && _menuTapCameraPan)
+                        else if (topMenu is CarpenterMenu cmFarm && cmFarm.onFarm && !cmFarm.freeze && _menuTapCameraPan &&
+                                 (cmFarm.Action == CarpenterMenu.CarpentryAction.None ||
+                                  cmFarm.Action == CarpenterMenu.CarpentryAction.Demolish ||
+                                  (cmFarm.Action == CarpenterMenu.CarpentryAction.Move && cmFarm.buildingToMove != null)))
                         {
-                            // Safe 2-Tap Preview on Robin/Wizard building placement/move/demolish:
+                            // Safe 2-Tap Preview on Robin/Wizard building placement, move-destination & demolish:
+                            // (Picking up a building to Move, Upgrade, or Paint executes immediately on 1st tap!)
                             // 1st tap shows exact Green/Red blueprint at finger; 2nd tap nearby confirms!
                             if (!_hasCarpenterPreview || !ReferenceEquals(_carpenterPreviewMenu, cmFarm) || Vector2.Distance(vp, _carpenterPreviewVp) > 108f)
                             {
@@ -3643,6 +3751,18 @@ namespace SDVMobileControls
 
         private bool TrySafeDialogueResponseTap(DialogueBox db, Point ui)
         {
+            try
+            {
+                string curStr = db.getCurrentString();
+                if (!string.IsNullOrEmpty(curStr) && db.characterIndexInDialogue < curStr.Length - 1)
+                {
+                    // Question text is still typing out: let 1st tap fast-forward text without selecting any response!
+                    db.receiveLeftClick(ui.X, ui.Y, true);
+                    return true;
+                }
+            }
+            catch { }
+
             int hitIdx = -1;
             for (int i = 0; i < db.responseCC.Count; i++)
             {
@@ -3655,9 +3775,11 @@ namespace SDVMobileControls
             }
             if (hitIdx < 0)
             {
+                // Swallow stray taps outside response rows so DialogueBox.receiveLeftClick NEVER auto-confirms choice #0!
                 _dlgHoverMenu = null;
                 _dlgHoveredIdx = -1;
-                return false;
+                db.selectedResponse = -1;
+                return true;
             }
 
             if (!ReferenceEquals(_dlgHoverMenu, db) || _dlgHoveredIdx != hitIdx)
@@ -4262,10 +4384,20 @@ namespace SDVMobileControls
                 // Auto-context Weapon Special Move Button (SPEC: Parry / Slam / Flurry)
                 if (heldSpecWeapon != null && tl.State == TouchLocationState.Pressed && _btnSpecRect.Contains(vpPt))
                 {
-                    if (!IsWeaponSpecialOnCooldown(heldSpecWeapon) && Game1.player != null && !Game1.player.UsingTool)
+                    if (!IsWeaponSpecialOnCooldown(heldSpecWeapon) && Game1.player != null)
                     {
-                        try { heldSpecWeapon.animateSpecialMove(Game1.player); } catch { }
-                        ClearPath();
+                        if (!Game1.player.UsingTool)
+                        {
+                            _pendingWeaponSpecTicks = 0;
+                            try { heldSpecWeapon.animateSpecialMove(Game1.player); } catch { }
+                            ClearPath();
+                        }
+                        else
+                        {
+                            // Queue special move to fire on the very first frame current swing finishes!
+                            _pendingWeaponSpecTicks = 22;
+                            ClearPath();
+                        }
                     }
                     _toolbarTouchId = tl.Id;
                     _toolbarTappedSlot = -1;
@@ -4360,6 +4492,7 @@ namespace SDVMobileControls
                     else
                     {
                         _slingshotTouchId = -1;
+                        _slingshotReleaseHoldFrames = 2;
                     }
                     continue;
                 }
@@ -4536,15 +4669,19 @@ namespace SDVMobileControls
                         continue;
                     }
 
-                    // Direct Touch Drag-to-Aim when holding a Slingshot (outside Joystick zone — respects Left-Handed flip!)
+                    // Direct Touch Drag-to-Aim when holding a Slingshot (outside Joystick zone — respects Left-Handed flip!
+                    // In pure Tap-to-Move mode without joystick, only capture drag near the farmer's body so tapping ground/ladders/doors walks normally!)
                     bool joyHalf = _cfg.LeftHandedMobile ? (vp.X > _vpW * 0.56f) : (vp.X < _vpW * 0.44f);
                     bool inJoyZoneCheck = useJoy && (IsInvisibleBarMode
                         ? _invJoyRect.Contains(vpPt)
                         : (Vector2.Distance(vp, _visJoyCenter) <= _visJoyRadius * 2.0f || (joyHalf && vp.Y >= _vpH * 0.35f)));
+                    bool allowSlingPress = useJoy ||
+                        (Game1.player != null && Vector2.Distance(vp, WorldToViewport(Game1.player.getStandingPosition() - new Vector2(0f, 32f))) <= Math.Max(104f, _vpH * 0.17f));
 
-                    if (holdingSlingshot && _slingshotTouchId < 0 && !inJoyZoneCheck)
+                    if (holdingSlingshot && _slingshotTouchId < 0 && !inJoyZoneCheck && allowSlingPress)
                     {
                         _slingshotTouchId = tl.Id;
+                        _slingshotReleaseHoldFrames = 0;
                         _slingshotRawPos = tl.Position;
                         _slingshotVpPos = vp;
                         _slingshotNorm = new Vector2(vp.X / Math.Max(1f, _vpW), vp.Y / Math.Max(1f, _vpH));
@@ -4954,8 +5091,23 @@ namespace SDVMobileControls
                 }
             }
 
-            // --- 5. Optional Auto-Attack (DEFAULT OFF) ---
-            if (_cfg.AutoAttack && !fireX && !fireA && !sawSlingshot)
+            // --- 5. Queued Weapon Special Move & Optional Auto-Attack (DEFAULT OFF) ---
+            if (_pendingWeaponSpecTicks > 0)
+            {
+                _pendingWeaponSpecTicks--;
+                MeleeWeapon qSpec = GetHeldSpecialWeapon();
+                if (qSpec == null || IsWeaponSpecialOnCooldown(qSpec) || Game1.player == null)
+                {
+                    _pendingWeaponSpecTicks = 0;
+                }
+                else if (!Game1.player.UsingTool)
+                {
+                    _pendingWeaponSpecTicks = 0;
+                    try { qSpec.animateSpecialMove(Game1.player); } catch { }
+                    ClearPath();
+                }
+            }
+            else if (_cfg.AutoAttack && !fireX && !fireA && !sawSlingshot)
             {
                 bool movingAway = stickVec.LengthSquared() > 0.25f;
                 if (AutoToolAndCombat.TryAutoAttack(Game1.currentLocation, Game1.player, movingAway, ref _autoAttackCooldown))
@@ -5008,15 +5160,24 @@ namespace SDVMobileControls
                     // Allow full ~0.55s Axe/Pickaxe/Hoe/Weapon swing to land before treating as stuck
                     unstickThreshold = 55;
                 }
+                else if (uWho.mount != null && (uWho.mount.dismounting.Value || uWho.mount.mounting.Value))
+                {
+                    // Never interrupt active Horse mount/dismount hop animation
+                    unstickThreshold = 0;
+                }
+                else if (uWho.freezePause > 0)
+                {
+                    // Allow full ~1.5s Warp Totem / Return Scepter / Obelisk animation to complete before safety rescue
+                    unstickThreshold = 150;
+                }
                 else if (!uWho.CanMove ||
                          Game1.freezeControls ||
-                         uWho.freezePause > 0 ||
                          (uWho.FarmerSprite != null && uWho.FarmerSprite.PauseForSingleAnimation) ||
                          uWho.usingSlingshot ||
                          uWho.controller != null ||
                          strayKbSub)
                 {
-                    // Pure freeze lock (not swinging/eating/fishing): rescue fast at 20 ticks (~0.33s),
+                    // Pure freeze lock (not swinging/eating/fishing/warping): rescue fast at 20 ticks (~0.33s),
                     // well before StepPathFollower's 36-tick path abort so Tap-to-Move ALSO recovers!
                     unstickThreshold = 20;
                 }
@@ -5120,7 +5281,16 @@ namespace SDVMobileControls
             if (sawSlingshot)
             {
                 Point aimRaw = new Point((int)_slingshotRawPos.X, (int)_slingshotRawPos.Y);
+                try { Game1.lastCursorMotionWasMouse = true; } catch { }
                 EnsureBridge(pad)?.ApplyInputWithMouse(pad, stickVec, true, false, false, aimRaw, true, false, _rawW, _rawH);
+            }
+            else if (_slingshotReleaseHoldFrames > 0)
+            {
+                // Preserve exact release aim coordinates with LeftButton=Released for 2 frames so Slingshot.PerformFire() -> updateAimPos() never aims at (0, 0)!
+                _slingshotReleaseHoldFrames--;
+                Point aimRaw = new Point((int)_slingshotRawPos.X, (int)_slingshotRawPos.Y);
+                try { Game1.lastCursorMotionWasMouse = true; } catch { }
+                EnsureBridge(pad)?.ApplyInputWithMouse(pad, stickVec, false, false, false, aimRaw, false, false, _rawW, _rawH);
             }
             else if ((_toolPressed || _tapChargingTool) && Game1.player?.CurrentTool is FishingRod timingRod && timingRod.isTimingCast)
             {
@@ -5182,7 +5352,8 @@ namespace SDVMobileControls
 
         private void TryPeriodicAutoSave(PadBridge br, Vector2 stickVec, bool anyAction, double nowSec)
         {
-            if (_cfg.AutoSaveMinutes <= 0 || br == null || Game1.player == null || Game1.currentLocation == null || Game1.eventUp || Game1.dialogueUp)
+            if (_cfg.AutoSaveMinutes <= 0 || br == null || Game1.player == null || Game1.currentLocation == null || Game1.eventUp || Game1.dialogueUp ||
+                (Game1.IsMultiplayer && !Game1.IsMasterGame))
                 return;
 
             // Initialize timer on first gameplay tick so it doesn't save immediately on load
@@ -6351,31 +6522,43 @@ namespace SDVMobileControls
                     try
                     {
                         // Zero-Harmony native right-click synthesis: ensures Game1.didPlayerJustRightClick() returns true
-                        // even on 0% JIT where 0Harmony.dll is a no-op! Fixes ShippingBin, FishPond, Furniture, Well, etc.
-                        if (Game1.input != null && InputCurrentMouseStateField != null)
+                        // even on 0% JIT where 0Harmony.dll is a no-op AND Game1.input is SMAPI's SInputState!
+                        // Fixes diagonal/direct ShippingBin, FishPond, Furniture (without ripping table decor!), Chests, Well, etc.
+                        if (Game1.input != null)
                         {
-                            savedCurMouse = Game1.input.GetMouseState();
-                            Game1.oldMouseState = new MouseState(
-                                savedOldMouse.X, savedOldMouse.Y, savedOldMouse.ScrollWheelValue,
-                                savedOldMouse.LeftButton, savedOldMouse.MiddleButton, ButtonState.Released,
-                                savedOldMouse.XButton1, savedOldMouse.XButton2);
-                            InputCurrentMouseStateField.SetValue(Game1.input, new MouseState(
-                                savedCurMouse.X, savedCurMouse.Y, savedCurMouse.ScrollWheelValue,
-                                savedCurMouse.LeftButton, savedCurMouse.MiddleButton, ButtonState.Pressed,
-                                savedCurMouse.XButton1, savedCurMouse.XButton2));
-                            patchedMouseState = true;
+                            if (!_sInputMouseStateResolved)
+                            {
+                                _sInputMouseStateResolved = true;
+                                _sInputMouseStateField = Game1.input.GetType().GetField("<MouseState>k__BackingField", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                            }
+                            if (InputCurrentMouseStateField != null || _sInputMouseStateField != null)
+                            {
+                                savedCurMouse = Game1.input.GetMouseState();
+                                Game1.oldMouseState = new MouseState(
+                                    savedOldMouse.X, savedOldMouse.Y, savedOldMouse.ScrollWheelValue,
+                                    savedOldMouse.LeftButton, savedOldMouse.MiddleButton, ButtonState.Released,
+                                    savedOldMouse.XButton1, savedOldMouse.XButton2);
+                                var synthRight = new MouseState(
+                                    savedCurMouse.X, savedCurMouse.Y, savedCurMouse.ScrollWheelValue,
+                                    savedCurMouse.LeftButton, savedCurMouse.MiddleButton, ButtonState.Pressed,
+                                    savedCurMouse.XButton1, savedCurMouse.XButton2);
+                                InputCurrentMouseStateField?.SetValue(Game1.input, synthRight);
+                                _sInputMouseStateField?.SetValue(Game1.input, synthRight);
+                                patchedMouseState = true;
+                            }
                         }
                         handled = Game1.tryToCheckAt(new Vector2(tile.X, tile.Y), who);
                     }
                     catch { }
                     finally
                     {
-                        if (patchedMouseState && Game1.input != null && InputCurrentMouseStateField != null)
+                        if (patchedMouseState && Game1.input != null)
                         {
                             try
                             {
                                 Game1.oldMouseState = savedOldMouse;
-                                InputCurrentMouseStateField.SetValue(Game1.input, savedCurMouse);
+                                InputCurrentMouseStateField?.SetValue(Game1.input, savedCurMouse);
+                                _sInputMouseStateField?.SetValue(Game1.input, savedCurMouse);
                             }
                             catch { }
                         }
@@ -6394,7 +6577,8 @@ namespace SDVMobileControls
                     }
                 }
 
-                if (!handled && Game1.activeClickableMenu == null && !Game1.dialogueUp && !IsBlockingCutsceneActive() && !Game1.fadeToBlack)
+                // Never pulse A while mounted on a Horse (prevents accidental dismount when tapping chests/shipping bins/ground)!
+                if (!handled && !who.isRidingHorse() && Game1.activeClickableMenu == null && !Game1.dialogueUp && !IsBlockingCutsceneActive() && !Game1.fadeToBlack)
                     _actionPulseAFrames = 2;
             }
         }
@@ -6864,11 +7048,19 @@ namespace SDVMobileControls
                 PixelUi.DrawPixelPill(sb, _pixel, _bridge, _btnSpecRect, "SPEC", PixelRole.Special, false, _vpH, Math.Max(1, _vpH / 290), onCd ? 0.40f : 0.88f);
             }
 
-            // 4e. Slingshot Pixel Aiming Reticle while dragging (normalized so UIScale never shifts reticle!)
+            // 4e. Slingshot Pixel Aiming Reticle while dragging (normalized so UIScale never shifts reticle,
+            //     and mirrored across farmer in default pull-back mode so crosshair shows true shot trajectory!)
             if (_slingshotTouchId >= 0 && Game1.player?.CurrentTool is Slingshot)
             {
                 float cr = Math.Max(24f, Math.Min(_vpW, _vpH) * 0.036f);
                 Vector2 slingDrawPos = new Vector2(_slingshotNorm.X * _vpW, _slingshotNorm.Y * _vpH);
+                if (Game1.options == null || !Game1.options.useLegacySlingshotFiring)
+                {
+                    Vector2 farmerVp = WorldToViewport(Game1.player.getStandingPosition() - new Vector2(0f, 32f));
+                    slingDrawPos = farmerVp + (farmerVp - slingDrawPos);
+                    slingDrawPos.X = Math.Clamp(slingDrawPos.X, cr, Math.Max(cr, _vpW - cr));
+                    slingDrawPos.Y = Math.Clamp(slingDrawPos.Y, cr, Math.Max(cr, _vpH - cr));
+                }
                 PixelUi.DrawPixelCrosshair(sb, _pixel, slingDrawPos, cr, _vpH);
             }
 

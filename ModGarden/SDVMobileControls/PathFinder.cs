@@ -17,16 +17,16 @@ namespace SDVMobileControls
 
         public static bool IsTileWalkable(GameLocation loc, int tx, int ty, Farmer who)
         {
-            if (loc?.Map == null)
-                return false;
-
-            int mapW = loc.Map.Layers[0].LayerWidth;
-            int mapH = loc.Map.Layers[0].LayerHeight;
-            if (tx < 0 || ty < 0 || tx >= mapW || ty >= mapH)
+            if (loc?.Map?.Layers == null || loc.Map.Layers.Count == 0)
                 return false;
 
             try
             {
+                int mapW = loc.Map.Layers[0].LayerWidth;
+                int mapH = loc.Map.Layers[0].LayerHeight;
+                if (tx < 0 || ty < 0 || tx >= mapW || ty >= mapH)
+                    return false;
+
                 if (!loc.isTilePassable(new Location(tx, ty), Game1.viewport))
                     return false;
 
@@ -48,7 +48,26 @@ namespace SDVMobileControls
                     projectile: false,
                     ignoreCharacterRequirement: false,
                     skipCollisionEffects: true))
+                {
+                    // Stardew 1.6 Horse.squeezingThroughGate: mounted horses narrow their horizontal hitbox through open 1-tile Fence gates!
+                    if (riding && HasOpenFenceGateNear(loc, tx, ty))
+                    {
+                        var squeezedBox = new Microsoft.Xna.Framework.Rectangle(tx * 64 + 14, ty * 64 + 16, 36, 44);
+                        if (!loc.isCollidingPosition(
+                            squeezedBox,
+                            Game1.viewport,
+                            isFarmer: true,
+                            damagesFarmer: 0,
+                            glider: false,
+                            character: who,
+                            pathfinding: true,
+                            projectile: false,
+                            ignoreCharacterRequirement: false,
+                            skipCollisionEffects: true))
+                            return true;
+                    }
                     return false;
+                }
 
                 return true;
             }
@@ -56,6 +75,23 @@ namespace SDVMobileControls
             {
                 return false;
             }
+        }
+
+        private static bool HasOpenFenceGateNear(GameLocation loc, int tx, int ty)
+        {
+            if (loc?.objects == null) return false;
+            for (int dy = -1; dy <= 1; dy++)
+            {
+                for (int dx = -1; dx <= 1; dx++)
+                {
+                    if (loc.objects.TryGetValue(new Vector2(tx + dx, ty + dy), out StardewValley.Object obj) &&
+                        obj is Fence fence && fence.isGate.Value)
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
         }
 
         public static List<Point> FindPath(GameLocation loc, Point start, Point goal, Farmer who, bool stopAdjacent, bool preferCardinal = false)

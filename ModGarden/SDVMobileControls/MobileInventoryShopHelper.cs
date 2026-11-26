@@ -340,6 +340,14 @@ namespace SDVMobileControls
             ShopMenu shop = activeMenu as ShopMenu;
             ItemGrabMenu grab = activeMenu as ItemGrabMenu;
             InventoryPage invPage = (activeMenu as GameMenu)?.GetCurrentPage() as InventoryPage;
+            CraftingPage craftPage = (activeMenu as CraftingPage) ?? ((activeMenu as GameMenu)?.GetCurrentPage() as CraftingPage);
+
+            // Prevent stuck invisible heldItem on CraftingPage cursor in Mobile touch mode
+            if (craftPage != null && craftPage.heldItem != null && Game1.player != null)
+            {
+                RescueHeldItemToPlayer(craftPage.heldItem);
+                craftPage.heldItem = null;
+            }
 
             if (shop == null && grab == null && invPage == null)
             {
@@ -709,11 +717,25 @@ namespace SDVMobileControls
             return true;
         }
 
+        private static void RescueHeldItemToPlayer(Item item)
+        {
+            if (item == null || Game1.player == null) return;
+            Item rem = null;
+            try { rem = Game1.player.addItemToInventory(item); } catch { rem = item; }
+            if (rem != null)
+            {
+                try { Game1.createItemDebris(rem, Game1.player.getStandingPosition(), Game1.player.FacingDirection); } catch { }
+            }
+        }
+
         private static void DirectBuyOneIntoBackpack(ShopMenu shop, ISalable sale, Point uiCenter)
         {
             if (shop == null || sale == null) return;
             if (shop.heldItem is Item prevHeld)
-                shop.heldItem = Game1.player.addItemToInventory(prevHeld);
+            {
+                RescueHeldItemToPlayer(prevHeld);
+                shop.heldItem = null;
+            }
 
             if (!sale.IsRecipe && sale is Item checkItem && !Game1.player.couldInventoryAcceptThisItem(checkItem.getOne()))
             {
@@ -739,9 +761,14 @@ namespace SDVMobileControls
                 catch { }
             }
             if (shop.heldItem is Item bought)
-                shop.heldItem = Game1.player.addItemToInventory(bought);
-            else
+            {
+                RescueHeldItemToPlayer(bought);
                 shop.heldItem = null;
+            }
+            else
+            {
+                shop.heldItem = null;
+            }
         }
 
         private void OpenShopBuyPopup(ShopMenu shop, ISalable sale, Point uiCenter)
@@ -826,10 +853,11 @@ namespace SDVMobileControls
                     return;
                 }
 
-                // Clear any previous held cursor item cleanly into Backpack
+                // Clear any previous held cursor item cleanly into Backpack (or drop safely if full — never delete!)
                 if (shop.heldItem is Item prevHeld)
                 {
-                    shop.heldItem = Game1.player.addItemToInventory(prevHeld);
+                    RescueHeldItemToPlayer(prevHeld);
+                    shop.heldItem = null;
                 }
 
                 // Do NOT block Clint's Tool Upgrades / special action purchases (which remove the old tool or trigger instant services!) when Backpack is full
@@ -842,7 +870,9 @@ namespace SDVMobileControls
                 {
                     Item probe = checkItem.getOne();
                     probe.Stack = _popupQty;
-                    if (!Game1.player.couldInventoryAcceptThisItem(probe))
+                    bool freesTradeSlot = !string.IsNullOrEmpty(_popupTradeItemId) && _popupTradeCount > 0 &&
+                                          Game1.player.Items.CountId(_popupTradeItemId) == _popupQty * _popupTradeCount;
+                    if (!freesTradeSlot && !Game1.player.couldInventoryAcceptThisItem(probe))
                     {
                         try { Game1.playSound("cancel"); } catch { }
                         ClosePopup();
@@ -896,10 +926,11 @@ namespace SDVMobileControls
                     return;
                 }
 
-                // Clear any leftover heldItem first
+                // Clear any leftover heldItem first (never let full backpack block crafting or vaporize heldItem!)
                 if (_popupCraftPage.heldItem != null && Game1.player != null)
                 {
-                    try { _popupCraftPage.heldItem = Game1.player.addItemToInventory(_popupCraftPage.heldItem); } catch { }
+                    RescueHeldItemToPlayer(_popupCraftPage.heldItem);
+                    _popupCraftPage.heldItem = null;
                 }
 
                 int craftedAny = 0;
@@ -1190,25 +1221,23 @@ namespace SDVMobileControls
                             OpenSplitPopup(ownerMenu, srcInv, srcSlot, dstInv, item, isChestMenu);
                             return true;
                         }
-                        else if (_dragItem is Tool attTool && HasAnyAttachment(attTool) && (nowSec - _touchStartSec) >= 0.42)
+                        else if (_dragItem is Tool attTool && HasAnyAttachment(attTool))
                         {
-                            // Long-Press on FishingRod/Slingshot with attached Bait/Tackle/Ammo -> pop attachment cleanly into Backpack!
+                            // Stationary Long-Press (>=0.36s, dist < dragThresh) on FishingRod/Slingshot with attached Bait/Tackle/Ammo
+                            // pops 1 attachment cleanly into Backpack (including 1.6 Advanced Iridium Rod's 2nd Tackle slot!).
+                            // Moving finger >= dragThresh still drags the tool normally!
                             if (TryDetachOneAttachment(attTool))
                             {
                                 try { Game1.playSound("dwop"); } catch { }
-                                _popConsumeTouchId = tl.Id;
-                                ResetTouch();
-                                ClearSelection();
-                                return true;
                             }
                             else
                             {
                                 try { Game1.playSound("cancel"); } catch { }
-                                _popConsumeTouchId = tl.Id;
-                                ResetTouch();
-                                ClearSelection();
-                                return true;
                             }
+                            _popConsumeTouchId = tl.Id;
+                            ResetTouch();
+                            ClearSelection();
+                            return true;
                         }
                         else if (_dragItem != null)
                         {
@@ -1408,21 +1437,32 @@ namespace SDVMobileControls
         {
             if (tool == null || Game1.player == null || !HasAnyAttachment(tool))
                 return false;
-            // Ensure player inventory can accept at least 1 detached item before calling attach(null)
             StardewValley.Object firstAtt = null;
+            int foundIdx = -1;
             for (int i = 0; i < tool.attachments.Length; i++)
             {
-                if (tool.attachments[i] != null) { firstAtt = tool.attachments[i]; break; }
+                if (tool.attachments[i] != null) { firstAtt = tool.attachments[i]; foundIdx = i; break; }
             }
             if (firstAtt == null || !Game1.player.couldInventoryAcceptThisItem(firstAtt))
                 return false;
 
-            StardewValley.Object popped = tool.attach(null);
+            StardewValley.Object popped = null;
+            try { popped = tool.attach(null); } catch { popped = null; }
+            if (popped == null && foundIdx >= 0 && tool.attachments[foundIdx] != null)
+            {
+                // Fallback for 1.6 Advanced Iridium Rod 2nd Tackle slot (attachments[2]) if vanilla attach(null) skipped it!
+                popped = tool.attachments[foundIdx];
+                tool.attachments[foundIdx] = null;
+            }
             if (popped != null)
             {
                 Item rem = Game1.player.addItemToInventory(popped);
                 if (rem is StardewValley.Object remObj)
-                    tool.attach(remObj);
+                {
+                    StardewValley.Object leftover = tool.attach(remObj);
+                    if (leftover != null)
+                        RescueHeldItemToPlayer(leftover);
+                }
                 return true;
             }
             return false;
@@ -1430,20 +1470,35 @@ namespace SDVMobileControls
 
         private static void TryEquipItem(InventoryPage ip, InventoryMenu srcInv, int srcSlot, Item item, Point uiPt)
         {
+            if (Game1.player == null) return;
+            if (Game1.player.CursorSlotItem != null)
+            {
+                RescueHeldItemToPlayer(Game1.player.CursorSlotItem);
+                Game1.player.CursorSlotItem = null;
+            }
             SetItemAt(srcInv, srcSlot, null);
+            try { item?.onDetachedFromParent(); } catch { }
             Game1.player.CursorSlotItem = item;
             try { ip.receiveLeftClick(uiPt.X, uiPt.Y, true); } catch { }
             if (Game1.player.CursorSlotItem != null)
             {
-                SetItemAt(srcInv, srcSlot, Game1.player.CursorSlotItem);
+                Item back = Game1.player.CursorSlotItem;
                 Game1.player.CursorSlotItem = null;
+                if (GetItemAt(srcInv, srcSlot) == null)
+                    SetItemAt(srcInv, srcSlot, back);
+                else
+                    RescueHeldItemToPlayer(back);
             }
         }
 
         private static void TryUnequipToBackpack(InventoryPage ip, Point uiPt)
         {
             if (ip == null || Game1.player == null) return;
-            Game1.player.CursorSlotItem = null;
+            if (Game1.player.CursorSlotItem != null)
+            {
+                RescueHeldItemToPlayer(Game1.player.CursorSlotItem);
+                Game1.player.CursorSlotItem = null;
+            }
             try { ip.receiveLeftClick(uiPt.X, uiPt.Y, true); } catch { }
             Item lifted = Game1.player.CursorSlotItem;
             if (lifted == null) return;
@@ -1453,10 +1508,14 @@ namespace SDVMobileControls
             try { rem = Game1.player.addItemToInventory(lifted); } catch { rem = lifted; }
             if (rem != null)
             {
-                // Backpack is completely full -> re-equip back into slot so CursorSlotItem NEVER sticks!
+                // Backpack is completely full -> re-equip back into slot; if re-equip fails, drop safely via createItemDebris!
                 Game1.player.CursorSlotItem = rem;
                 try { ip.receiveLeftClick(uiPt.X, uiPt.Y, true); } catch { }
-                Game1.player.CursorSlotItem = null;
+                if (Game1.player.CursorSlotItem != null)
+                {
+                    RescueHeldItemToPlayer(Game1.player.CursorSlotItem);
+                    Game1.player.CursorSlotItem = null;
+                }
                 try { Game1.playSound("cancel"); } catch { }
             }
             else
@@ -1711,7 +1770,20 @@ namespace SDVMobileControls
             }
 
             int toMove = Math.Min(qty, curStack);
-            Item moving = (toMove >= curStack) ? srcItem : srcItem.getOne();
+            bool detachedFullStack = false;
+            Item moving;
+            if (toMove >= curStack)
+            {
+                // Detach from srcInv BEFORE inserting into dstInv so Netcode never logs "Changing net field parent" + StackTrace on 0% JIT!
+                SetItemAt(srcInv, srcSlot, null);
+                try { srcItem.onDetachedFromParent(); } catch { }
+                moving = srcItem;
+                detachedFullStack = true;
+            }
+            else
+            {
+                moving = srcItem.getOne();
+            }
             moving.Stack = toMove;
 
             int leftover = AddItemToInventoryMenu(dstInv, moving, out int dstSlotIdx);
@@ -1720,8 +1792,20 @@ namespace SDVMobileControls
             if (actuallyMoved > 0)
             {
                 int originalStack = curStack;
-                if (actuallyMoved >= originalStack) SetItemAt(srcInv, srcSlot, null);
-                else srcItem.Stack = originalStack - actuallyMoved;
+                if (detachedFullStack)
+                {
+                    if (leftover > 0)
+                    {
+                        Item remCopy = moving.getOne();
+                        remCopy.Stack = leftover;
+                        SetItemAt(srcInv, srcSlot, remCopy);
+                    }
+                }
+                else
+                {
+                    if (actuallyMoved >= originalStack) SetItemAt(srcInv, srcSlot, null);
+                    else srcItem.Stack = originalStack - actuallyMoved;
+                }
 
                 // Only invoke non-Chest behaviorOnItemGrab (Fishing Treasure / Mine Reward / Quest Reward / Mod callbacks).
                 // NEVER call Chest.grabItemFromChest here — it calls clearNulls() + Chest.ShowMenu() which destroys/recreates the menu & shifts every slot!

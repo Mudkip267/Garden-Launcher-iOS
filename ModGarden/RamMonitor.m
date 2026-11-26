@@ -73,6 +73,7 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
     NSInteger _tickCount;
     BOOL _started;
     NSTimer *_timer;
+    NSTimeInterval _lastLightPruneTime;
     NSTimeInterval _lastAutoGcTime;
     NSTimeInterval _lastWarn85Time;
     NSTimeInterval _lastCrit90Time;
@@ -288,13 +289,21 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
         if (isCrit90 || isWarn85) {
             NSTimeInterval now = NSDate.date.timeIntervalSinceReferenceDate;
             // 1. Auto-trigger lightweight tilesheet pruning at 85-90.9% (every 45s, zero blocking freeze),
-            //    and critical Gen2 compacting GC ONLY at >=91% RAM (every 25s) to prevent gameplay stutters!
+            //    and critical Gen2 compacting GC at >=91% RAM (every 25s, independent cooldown so LIGHT prune never blocks CRIT GC!)
             BOOL isCritGc = (s.usagePct >= 91.0);
-            if (_docsPath.length && (now - _lastAutoGcTime >= (isCritGc ? 25.0 : 45.0))) {
-                _lastAutoGcTime = now;
-                [self triggerPruneInDocs:_docsPath critical:isCritGc];
-                [self appendLogLine:[NSString stringWithFormat:@"[AUTO-GC] Triggered (%@) at %.1f%% (Avail=%@)",
-                    isCritGc ? @"CRIT" : @"LIGHT", s.usagePct, sdvFmtMemMB(s.availBytes)]];
+            if (_docsPath.length) {
+                if (isCritGc && (now - _lastAutoGcTime >= 25.0)) {
+                    _lastAutoGcTime = now;
+                    _lastLightPruneTime = now;
+                    [self triggerPruneInDocs:_docsPath critical:YES];
+                    [self appendLogLine:[NSString stringWithFormat:@"[AUTO-GC] Triggered (CRIT) at %.1f%% (Avail=%@)",
+                        s.usagePct, sdvFmtMemMB(s.availBytes)]];
+                } else if (!isCritGc && (now - _lastLightPruneTime >= 45.0)) {
+                    _lastLightPruneTime = now;
+                    [self triggerPruneInDocs:_docsPath critical:NO];
+                    [self appendLogLine:[NSString stringWithFormat:@"[AUTO-GC] Triggered (LIGHT) at %.1f%% (Avail=%@)",
+                        s.usagePct, sdvFmtMemMB(s.availBytes)]];
+                }
             }
             // 2. Tier 2 (90%+): Strong Critical Alert (fires immediately when crossing 90%, repeats every 20s)
             if (isCrit90 && [self ramAlertEnabled] && (now - _lastCrit90Time >= 20.0)) {

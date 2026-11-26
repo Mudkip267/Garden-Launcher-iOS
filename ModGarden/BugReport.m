@@ -17,8 +17,9 @@ static NSString *const kSDVBugReportClientKey = @SDV_BUG_REPORT_CLIENT_KEY;
 static NSString *const kSDVBugReportLastSentKey = @"sdv_bug_report_last_sent_ts";
 static const NSTimeInterval kSDVBugReportCooldownSec = 60.0;
 static const NSUInteger kSDVBugReportMaxMediaCount = 3;
-static const unsigned long long kSDVBugReportMaxSingleMediaBytes = 7500ULL * 1024ULL; // 7.5 MB per file
-static const unsigned long long kSDVBugReportMaxTotalUploadBytes = 8500ULL * 1024ULL; // 8.5 MB total (safe for Discord free 8-10 MB)
+static const unsigned long long kSDVBugReportMaxZipBytes         = 3900ULL * 1024ULL;               // <= 3.9 MiB (compatible with both 4 MiB & 7.5 MiB Worker limits)
+static const unsigned long long kSDVBugReportMaxSingleMediaBytes = 7ULL * 1024ULL * 1024ULL + 512ULL * 1024ULL; // 7.5 MiB (7,864,320 B)
+static const unsigned long long kSDVBugReportMaxTotalUploadBytes = 8ULL * 1024ULL * 1024ULL + 512ULL * 1024ULL; // 8.5 MiB (8,912,896 B)
 
 static NSString *sdvHardwareModelId(void) {
     size_t sz = 0;
@@ -151,17 +152,14 @@ static NSData *sdvReadTrimmedLogUtf8(NSString *path, NSUInteger maxBytes) {
     if (!raw.length) return nil;
     NSString *text = nil;
     if (raw.length <= maxBytes) {
-        text = [[NSString alloc] initWithData:raw encoding:NSUTF8StringEncoding]
-            ?: [[NSString alloc] initWithData:raw encoding:NSISOLatin1StringEncoding];
+        text = sdvDecodeUtf8Slice(raw, NO, NO);
     } else {
         NSUInteger headLen = MIN((NSUInteger)24576, maxBytes / 4);
         NSUInteger tailLen = maxBytes - headLen;
         NSData *headD = [raw subdataWithRange:NSMakeRange(0, headLen)];
         NSData *tailD = [raw subdataWithRange:NSMakeRange(raw.length - tailLen, tailLen)];
-        NSString *hs = [[NSString alloc] initWithData:headD encoding:NSUTF8StringEncoding]
-            ?: [[NSString alloc] initWithData:headD encoding:NSISOLatin1StringEncoding] ?: @"";
-        NSString *ts = [[NSString alloc] initWithData:tailD encoding:NSUTF8StringEncoding]
-            ?: [[NSString alloc] initWithData:tailD encoding:NSISOLatin1StringEncoding] ?: @"";
+        NSString *hs = sdvDecodeUtf8Slice(headD, NO, YES);
+        NSString *ts = sdvDecodeUtf8Slice(tailD, YES, NO);
         NSUInteger skippedKb = (raw.length - headLen - tailLen) / 1024;
         text = [NSString stringWithFormat:@"%@\n\n... [trimmed %lu KB middle log for compact upload] ...\n\n%@",
             hs, (unsigned long)skippedKb, ts];
@@ -202,7 +200,7 @@ static NSDictionary *sdvBuildBugReportBundle(NSString *docsPath) {
             en ? @"ON " : @"OFF", line, uid, m[@"topFolder"] ?: @""]];
     }
     NSString *modsShort = enabledLines.count ? [enabledLines componentsJoinedByString:@"\n"] : @"Không có mod nào đang bật";
-    if (modsShort.length > 900) modsShort = [[modsShort substringToIndex:896] stringByAppendingString:@"\n..."];
+    if (modsShort.length > 900) modsShort = [sdvSafeTruncateUtf16(modsShort, 896) stringByAppendingString:@"\n..."];
 
     NSMutableArray<NSString *> *issueLines = [NSMutableArray array];
     for (NSDictionary *it in issues) {
@@ -210,7 +208,7 @@ static NSDictionary *sdvBuildBugReportBundle(NSString *docsPath) {
         [issueLines addObject:[NSString stringWithFormat:@"[%@] %@: %@", sev, it[@"title"] ?: @"", it[@"detail"] ?: @""]];
     }
     NSString *issueShort = issueLines.count ? [issueLines componentsJoinedByString:@"\n"] : @"";
-    if (issueShort.length > 850) issueShort = [[issueShort substringToIndex:846] stringByAppendingString:@"\n..."];
+    if (issueShort.length > 850) issueShort = [sdvSafeTruncateUtf16(issueShort, 846) stringByAppendingString:@"\n..."];
 
     NSString *vid = UIDevice.currentDevice.identifierForVendor.UUIDString ?: hwModel;
     NSString *devHash = [hashData([vid dataUsingEncoding:NSUTF8StringEncoding]) substringToIndex:16];
@@ -307,7 +305,8 @@ static NSData *sdvBuildMultipartBody(
         NSString *v = fields[k] ?: @"";
         [body appendData:[[NSString stringWithFormat:@"--%@%@", boundary, crlf] dataUsingEncoding:NSUTF8StringEncoding]];
         [body appendData:[[NSString stringWithFormat:@"Content-Disposition: form-data; name=\"%@\"%@%@", k, crlf, crlf] dataUsingEncoding:NSUTF8StringEncoding]];
-        [body appendData:[v dataUsingEncoding:NSUTF8StringEncoding]];
+        NSData *valData = [v dataUsingEncoding:NSUTF8StringEncoding allowLossyConversion:YES] ?: [NSData data];
+        [body appendData:valData];
         [body appendData:[crlf dataUsingEncoding:NSUTF8StringEncoding]];
     }
     if (zipData.length) {
@@ -988,7 +987,7 @@ static NSData *sdvBuildMultipartBody(
 -(void)textViewDidChange:(UITextView *)tv {
     NSString *txt = tv.text ?: @"";
     if (txt.length > 2000) {
-        tv.text = [txt substringToIndex:2000];
+        tv.text = sdvSafeTruncateUtf16(txt, 2000);
         txt = tv.text;
     }
     _descPlaceholder.hidden = (txt.length > 0);
@@ -1054,10 +1053,13 @@ static NSData *sdvBuildMultipartBody(
         return;
     }
 
+    if (_attachSwitch.isOn && !_bundle) {
+        _bundle = sdvBuildBugReportBundle(self.docsPath ?: @"");
+    }
     unsigned long long preZipSz = _attachSwitch.isOn ? [_bundle[@"bytes"] unsignedLongLongValue] : 0;
-    if (_attachSwitch.isOn && preZipSz > kSDVBugReportMaxSingleMediaBytes) {
-        [self showAlertTitle:@"Tệp ErrorLogs.zip vượt 7.5 MB"
-            msg:@"Tệp nhật ký ErrorLogs.zip quá lớn so với giới hạn tệp đơn của Discord. Bạn có thể bấm Xuất ErrorLogs.zip để chia sẻ trực tiếp hoặc tắt công tắc đính kèm tệp log."
+    if (_attachSwitch.isOn && preZipSz > kSDVBugReportMaxZipBytes) {
+        [self showAlertTitle:@"Tệp ErrorLogs.zip vượt giới hạn"
+            msg:@"Tệp nhật ký ErrorLogs.zip quá lớn so với giới hạn máy chủ nhận lỗi. Bạn có thể bấm Xuất ErrorLogs.zip để chia sẻ trực tiếp hoặc tắt công tắc đính kèm tệp log."
             closeAfter:NO];
         return;
     }
@@ -1093,7 +1095,7 @@ static NSData *sdvBuildMultipartBody(
         NSData *zipData = nil;
         if (attachZip && [b[@"url"] isKindOfClass:NSURL.class]) {
             zipData = [NSData dataWithContentsOfURL:b[@"url"]];
-            if (zipData.length > kSDVBugReportMaxTotalUploadBytes) zipData = nil;
+            if (zipData.length > kSDVBugReportMaxZipBytes) zipData = nil;
         }
         NSDictionary<NSString *, NSString *> *fields = @{
             @"category":     cat,

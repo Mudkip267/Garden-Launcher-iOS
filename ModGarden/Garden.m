@@ -89,6 +89,54 @@ static void writeFile(NSData *d, NSString *p) {
     check(ok, e);
 }
 
+// Safely decodes a byte-sliced UTF-8 buffer without failing on mid-character multi-byte Vietnamese / Emoji boundaries!
+static NSString *sdvDecodeUtf8Slice(NSData *raw, BOOL trimLeadingCont, BOOL trimTrailingIncomplete) {
+    if (!raw.length) return @"";
+    const uint8_t *b = (const uint8_t *)raw.bytes;
+    NSUInteger start = 0;
+    NSUInteger end = raw.length;
+    if (!trimLeadingCont) {
+        while (start + 3 <= end && b[start] == 0xEF && b[start + 1] == 0xBB && b[start + 2] == 0xBF) {
+            start += 3;
+        }
+    } else {
+        NSUInteger skipped = 0;
+        while (start < end && skipped < 4 && (b[start] & 0xC0) == 0x80) {
+            start++;
+            skipped++;
+        }
+    }
+    if (trimTrailingIncomplete && end > start) {
+        NSUInteger scanBack = MIN((NSUInteger)4, end - start);
+        for (NSUInteger k = 1; k <= scanBack; k++) {
+            uint8_t c = b[end - k];
+            if ((c & 0x80) == 0) break; // Valid 1-byte ASCII terminator
+            if ((c & 0xC0) == 0xC0) {
+                NSUInteger need = ((c & 0xE0) == 0xC0) ? 2 : (((c & 0xF0) == 0xE0) ? 3 : 4);
+                if (k < need) end -= k;
+                break;
+            }
+        }
+    }
+    if (end <= start) return @"";
+    NSData *sub = (start == 0 && end == raw.length) ? raw : [raw subdataWithRange:NSMakeRange(start, end - start)];
+    return [[NSString alloc] initWithData:sub encoding:NSUTF8StringEncoding]
+        ?: [[NSString alloc] initWithData:sub encoding:NSISOLatin1StringEncoding]
+        ?: @"";
+}
+
+// Truncates an NSString cleanly on composed grapheme/surrogate-pair boundaries so Emoji/UTF-16 never splits!
+static NSString *sdvSafeTruncateUtf16(NSString *s, NSUInteger maxLen) {
+    if (!s || s.length <= maxLen) return s ?: @"";
+    if (maxLen == 0) return @"";
+    NSRange r = [s rangeOfComposedCharacterSequencesForRange:NSMakeRange(0, maxLen)];
+    while (r.length > maxLen && maxLen > 0) {
+        maxLen--;
+        r = [s rangeOfComposedCharacterSequencesForRange:NSMakeRange(0, maxLen)];
+    }
+    return (r.length <= s.length) ? [s substringWithRange:r] : @"";
+}
+
 static NSData *stripJson5ForIOS14(NSData *raw) {
     if (!raw.length) return raw;
     const unsigned char *b = (const unsigned char *)raw.bytes;
@@ -230,7 +278,7 @@ static void sdvRepairSandboxPermissions(NSString *docsPath) {
             sdvRepairDirModesRecursive(tmpDir, 4);
         }
         if (docsPath.length) {
-            for (NSString *sub in @[@"Mods", @"Saves", @"StardewValley", @".garden", @"ErrorLogs"]) {
+            for (NSString *sub in @[@"Mods", @"Saves", @".config/StardewValley/Saves", @"StardewValley", @".garden", @"ErrorLogs"]) {
                 sdvRepairDirModesRecursive(join(docsPath, sub), 4);
             }
         }
@@ -408,7 +456,8 @@ static BOOL dataContainsAscii(NSData *data, const char *needle) {
 static NSString *syncBundledSmapi(NSString *docsPath) {
     if (!docsPath.length) return @"no-docs";
     @try {
-        if (sdvHotPatchOverridesRelPath(docsPath, @"StardewValley/StardewModdingAPI.dll")) {
+        if (sdvHotPatchOverridesRelPath(docsPath, @"StardewValley/StardewModdingAPI.dll") ||
+            sdvHotPatchOverridesRelPath(docsPath, @"StardewValley/smapi-internal/SMAPI.Toolkit.dll")) {
             sdvDeployActiveHotPatchFiles(docsPath);
             return @"hotpatched";
         }
@@ -450,6 +499,8 @@ static NSString *syncBundledSmapi(NSString *docsPath) {
                 stamp = [stamp stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
                 if (![stamp isEqualToString:srcHash]) {
                     reason = @"stamp-mismatch";
+                } else if (dstData.length != srcDllData.length || ![hashData(dstData) isEqualToString:srcHash]) {
+                    reason = @"dll-hash-mismatch";
                 }
             }
 
@@ -674,25 +725,30 @@ static NSUInteger syncContentPackLocaleFallbacks(NSString *docsPath) {
                     NSString *srcFull = join(packDir, fRel);
                     NSString *dstRel = nil;
 
+                    NSString *newBase = baseName;
+                    BOOL matchedStem = NO;
                     if (stem.length > 3 && [stem.lowercaseString hasSuffix:@".en"]) {
-                        NSString *newBase = [NSString stringWithFormat:@"%@.vi.%@", [stem substringToIndex:stem.length - 3], ext];
-                        dstRel = dirRel.length ? join(dirRel, newBase) : newBase;
+                        newBase = [NSString stringWithFormat:@"%@.vi.%@", [stem substringToIndex:stem.length - 3], ext];
+                        matchedStem = YES;
                     } else if (stem.length > 3 && [stem.lowercaseString hasSuffix:@"_en"]) {
-                        NSString *newBase = [NSString stringWithFormat:@"%@_vi.%@", [stem substringToIndex:stem.length - 3], ext];
-                        dstRel = dirRel.length ? join(dirRel, newBase) : newBase;
-                    } else {
-                        NSArray<NSString *> *segs = fRel.pathComponents;
-                        if (segs.count >= 2) {
-                            NSMutableArray<NSString *> *mSegs = [segs mutableCopy];
-                            BOOL matchedSeg = NO;
-                            for (NSUInteger si = 0; si + 1 < mSegs.count; si++) {
-                                if ([mSegs[si].lowercaseString isEqualToString:@"en"]) {
-                                    mSegs[si] = @"vi";
-                                    matchedSeg = YES;
-                                }
+                        newBase = [NSString stringWithFormat:@"%@_vi.%@", [stem substringToIndex:stem.length - 3], ext];
+                        matchedStem = YES;
+                    }
+                    // Apply BOTH `en/` -> `vi/` directory segment mapping AND `.en`/`_en` filename suffix mapping!
+                    NSArray<NSString *> *segs = fRel.pathComponents;
+                    if (segs.count >= 2) {
+                        NSMutableArray<NSString *> *mSegs = [segs mutableCopy];
+                        BOOL matchedSeg = NO;
+                        for (NSUInteger si = 0; si + 1 < mSegs.count; si++) {
+                            if ([mSegs[si].lowercaseString isEqualToString:@"en"]) {
+                                mSegs[si] = @"vi";
+                                matchedSeg = YES;
                             }
-                            if (matchedSeg) dstRel = [NSString pathWithComponents:mSegs];
                         }
+                        if (matchedStem) mSegs[mSegs.count - 1] = newBase;
+                        if (matchedSeg || matchedStem) dstRel = [NSString pathWithComponents:mSegs];
+                    } else if (matchedStem) {
+                        dstRel = dirRel.length ? join(dirRel, newBase) : newBase;
                     }
 
                     if (!dstRel.length || [dstRel isEqualToString:fRel]) continue;
@@ -1940,12 +1996,28 @@ static BOOL sdvDataContainsAscii(NSData *data, const char *needle) {
     return memmem(bytes, limit, needle, nlen) != NULL;
 }
 
+static NSInteger sdvSemverSuffixRank(NSString *raw) {
+    NSString *s = [raw stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    NSRange plus = [s rangeOfString:@"+"];
+    if (plus.location != NSNotFound) s = [s substringToIndex:plus.location];
+    NSRange dash = [s rangeOfString:@"-"];
+    if (dash.location == NSNotFound || dash.location + 1 >= s.length) return 0; // Clean release
+    NSString *suf = [[s substringFromIndex:dash.location + 1] lowercaseString];
+    if ([suf hasPrefix:@"p"] || [suf hasPrefix:@"hotfix"] || [suf hasPrefix:@"hf"]) {
+        NSString *digits = [suf stringByTrimmingCharactersInSet:[NSCharacterSet.decimalDigitCharacterSet invertedSet]];
+        return MAX(1, digits.integerValue); // Post-release hot-patch (e.g. -p1 > base > -rc1)
+    }
+    return -1; // Pre-release (-alpha, -beta, -rc) < base release
+}
+
 static NSInteger sdvCompareSemver(NSString *a, NSString *b) {
     if (!a.length && !b.length) return 0;
     if (!a.length) return -1;
     if (!b.length) return 1;
-    NSString *ca = [[a componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"-+ "]] firstObject] ?: @"";
-    NSString *cb = [[b componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"-+ "]] firstObject] ?: @"";
+    NSString *ta = [a stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"vV \t\r\n"]];
+    NSString *tb = [b stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"vV \t\r\n"]];
+    NSString *ca = [[ta componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"-+ "]] firstObject] ?: @"";
+    NSString *cb = [[tb componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"-+ "]] firstObject] ?: @"";
     NSArray<NSString *> *pa = [ca componentsSeparatedByString:@"."];
     NSArray<NSString *> *pb = [cb componentsSeparatedByString:@"."];
     NSUInteger maxParts = MAX((NSUInteger)4, MAX(pa.count, pb.count));
@@ -1956,7 +2028,11 @@ static NSInteger sdvCompareSemver(NSString *a, NSString *b) {
         if (va < vb) return -1;
         if (va > vb) return 1;
     }
-    return 0;
+    NSInteger ra = sdvSemverSuffixRank(ta);
+    NSInteger rb = sdvSemverSuffixRank(tb);
+    if (ra < rb) return -1;
+    if (ra > rb) return 1;
+    return [ta localizedStandardCompare:tb];
 }
 
 static void sdvExtractCpLoadTargetsRecursive(NSString *jsonPath, NSString *packDir, NSMutableSet<NSString *> *targets, NSMutableSet<NSString *> *visited, int depth) {
@@ -2811,8 +2887,8 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
 // ============================================================================
 // GARDEN LAUNCHER UPDATE CHECKER + OTA HOT-PATCH ENGINE (0% IPA Re-Signing!)
 // ============================================================================
-#define kSDVAppVersion @"1.0.5"
-#define kSDVAppBuild   10500
+#define kSDVAppVersion @"1.0.6"
+#define kSDVAppBuild   10600
 static NSString *const kSDVUpdateNotification = @"SDVLauncherUpdateDidChangeNotification";
 static NSString *const kSDVDismissedUpdatePrefKey = @"sdv_dismissed_update_id";
 static NSString *const kSDVVersionApiRawURL = @"https://api.github.com/repos/hanprm9-dot/Garden-Launcher-iOS/contents/version.json?ref=main";
@@ -2884,6 +2960,28 @@ static void sdvClearHotPatchStamps(NSString *docsPath) {
     NSString *smapiStamp = join(join(sdvHiddenGameDir(docsPath), @"smapi-internal"), @".garden_smapi_v1");
     sdvRemoveItemQuiet(touchStamp);
     sdvRemoveItemQuiet(smapiStamp);
+}
+
+// Removes non-bundled Hot-Patch extra files (e.g. .garden/extra_mod_rules.json) before retiring or replacing a Hot-Patch payload
+static void sdvCleanupHotPatchExtraFiles(NSString *docsPath) {
+    if (!docsPath.length) return;
+    NSString *payloadDir = join(sdvHotPatchRootDir(docsPath), @"payload");
+    if (!dir(payloadDir)) return;
+    NSSet<NSString *> *keepUserCfg = [NSSet setWithArray:@[
+        @".garden/sdv_mobile_ctrl.cfg",
+        @".garden/touch_overlay_config.json",
+        @".garden/sdv_menubar.cfg",
+        @".garden/sdv_perf.cfg"
+    ]];
+    NSDirectoryEnumerator *en = [fm() enumeratorAtPath:payloadDir];
+    for (NSString *rawRel in en) {
+        if (![en.fileAttributes.fileType isEqualToString:NSFileTypeRegular]) continue;
+        NSString *rel = [rawRel stringByReplacingOccurrencesOfString:@"\\" withString:@"/"];
+        if ([keepUserCfg containsObject:rel]) continue;
+        if ([rel hasPrefix:@".garden/"]) {
+            sdvRemoveItemQuiet(join(docsPath, rel));
+        }
+    }
 }
 
 static BOOL sdvValidateHotPatchRelPathAndData(NSString *rawRel, NSData *data, NSString **outReason) {
@@ -2972,6 +3070,7 @@ static NSString *sdvInitHotPatchOnBoot(NSString *docsPath) {
         NSData *raw = [NSData dataWithContentsOfFile:metaPath options:0 error:nil];
         NSDictionary *meta = raw.length ? [NSJSONSerialization JSONObjectWithData:raw options:0 error:nil] : nil;
         if (![meta isKindOfClass:NSDictionary.class]) {
+            sdvCleanupHotPatchExtraFiles(docsPath);
             sdvRemoveItemQuiet(hpRoot);
             sdvClearHotPatchStamps(docsPath);
             sdvSetActiveHotPatchInfo(nil);
@@ -2985,6 +3084,7 @@ static NSString *sdvInitHotPatchOnBoot(NSString *docsPath) {
         // Auto-prune if user installed a newer or equal IPA over an older Hot-Patch, or if minIpaBuild exceeds this IPA
         BOOL isNewerThanBase = (metaBuild > kSDVAppBuild) || (metaBuild == 0 && sdvCompareSemver(ver, kSDVAppVersion) > 0);
         if (!ver.length || !isNewerThanBase || (minIpaBuild > 0 && minIpaBuild > kSDVAppBuild) || !dir(payloadDir)) {
+            sdvCleanupHotPatchExtraFiles(docsPath);
             sdvRemoveItemQuiet(hpRoot);
             sdvClearHotPatchStamps(docsPath);
             sdvSetActiveHotPatchInfo(nil);
@@ -2993,6 +3093,7 @@ static NSString *sdvInitHotPatchOnBoot(NSString *docsPath) {
 
         // Crash-loop safety valve: if 4 consecutive boots never reached Title Screen or Mod Garden, auto-revert to bundled IPA!
         if (attempts >= 4) {
+            sdvCleanupHotPatchExtraFiles(docsPath);
             sdvRemoveItemQuiet(hpRoot);
             sdvClearHotPatchStamps(docsPath);
             sdvSetActiveHotPatchInfo(nil);
@@ -3039,7 +3140,6 @@ static NSUInteger sdvDeployActiveHotPatchFiles(NSString *docsPath) {
     @try {
         NSString *modsDir = join(docsPath, @"Mods");
         BOOL mcDisabled = dir(join(modsDir, @".SDVMobileControls"));
-        BOOL touchDisabled = dir(join(modsDir, @".SDViOSTouchControls"));
 
         NSDirectoryEnumerator *en = [fm() enumeratorAtPath:payloadDir];
         for (NSString *rawRel in en) {
@@ -3050,12 +3150,15 @@ static NSUInteger sdvDeployActiveHotPatchFiles(NSString *docsPath) {
             if (!sdvValidateHotPatchRelPathAndData(rel, sd, nil)) continue;
 
             if ([rel hasPrefix:@"Mods/SDVMobileControls/"] && mcDisabled) continue;
-            if ([rel hasPrefix:@"Mods/SDViOSTouchControls/"] && touchDisabled) continue;
 
             NSString *dstPath = join(docsPath, rel);
             NSString *fnLow = rel.lastPathComponent.lowercaseString;
-            // Preserve user's customized mod/SMAPI configs
+            // Preserve user's customized mod/launcher/SMAPI configs
             if (([rel isEqualToString:@"Mods/SDVMobileControls/config.json"] ||
+                 [rel isEqualToString:@".garden/sdv_mobile_ctrl.cfg"] ||
+                 [rel isEqualToString:@".garden/touch_overlay_config.json"] ||
+                 [rel isEqualToString:@".garden/sdv_menubar.cfg"] ||
+                 [rel isEqualToString:@".garden/sdv_perf.cfg"] ||
                  [rel isEqualToString:@"StardewValley/smapi-internal/config.user.json"] ||
                  [fnLow isEqualToString:@"config.user.json"]) &&
                 [fm() fileExistsAtPath:dstPath]) {
@@ -3241,10 +3344,19 @@ static NSUInteger sdvInstallHotPatchSync(NSDictionary *info, NSString *docsPath)
         if (!metaData.length) fail(@"Không tạo được tệp metadata cho bản cập nhật nhanh.");
         writeFile(metaData, join(tmpReady, @"meta.json"));
 
-        // 4. Atomic swap into Documents/.garden/hotpatch and deploy immediately
+        // 4. Clean up any files from a previous Hot-Patch, restore base bundled files, then swap & deploy new Hot-Patch atomically!
         sdvHiddenGardenDir(docsPath);
         NSString *hpRoot = sdvHotPatchRootDir(docsPath);
-        if ([fm() fileExistsAtPath:hpRoot]) removeItem(hpRoot);
+        BOOL hadPrevHotPatch = [fm() fileExistsAtPath:hpRoot];
+        if (hadPrevHotPatch) {
+            sdvSetActiveHotPatchInfo(nil);
+            sdvCleanupHotPatchExtraFiles(docsPath);
+            removeItem(hpRoot);
+            sdvClearHotPatchStamps(docsPath);
+            syncBundledLidgren(docsPath);
+            syncBundledSmapi(docsPath);
+            syncBundledMobileControls(docsPath);
+        }
         NSError *mvErr = nil;
         if (![fm() moveItemAtPath:tmpReady toPath:hpRoot error:&mvErr]) {
             check(NO, mvErr);
@@ -3267,6 +3379,7 @@ static NSUInteger sdvInstallHotPatchSync(NSDictionary *info, NSString *docsPath)
 static void sdvRollbackHotPatchSync(NSString *docsPath) {
     if (!docsPath.length) return;
     sdvSetActiveHotPatchInfo(nil);
+    sdvCleanupHotPatchExtraFiles(docsPath);
     NSString *hpRoot = sdvHotPatchRootDir(docsPath);
     if ([fm() fileExistsAtPath:hpRoot]) removeItem(hpRoot);
     sdvClearHotPatchStamps(docsPath);
@@ -3411,6 +3524,16 @@ static void sdvParseAndStoreRemoteUpdateDict(NSDictionary *json, BOOL isGithubRe
             }
         }
         NSString *body = [json[@"body"] isKindOfClass:NSString.class] ? json[@"body"] : @"";
+        // Only trust GitHub Release fallback hot-patch if release body explicitly specifies `min_ipa_build: <int>`;
+        // otherwise require full IPA or version.json so an older base IPA never installs an incompatible Hot-Patch!
+        minIpaBuild = NSIntegerMax;
+        if (body.length) {
+            NSRegularExpression *reMin = [NSRegularExpression regularExpressionWithPattern:@"min_ipa_build\\s*[:=]\\s*(\\d{4,6})" options:NSRegularExpressionCaseInsensitive error:nil];
+            NSTextCheckingResult *m = [reMin firstMatchInString:body options:0 range:NSMakeRange(0, body.length)];
+            if (m && m.numberOfRanges >= 2) {
+                minIpaBuild = [[body substringWithRange:[m rangeAtIndex:1]] integerValue];
+            }
+        }
         summary = sdvNormalizeSummaryLines(nil, body);
     }
 
@@ -3422,11 +3545,14 @@ static void sdvParseAndStoreRemoteUpdateDict(NSDictionary *json, BOOL isGithubRe
     NSString *curVer = sdvEffectiveAppVersion();
     NSInteger curBuild = sdvEffectiveAppBuild();
     BOOL isNewer = (build > curBuild) || (build == 0 && sdvCompareSemver(ver, curVer) > 0);
-    if (!ios14Url.length) {
-        ios14Url = [NSString stringWithFormat:@"https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v%@/Garden-Launcher-%@-iOS14-18.ipa", ver, ver];
-    }
-    if (!ios26Url.length) {
-        ios26Url = [NSString stringWithFormat:@"https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v%@/Garden-Launcher-%@-iOS26-27.ipa", ver, ver];
+    // Only synthesize default IPA download URLs when version.json omitted them AND this is not a hotpatch-only release!
+    if (!isGithubReleaseApi && !hotpatchUrl.length) {
+        if (!ios14Url.length) {
+            ios14Url = [NSString stringWithFormat:@"https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v%@/Garden-Launcher-%@-iOS14-18.ipa", ver, ver];
+        }
+        if (!ios26Url.length) {
+            ios26Url = [NSString stringWithFormat:@"https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v%@/Garden-Launcher-%@-iOS26-27.ipa", ver, ver];
+        }
     }
 
     BOOL canHotPatch = (hotpatchUrl.length > 0 &&

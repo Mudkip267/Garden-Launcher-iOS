@@ -79,6 +79,7 @@ static int32_t gTextRingTail = 0;
 // Gamepad activity tracker & cached UIKit suppression flags (zero per-frame scene scans!)
 static uint32_t gGpActivitySeq = 0;
 static volatile int32_t gGardenOpenCached = 0;
+int sdv_kb_is_active(void);
 static __weak UIWindow *gExtPrimaryGameWindow = nil;
 
 // Key mapping table initialized once (GCKeyCode externs are runtime constants on iOS 14+)
@@ -252,9 +253,10 @@ static void sdvAttachKeyboardHandlers(GCKeyboard *kb) {
                 break;
             }
         }
+        BOOL kbModal = (gNativeTextEditingCount > 0 || gGardenOpenCached || sdv_kb_is_active() != 0);
         os_unfair_lock_lock(&gExtLock);
         gKbActivitySeq++;
-        if (outXna != 0 && gNativeTextEditingCount == 0 && !gGardenOpenCached) {
+        if (outXna != 0 && !kbModal) {
             // Latch key rising edge for 1 poll frame so ultra-fast taps (<16ms) are never dropped!
             BOOL dup = NO;
             for (int32_t k = 0; k < gKbLatchedCount; k++) {
@@ -264,7 +266,7 @@ static void sdvAttachKeyboardHandlers(GCKeyboard *kb) {
                 gKbLatchedKeys[gKbLatchedCount++] = outXna;
             }
         }
-        if (outChar != 0 && gNativeTextEditingCount == 0 && !gGardenOpenCached) {
+        if (outChar != 0 && !kbModal) {
             sdvPushTextCharLocked(outChar);
         }
         os_unfair_lock_unlock(&gExtLock);
@@ -816,6 +818,10 @@ void sdv_ext_set_rumble(float leftMotor, float rightMotor) {
 -(void)handleHover:(UIHoverGestureRecognizer *)gr {
     UIView *v = gr.view;
     if (!v) return;
+    // Ignore Apple Pencil hover on iPad Pro M2/M4 when no physical mouse/trackpad is connected!
+    if (!gHasGCMouseConnected && GCMouse.current == nil && GCMouse.mice.count == 0) {
+        return;
+    }
     CGRect b = v.bounds;
     if (b.size.width <= 1.0 || b.size.height <= 1.0) return;
     if (gr.state == UIGestureRecognizerStateBegan || gr.state == UIGestureRecognizerStateChanged) {
@@ -870,7 +876,11 @@ void sdv_ext_set_rumble(float leftMotor, float rightMotor) {
     BOOL anyLeft = (GCMouse.mice.count > 0 || GCMouse.current != nil);
     os_unfair_lock_lock(&gExtLock);
     gHasGCMouseConnected = anyLeft;
-    if (!anyLeft) gMouseButtonsMask = 0;
+    if (!anyLeft) {
+        gHasHoverSeen = NO;
+        gMouseButtonsMask = 0;
+        gMouseButtonsLatchedMask = 0;
+    }
     os_unfair_lock_unlock(&gExtLock);
     sdvBootLog("[EXT-INPUT] Physical Mouse disconnected");
 }
@@ -918,6 +928,7 @@ static void sdvExtSetGardenOpen(BOOL open) {
 static BOOL sdvIsGameInputSuppressed(void) {
     if (gNativeTextEditingCount > 0) return YES;
     if (gGardenOpenCached) return YES;
+    if (sdv_kb_is_active() != 0) return YES;
     if (NSThread.isMainThread) {
         UIWindow *gw = gExtPrimaryGameWindow;
         if (gw && gw.rootViewController.presentedViewController != nil) {

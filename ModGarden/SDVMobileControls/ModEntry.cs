@@ -83,6 +83,52 @@ namespace SDVMobileControls
         [DllImport("/usr/lib/libSystem.dylib", EntryPoint = "dlsym")]
         private static extern IntPtr BootDarwinDlsym(IntPtr handle, [MarshalAs(UnmanagedType.LPStr)] string symbol);
 
+        [DllImport("/usr/lib/libSystem.dylib", EntryPoint = "chmod")]
+        private static extern int PosixChmod([MarshalAs(UnmanagedType.LPUTF8Str)] string path, ushort mode);
+
+        private static void RepairDirectoryModesRecursive(string dirPath, int maxDepth)
+        {
+            if (string.IsNullOrEmpty(dirPath) || maxDepth < 0)
+                return;
+            try
+            {
+                PosixChmod(dirPath, 0x1ED); // 0755 (rwxr-xr-x)
+                if (maxDepth == 0 || !Directory.Exists(dirPath))
+                    return;
+                foreach (string sub in Directory.EnumerateDirectories(dirPath))
+                    RepairDirectoryModesRecursive(sub, maxDepth - 1);
+            }
+            catch { }
+        }
+
+        private static void HealStuckSandboxDirectories(string modDir)
+        {
+            try
+            {
+                string tmp = Path.GetTempPath();
+                if (!string.IsNullOrEmpty(tmp))
+                {
+                    string batchDir = Path.Combine(tmp, "ModGardenBatch");
+                    RepairDirectoryModesRecursive(batchDir, 4);
+                    if (Directory.Exists(batchDir))
+                    {
+                        try { Directory.Delete(batchDir, true); } catch { }
+                    }
+                }
+                var docsDir = Directory.GetParent(modDir)?.Parent?.FullName;
+                if (!string.IsNullOrEmpty(docsDir) && Directory.Exists(docsDir))
+                {
+                    foreach (string sub in new[] { "Mods", "Saves", "StardewValley", ".garden" })
+                    {
+                        string p = Path.Combine(docsDir, sub);
+                        if (Directory.Exists(p))
+                            RepairDirectoryModesRecursive(p, 3);
+                    }
+                }
+            }
+            catch { }
+        }
+
         private static void ReportNativeBoot(int pct, string stage, string detail, int stepIdx)
         {
             if (_bootReadySignaled)
@@ -130,6 +176,7 @@ namespace SDVMobileControls
         {
             _monitor = Monitor;
             _bootDocsDir = ResolveBootDocsDir(helper.DirectoryPath);
+            HealStuckSandboxDirectories(helper.DirectoryPath);
             try
             {
                 if (!string.IsNullOrEmpty(_bootDocsDir))

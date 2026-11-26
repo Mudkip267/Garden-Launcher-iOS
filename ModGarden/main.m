@@ -380,7 +380,7 @@ static NSString *sdvProbeLocalNetwork(void) {
     _stage = join(NSTemporaryDirectory(), @"ModGardenBatch");
     _stagedFiles = [NSMutableArray array];
     _sliderLabels = [NSMutableDictionary dictionary];
-    [fm() removeItemAtPath:_stage error:nil];
+    sdvRemoveItemQuiet(_stage);
 
 #ifdef GARDEN_IN_GAME
     _root = [fm() URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
@@ -2373,7 +2373,7 @@ static NSString *sdvProbeLocalNetwork(void) {
     UIStackView *topRow = mkHStack(10);
     [topRow addArrangedSubview:mkSettingsIconBadge(@"book.fill", kTintOrange, 34)];
     UIStackView *topTxt = mkVStack(1);
-    [topTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"%@ v1.0.3 — Hướng dẫn toàn diện", appNm], 15.5, UIFontWeightSemibold, kInkPrimary)];
+    [topTxt addArrangedSubview:mkLabel([NSString stringWithFormat:@"%@ v%@ — Hướng dẫn toàn diện", appNm, sdvEffectiveAppVersion()], 15.5, UIFontWeightSemibold, kInkPrimary)];
     [topTxt addArrangedSubview:mkLabel(@"Đồ họa Native · SMAPI 4.5.2 · Tay cầm & Mobile Controls · Shader GLSL ES (iOS 14–27+)", 12, UIFontWeightRegular, kInkSecondary)];
     SDVAppleButton *jumpBtn = mkIOSButton(@"Xem Credit", @"heart.fill", [kTintPink colorWithAlphaComponent:0.13], kTintPink, 12.5, UIEdgeInsetsMake(7, 11, 7, 11));
     [jumpBtn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
@@ -2717,7 +2717,7 @@ static NSString *sdvProbeLocalNetwork(void) {
         [self mkCreditRow:@"NỀN TẢNG iOS PORT (MIT)" name:@"DeadAKJ — SDViosport" detail:@"Mã nguồn host .NET 8 iOS, MonoGame, tích hợp SMAPI và tay cầm cảm ứng SDViOSTouchControls." url:@"https://github.com/DeadAKJ/SDViosport" urlLabel:@"GitHub"],
         [self mkCreditRow:@"NỀN TẢNG MODDING" name:@"SMAPI — Pathoschild & Cộng đồng" detail:@"Stardew Modding API cùng các tác giả mod trên NexusMods và nhóm Việt hóa cộng đồng." url:@"https://smapi.io" urlLabel:@"smapi.io"],
         [self mkCreditRow:@"ĐÓNG GÓP MÃ NGUỒN — TAY CẦM, RUMBLE & MOBILE UX" name:@"Nguyễn Ngọc Nguyên (Mudkip267)" detail:@"Rung tay cầm CoreHaptics 2 mô-tơ chuẩn Console, tương thích UI Info Suite 2 & đồng bộ chân dung Seasonal Anime Portrait, nút SKIP cutscene chuẩn giao diện, tối ưu thanh cuộn Shop & rương Mobile và khôi phục âm thanh SoundBank." url:@"https://github.com/Mudkip267/Garden-Launcher-iOS" urlLabel:@"GitHub"],
-        [self mkCreditRow:@"TRÌNH QUẢN LÝ & LAUNCHER iOS" name:@"Garden Launcher iOS (v1.0.3 Native Edition)" detail:@"Giao diện iOS chuẩn Apple, Cập nhật nhanh OTA Hot-Patch không cần ký lại IPA, mở trực tiếp thư mục StardewValley/Content trong Tệp, Chế độ Tay cầm thuần + fix kéo/thay/vứt đồ & chuyển khung, đi lại trong Event/Lễ hội, giải nén mọi định dạng (.ZIP/Deflate64/.RAR/.7Z), Shader GLSL ES và hỗ trợ iOS 14–27+." url:@"https://github.com/hanprm9-dot/Garden-Launcher-iOS" urlLabel:@"GitHub"]
+        [self mkCreditRow:@"TRÌNH QUẢN LÝ & LAUNCHER iOS" name:@"Garden Launcher iOS (v" kSDVAppVersion @" Native Edition)" detail:@"Giao diện iOS chuẩn Apple, Cập nhật nhanh OTA Hot-Patch không cần ký lại IPA, mở trực tiếp thư mục StardewValley/Content trong Tệp, Chế độ Tay cầm thuần + fix kéo/thay/vứt đồ & chuyển khung, đi lại trong Event/Lễ hội, giải nén mọi định dạng (.ZIP/Deflate64/.RAR/.7Z), Shader GLSL ES và hỗ trợ iOS 14–27+." url:@"https://github.com/hanprm9-dot/Garden-Launcher-iOS" urlLabel:@"GitHub"]
     ], 14);
     [_pane addArrangedSubview:_creditCard];
 
@@ -3382,7 +3382,7 @@ static NSArray<UTType *> *sdvAllArchivePickerTypes(void) {
     _plan = nil;
     [_stagedFiles removeAllObjects];
     _nextPkgIdx = 0;
-    [fm() removeItemAtPath:_stage error:nil];
+    sdvRemoveItemQuiet(_stage);
     [self renderAll:NO];
 }
 
@@ -3415,7 +3415,7 @@ static NSArray<UTType *> *sdvAllArchivePickerTypes(void) {
             self->_plan = nil;
             [self->_stagedFiles removeAllObjects];
             self->_nextPkgIdx = 0;
-            [fm() removeItemAtPath:self->_stage error:nil];
+            sdvRemoveItemQuiet(self->_stage);
             [self scan:r];
         }];
     } done:^{

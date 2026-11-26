@@ -173,7 +173,7 @@ static void sdvInitBootAndCrashLogging(NSString *docsPath) {
         double ramGB = (double)NSProcessInfo.processInfo.physicalMemory / (1024.0 * 1024.0 * 1024.0);
         NSString *bid = NSBundle.mainBundle.bundleIdentifier ?: @"?";
         sdvBootLogFmt([NSString stringWithFormat:
-            @"[BOOT 1] Garden Launcher 1.0.3 | iOS %@ | Device=%@ | RAM=%.2f GB | Bundle=%@",
+            @"[BOOT 1] Garden Launcher " kSDVAppVersion @" | iOS %@ | Device=%@ | RAM=%.2f GB | Bundle=%@",
             osVer, model, ramGB, bid]);
     } @catch (NSException *ex) { }
 }

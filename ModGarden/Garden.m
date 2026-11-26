@@ -13,15 +13,57 @@ static void fail(NSString *s) { @throw [NSException exceptionWithName:@"GardenEr
 static void check(BOOL ok, NSError *error) { if (!ok) fail(error.localizedDescription ?: @"Không thể đọc hoặc ghi tệp."); }
 static NSString *join(NSString *a, NSString *b) { return [a stringByAppendingPathComponent:b]; }
 static BOOL dir(NSString *p) { BOOL d=NO; return [fm() fileExistsAtPath:p isDirectory:&d] && d; }
-static void mkdirs(NSString *p) { NSError *e=nil; BOOL ok=[fm() createDirectoryAtPath:p withIntermediateDirectories:YES attributes:nil error:&e]; check(ok,e); }
-static void removeItem(NSString *p) {
-    if ([fm() fileExistsAtPath:p]) {
-        chmod(p.fileSystemRepresentation, 0644);
-        NSError *e=nil;
-        BOOL ok=[fm() removeItemAtPath:p error:&e];
-        check(ok,e);
+static void sdvUnlockPermissionsRecursive(NSString *p) {
+    if (!p.length) return;
+    const char *cp = p.fileSystemRepresentation;
+    if (!cp) return;
+    struct stat st;
+    if (lstat(cp, &st) != 0) return;
+    if (S_ISLNK(st.st_mode)) return;
+    if (S_ISDIR(st.st_mode)) {
+        chmod(cp, 0755);
+        NSArray<NSString *> *subs = [fm() contentsOfDirectoryAtPath:p error:nil];
+        for (NSString *sub in subs) {
+            sdvUnlockPermissionsRecursive([p stringByAppendingPathComponent:sub]);
+        }
+    } else if (S_ISREG(st.st_mode)) {
+        chmod(cp, 0644);
     }
 }
+
+static BOOL sdvRemoveItemQuiet(NSString *p) {
+    if (!p.length) return YES;
+    const char *cp = p.fileSystemRepresentation;
+    struct stat st;
+    if (!cp || lstat(cp, &st) != 0) return YES;
+    sdvUnlockPermissionsRecursive(p);
+    return [fm() removeItemAtPath:p error:nil];
+}
+
+static void mkdirs(NSString *p) {
+    if (!p.length) return;
+    const char *cp = p.fileSystemRepresentation;
+    struct stat st;
+    if (cp && lstat(cp, &st) == 0 && S_ISDIR(st.st_mode)) {
+        if ((st.st_mode & 0700) != 0700) chmod(cp, 0755);
+        return;
+    }
+    NSError *e = nil;
+    BOOL ok = [fm() createDirectoryAtPath:p withIntermediateDirectories:YES attributes:nil error:&e];
+    check(ok, e);
+}
+
+static void removeItem(NSString *p) {
+    if (!p.length) return;
+    const char *cp = p.fileSystemRepresentation;
+    struct stat st;
+    if (!cp || lstat(cp, &st) != 0) return;
+    sdvUnlockPermissionsRecursive(p);
+    NSError *e = nil;
+    BOOL ok = [fm() removeItemAtPath:p error:&e];
+    check(ok, e);
+}
+
 static NSString *hashData(NSData *data) {
     unsigned char bytes[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(data.bytes,(CC_LONG)data.length,bytes);
     NSMutableString *s=[NSMutableString string]; for (int i=0;i<CC_SHA256_DIGEST_LENGTH;i++) [s appendFormat:@"%02x",bytes[i]]; return s;
@@ -29,10 +71,14 @@ static NSString *hashData(NSData *data) {
 static NSData *readFile(NSString *p) { NSError *e=nil; NSData *d=[NSData dataWithContentsOfFile:p options:NSDataReadingMappedIfSafe error:&e]; check(d!=nil,e); return d; }
 static void writeFile(NSData *d, NSString *p) {
     mkdirs(p.stringByDeletingLastPathComponent);
-    if ([fm() fileExistsAtPath:p]) chmod(p.fileSystemRepresentation, 0644);
-    NSError *e=nil;
-    BOOL ok=[d writeToFile:p options:NSDataWritingAtomic error:&e];
-    check(ok,e);
+    const char *cp = p.fileSystemRepresentation;
+    struct stat st;
+    if (cp && lstat(cp, &st) == 0 && S_ISREG(st.st_mode)) {
+        chmod(cp, 0644);
+    }
+    NSError *e = nil;
+    BOOL ok = [d writeToFile:p options:NSDataWritingAtomic error:&e];
+    check(ok, e);
 }
 
 static NSData *stripJson5ForIOS14(NSData *raw) {
@@ -153,6 +199,36 @@ static BOOL sdvIsUnusedGameRootJunk(NSString *fileLow, NSString *extLow) {
     return [desktopJunk containsObject:fileLow];
 }
 
+static void sdvRepairDirModesRecursive(NSString *dirPath, int maxDepth) {
+    if (!dirPath.length || maxDepth < 0) return;
+    const char *cp = dirPath.fileSystemRepresentation;
+    if (!cp) return;
+    struct stat st;
+    if (lstat(cp, &st) != 0 || !S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode)) return;
+    if ((st.st_mode & 0700) != 0700) {
+        chmod(cp, 0755);
+    }
+    if (maxDepth == 0) return;
+    NSArray<NSString *> *subs = [fm() contentsOfDirectoryAtPath:dirPath error:nil];
+    for (NSString *sub in subs) {
+        sdvRepairDirModesRecursive([dirPath stringByAppendingPathComponent:sub], maxDepth - 1);
+    }
+}
+
+static void sdvRepairSandboxPermissions(NSString *docsPath) {
+    @try {
+        NSString *tmpDir = NSTemporaryDirectory();
+        if (tmpDir.length) {
+            sdvRepairDirModesRecursive(tmpDir, 4);
+        }
+        if (docsPath.length) {
+            for (NSString *sub in @[@"Mods", @"Saves", @"StardewValley", @".garden", @"ErrorLogs"]) {
+                sdvRepairDirModesRecursive(join(docsPath, sub), 4);
+            }
+        }
+    } @catch (NSException *ex) { }
+}
+
 static void sdvMoveMergeDir(NSString *srcDir, NSString *dstDir) {
     if (!dir(srcDir)) return;
     if (![fm() fileExistsAtPath:dstDir]) {
@@ -167,13 +243,12 @@ static void sdvMoveMergeDir(NSString *srcDir, NSString *dstDir) {
             sdvMoveMergeDir(sp, dp);
         } else {
             if ([fm() fileExistsAtPath:dp]) {
-                chmod(dp.fileSystemRepresentation, 0644);
-                [fm() removeItemAtPath:dp error:nil];
+                sdvRemoveItemQuiet(dp);
             }
             [fm() moveItemAtPath:sp toPath:dp error:nil];
         }
     }
-    [fm() removeItemAtPath:srcDir error:nil];
+    sdvRemoveItemQuiet(srcDir);
 }
 
 // Organizes Documents/ cleanly for Apple's Files (Tệp) app:
@@ -182,6 +257,9 @@ static void sdvMoveMergeDir(NSString *srcDir, NSString *dstDir) {
 static void sdvMigrateDocumentsToHiddenLayout(NSString *docsPath) {
     if (!docsPath.length) return;
     @try {
+        // Heal any directories previously locked with 0644 (#GL-WY7FCB) before touching tmp/ or Documents/!
+        sdvRepairSandboxPermissions(docsPath);
+
         // Fast O(1) rename if migrating from v1.0.1/v1.0.2 hidden Documents/.game/ -> Documents/StardewValley/
         NSString *legacyHidden = join(docsPath, @".game");
         NSString *visibleGame = join(docsPath, @"StardewValley");
@@ -1213,8 +1291,7 @@ static NSUInteger importGameDataFromDirectory(NSURL *dirUrl, NSString *docsPath)
         NSString *dst = inside(targetBase, rel);
         mkdirs(dst.stringByDeletingLastPathComponent);
         if ([fm() fileExistsAtPath:dst]) {
-            chmod(dst.fileSystemRepresentation, 0644);
-            [fm() removeItemAtPath:dst error:nil];
+            sdvRemoveItemQuiet(dst);
         }
         NSError *ce = nil;
         if ([fm() copyItemAtPath:srcFile toPath:dst error:&ce]) {
@@ -1848,7 +1925,9 @@ static NSInteger sdvCompareSemver(NSString *a, NSString *b) {
     NSString *cb = [[b componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"-+ "]] firstObject] ?: @"";
     NSArray<NSString *> *pa = [ca componentsSeparatedByString:@"."];
     NSArray<NSString *> *pb = [cb componentsSeparatedByString:@"."];
-    for (NSUInteger i = 0; i < 3; i++) {
+    NSUInteger maxParts = MAX((NSUInteger)4, MAX(pa.count, pb.count));
+    if (maxParts > 6) maxParts = 6;
+    for (NSUInteger i = 0; i < maxParts; i++) {
         NSInteger va = (i < pa.count) ? pa[i].integerValue : 0;
         NSInteger vb = (i < pb.count) ? pb[i].integerValue : 0;
         if (va < vb) return -1;
@@ -2709,10 +2788,11 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
 // ============================================================================
 // GARDEN LAUNCHER UPDATE CHECKER + OTA HOT-PATCH ENGINE (0% IPA Re-Signing!)
 // ============================================================================
-#define kSDVAppVersion @"1.0.3"
-#define kSDVAppBuild   10300
+#define kSDVAppVersion @"1.0.4"
+#define kSDVAppBuild   10400
 static NSString *const kSDVUpdateNotification = @"SDVLauncherUpdateDidChangeNotification";
 static NSString *const kSDVDismissedUpdatePrefKey = @"sdv_dismissed_update_id";
+static NSString *const kSDVVersionApiRawURL = @"https://api.github.com/repos/hanprm9-dot/Garden-Launcher-iOS/contents/version.json?ref=main";
 static NSString *const kSDVVersionJsonURL = @"https://raw.githubusercontent.com/hanprm9-dot/Garden-Launcher-iOS/main/version.json";
 static NSString *const kSDVLatestReleaseApiURL = @"https://api.github.com/repos/hanprm9-dot/Garden-Launcher-iOS/releases/latest";
 
@@ -2861,7 +2941,7 @@ static NSString *sdvInitHotPatchOnBoot(NSString *docsPath) {
         NSData *raw = [NSData dataWithContentsOfFile:metaPath options:0 error:nil];
         NSDictionary *meta = raw.length ? [NSJSONSerialization JSONObjectWithData:raw options:0 error:nil] : nil;
         if (![meta isKindOfClass:NSDictionary.class]) {
-            [fm() removeItemAtPath:hpRoot error:nil];
+            sdvRemoveItemQuiet(hpRoot);
             sdvClearHotPatchStamps(docsPath);
             sdvSetActiveHotPatchInfo(nil);
             return @"pruned-corrupt-meta";
@@ -2874,7 +2954,7 @@ static NSString *sdvInitHotPatchOnBoot(NSString *docsPath) {
         // Auto-prune if user installed a newer or equal IPA over an older Hot-Patch, or if minIpaBuild exceeds this IPA
         BOOL isNewerThanBase = (metaBuild > kSDVAppBuild) || (metaBuild == 0 && sdvCompareSemver(ver, kSDVAppVersion) > 0);
         if (!ver.length || !isNewerThanBase || (minIpaBuild > 0 && minIpaBuild > kSDVAppBuild) || !dir(payloadDir)) {
-            [fm() removeItemAtPath:hpRoot error:nil];
+            sdvRemoveItemQuiet(hpRoot);
             sdvClearHotPatchStamps(docsPath);
             sdvSetActiveHotPatchInfo(nil);
             return @"pruned-obsolete";
@@ -2882,7 +2962,7 @@ static NSString *sdvInitHotPatchOnBoot(NSString *docsPath) {
 
         // Crash-loop safety valve: if 4 consecutive boots never reached Title Screen or Mod Garden, auto-revert to bundled IPA!
         if (attempts >= 4) {
-            [fm() removeItemAtPath:hpRoot error:nil];
+            sdvRemoveItemQuiet(hpRoot);
             sdvClearHotPatchStamps(docsPath);
             sdvSetActiveHotPatchInfo(nil);
             return @"rollback-crashloop";
@@ -3137,9 +3217,9 @@ static NSUInteger sdvInstallHotPatchSync(NSDictionary *info, NSString *docsPath)
             [NSNotificationCenter.defaultCenter postNotificationName:kSDVUpdateNotification object:nil];
         });
     } @finally {
-        [fm() removeItemAtPath:tmpZip error:nil];
-        [fm() removeItemAtPath:tmpUnpack error:nil];
-        if ([fm() fileExistsAtPath:tmpReady]) [fm() removeItemAtPath:tmpReady error:nil];
+        sdvRemoveItemQuiet(tmpZip);
+        sdvRemoveItemQuiet(tmpUnpack);
+        sdvRemoveItemQuiet(tmpReady);
     }
     return deployedCount;
 }
@@ -3349,40 +3429,58 @@ static void sdvCheckLauncherUpdate(BOOL force, void (^completion)(NSDictionary *
     cfg.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
     NSURLSession *sess = [NSURLSession sessionWithConfiguration:cfg];
 
-    NSString *primaryStr = [NSString stringWithFormat:@"%@?t=%ld", kSDVVersionJsonURL, (long)time(NULL)];
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:primaryStr]];
-    [req setValue:@"GardenLauncher-iOS/" kSDVAppVersion forHTTPHeaderField:@"User-Agent"];
+    // 1. Primary: GitHub Contents API raw JSON (bypasses Vietnam ISP blocks on raw.githubusercontent.com + 60s cache!)
+    NSMutableURLRequest *apiReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kSDVVersionApiRawURL]];
+    [apiReq setValue:@"GardenLauncher-iOS/" kSDVAppVersion forHTTPHeaderField:@"User-Agent"];
+    [apiReq setValue:@"application/vnd.github.raw+json" forHTTPHeaderField:@"Accept"];
 
-    [[sess dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-        NSHTTPURLResponse *http = [resp isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)resp : nil;
-        if (!err && http.statusCode == 200 && data.length > 8) {
-            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            if ([json isKindOfClass:NSDictionary.class] && [json[@"version"] isKindOfClass:NSString.class]) {
+    [[sess dataTaskWithRequest:apiReq completionHandler:^(NSData *apiData, NSURLResponse *apiResp, NSError *apiErr) {
+        NSHTTPURLResponse *apiHttp = [apiResp isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)apiResp : nil;
+        if (!apiErr && apiHttp.statusCode == 200 && apiData.length > 8) {
+            NSDictionary *apiJson = [NSJSONSerialization JSONObjectWithData:apiData options:0 error:nil];
+            if ([apiJson isKindOfClass:NSDictionary.class] && [apiJson[@"version"] isKindOfClass:NSString.class]) {
                 gSdvUpdateCheckInFlight = NO;
-                sdvParseAndStoreRemoteUpdateDict(json, NO, completion);
+                sdvParseAndStoreRemoteUpdateDict(apiJson, NO, completion);
                 [sess finishTasksAndInvalidate];
                 return;
             }
         }
-        // Fallback to GitHub Releases /latest API
-        NSMutableURLRequest *fbReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kSDVLatestReleaseApiURL]];
-        [fbReq setValue:@"GardenLauncher-iOS/" kSDVAppVersion forHTTPHeaderField:@"User-Agent"];
-        [fbReq setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
-        [[sess dataTaskWithRequest:fbReq completionHandler:^(NSData *fbData, NSURLResponse *fbResp, NSError *fbErr) {
-            gSdvUpdateCheckInFlight = NO;
-            NSHTTPURLResponse *fbHttp = [fbResp isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)fbResp : nil;
-            if (!fbErr && fbHttp.statusCode == 200 && fbData.length > 16) {
-                NSDictionary *fbJson = [NSJSONSerialization JSONObjectWithData:fbData options:0 error:nil];
-                if ([fbJson isKindOfClass:NSDictionary.class]) {
-                    sdvParseAndStoreRemoteUpdateDict(fbJson, YES, completion);
+        // 2. Secondary: raw.githubusercontent.com
+        NSString *primaryStr = [NSString stringWithFormat:@"%@?t=%ld", kSDVVersionJsonURL, (long)time(NULL)];
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:primaryStr]];
+        [req setValue:@"GardenLauncher-iOS/" kSDVAppVersion forHTTPHeaderField:@"User-Agent"];
+
+        [[sess dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+            NSHTTPURLResponse *http = [resp isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)resp : nil;
+            if (!err && http.statusCode == 200 && data.length > 8) {
+                NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                if ([json isKindOfClass:NSDictionary.class] && [json[@"version"] isKindOfClass:NSString.class]) {
+                    gSdvUpdateCheckInFlight = NO;
+                    sdvParseAndStoreRemoteUpdateDict(json, NO, completion);
                     [sess finishTasksAndInvalidate];
                     return;
                 }
             }
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, @"Không thể kết nối kiểm tra cập nhật. Vui lòng thử lại khi có mạng.");
-            });
-            [sess finishTasksAndInvalidate];
+            // 3. Fallback: GitHub Releases /latest API
+            NSMutableURLRequest *fbReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kSDVLatestReleaseApiURL]];
+            [fbReq setValue:@"GardenLauncher-iOS/" kSDVAppVersion forHTTPHeaderField:@"User-Agent"];
+            [fbReq setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
+            [[sess dataTaskWithRequest:fbReq completionHandler:^(NSData *fbData, NSURLResponse *fbResp, NSError *fbErr) {
+                gSdvUpdateCheckInFlight = NO;
+                NSHTTPURLResponse *fbHttp = [fbResp isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)fbResp : nil;
+                if (!fbErr && fbHttp.statusCode == 200 && fbData.length > 16) {
+                    NSDictionary *fbJson = [NSJSONSerialization JSONObjectWithData:fbData options:0 error:nil];
+                    if ([fbJson isKindOfClass:NSDictionary.class]) {
+                        sdvParseAndStoreRemoteUpdateDict(fbJson, YES, completion);
+                        [sess finishTasksAndInvalidate];
+                        return;
+                    }
+                }
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (completion) completion(nil, @"Không thể kết nối kiểm tra cập nhật. Vui lòng thử lại khi có mạng.");
+                });
+                [sess finishTasksAndInvalidate];
+            }] resume];
         }] resume];
     }] resume];
 }

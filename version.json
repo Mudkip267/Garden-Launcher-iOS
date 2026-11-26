@@ -1,18 +1,18 @@
 {
-  "version": "1.1.0",
-  "build": 11000,
-  "min_ipa_build": 11000,
+  "version": "1.1.1",
+  "build": 11100,
+  "min_ipa_build": 11100,
   "date": "2026-11-26",
   "discord_url": "https://discord.gg/tuTKv9xQ2Z",
-  "release_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/tag/v1.1.0",
-  "ios14_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.1.0/Garden-Launcher-1.1.0-iOS14-18.ipa",
-  "ios26_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.1.0/Garden-Launcher-1.1.0-iOS26-27.ipa",
+  "release_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/tag/v1.1.1",
+  "ios14_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.1.1/Garden-Launcher-1.1.1-iOS14-18.ipa",
+  "ios26_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.1.1/Garden-Launcher-1.1.1-iOS26-27.ipa",
   "hotpatch_url": "",
   "hotpatch_sha256": "",
   "hotpatch_size": 0,
   "summary": [
-    "Siêu bản cập nhật v1.1.0 — Tối ưu toàn diện 0% JIT, RAM, Tốc độ khởi động & giảm dung lượng IPA (~30.8 MB xuống 25.1 MB): lưu vết vá IL (.garden/patch_stamps) giúp mở game lần 2 nhanh hơn 2–4 giây, sao chép Texture bằng GPU BlitFramebuffer 0-byte RAM, đóng băng A* PathFinder 0 cấp phát rác GC và nâng cấp trình dịch Shader GLSL ES + âm thanh Mod (CueDefinition/SoundBank) cho Stardew 1.6.15.",
-    "6 Tính năng mới trên Mod Garden: Hồ sơ Bộ Mod & Chế độ An toàn (Safe Mode 1 chạm), Trình chỉnh sửa trực quan config.json ngay trong Launcher (Offline GMCM) + Tìm kiếm/Lọc Mod, Sửa lệch chữ Hoa/Thường APFS tự động, Tự nhận diện & gắn phím tắt Mod lên màn hình (CJB/Lookup/UIIS2/Tractor…), Quản lý QuickSave & 20 ô lưu nhanh và Mã đồng bộ #COOP-XXXXXX chống lệch Mod.",
-    "Hoàn thiện 100% tương tác Gameplay Stardew 1.6.15 trên Mobile: hiển thị & mua đủ tiền tệ đặc biệt Đá Quý Qi / Hạt Óc Chó Vàng / gói số lượng nhân tại Cửa hàng, không mất vật phẩm ở Lò Rèn Đảo Gừng (Forge) / Máy May (Tailoring) / Gói Bundle Nhà Văn Hóa, hiện HUD Trứng Calico Lễ hội Sa mạc, khôi phục âm thanh & rung CoreHaptics sau cuộc gọi/khóa máy và gia hạn 22 giây lưu game ngầm an toàn."
+    "Sửa khẩn cấp lỗi #GL-V53YS2 trên v1.1.0 khiến ảnh nhà nông trại (Buildings/houses) và các texture Content Patcher bị giữ nguyên ảnh gốc vanilla hoặc lộ phần mái nhà tầng 2 dưới bậc thềm (gỡ nhánh GL.BlitFramebuffer vốn bị khung cắt GL_SCISSOR_TEST của LoadGameMenu cắt trắng pixel, khôi phục nhánh GetData/SetData miễn nhiễm Scissor & giữ nguyên try/finally FBO).",
+    "Sửa lỗi syncBundledSmapi báo dll-hash-mismatch ở mỗi lần mở app (do RuntimeSmapiPatcher vá StardewModdingAPI.dll tại chỗ) để bộ nhớ đệm khởi động nhanh .garden/patch_stamps hoạt động thực sự từ lần mở thứ 2 trở đi.",
+    "Giữ trọn vẹn toàn bộ tính năng v1.1.0: IPA siêu gọn 25.13 MB, 6 công cụ Mod Garden mới (Hồ sơ Mod & Safe Mode, Offline config.json Editor, Sửa Hoa/Thường APFS, Tự gắn phím tắt Mod, Quản lý QuickSave/20 ô lưu nhanh, Mã #COOP) & hoàn thiện Gameplay 1.6.15."
   ]
 }

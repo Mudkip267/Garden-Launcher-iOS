@@ -1553,7 +1553,7 @@ if ($tRsp -and $hCreateDir -and $hPathComb3 -and $hWriteText -and $hGetMtime -an
     $bsIL.Append($bsIL.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
     $bsIL.Append($bsIL.Create([Mono.Cecil.Cil.OpCodes]::Call, $hGetMtime))
     $bsIL.Append($bsIL.Create([Mono.Cecil.Cil.OpCodes]::Stloc, $vDt))
-    $bsIL.Append($bsIL.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, "v110|"))
+    $bsIL.Append($bsIL.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, "v111|"))
     $bsIL.Append($bsIL.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
     $bsIL.Append($bsIL.Create([Mono.Cecil.Cil.OpCodes]::Ldstr, "|"))
     $bsIL.Append($bsIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloca, $vLen))
@@ -2350,218 +2350,11 @@ $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fGlTexture))
 $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0))
 $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ble, $lRet))
 
-# 3.6b GPU-to-GPU Blit Helper Texture2D.TryGpuBlitCopy(Texture2D src, Texture2D dst, int w, int h) -> bool (0-byte LOH allocation on OpenGL ES 3.0+!)
-$tGL = $mgMod.GetType("MonoGame.OpenGL.GL")
-$fGlMajDev  = $tGfxDev.Fields | Where-Object { $_.Name -eq "glMajorVersion" }
-$fGenFb     = $tGL.Fields | Where-Object { $_.Name -eq "GenFramebuffers" }
-$fBindFbGl  = $tGL.Fields | Where-Object { $_.Name -eq "BindFramebuffer" }
-$fFbTex2D   = $tGL.Fields | Where-Object { $_.Name -eq "FramebufferTexture2D" }
-$fChkFb     = $tGL.Fields | Where-Object { $_.Name -eq "CheckFramebufferStatus" }
-$fBlitFb    = $tGL.Fields | Where-Object { $_.Name -eq "BlitFramebuffer" }
-$fDelFb     = $tGL.Fields | Where-Object { $_.Name -eq "DeleteFramebuffers" }
-$mGlGetInt  = $tGL.Methods | Where-Object { $_.Name -eq "GetInteger" -and $_.Parameters.Count -eq 2 -and $_.Parameters[0].ParameterType.FullName -eq "System.Int32" } | Select-Object -First 1
-$mPlatGetData = $tTex2D.Methods | Where-Object { $_.Name -eq "PlatformGetData" } | Select-Object -First 1
-$mEnsureUi  = $mPlatGetData.Body.Instructions[0].Operand
-
-$mGpuBlit = $null
-if ($fGlMajDev -and $fGenFb -and $fBindFbGl -and $fFbTex2D -and $fChkFb -and $fBlitFb -and $fDelFb -and $mGlGetInt -and $mEnsureUi) {
-    $mGenFbInv  = $fGenFb.FieldType.Resolve().Methods    | Where-Object { $_.Name -eq "Invoke" }
-    $mBindFbInv2= $fBindFbGl.FieldType.Resolve().Methods | Where-Object { $_.Name -eq "Invoke" }
-    $mFbTexInv  = $fFbTex2D.FieldType.Resolve().Methods  | Where-Object { $_.Name -eq "Invoke" }
-    $mChkFbInv  = $fChkFb.FieldType.Resolve().Methods    | Where-Object { $_.Name -eq "Invoke" }
-    $mBlitFbInv = $fBlitFb.FieldType.Resolve().Methods   | Where-Object { $_.Name -eq "Invoke" }
-    $mDelFbInv  = $fDelFb.FieldType.Resolve().Methods    | Where-Object { $_.Name -eq "Invoke" }
-
-    $mGpuBlit = New-Object Mono.Cecil.MethodDefinition("TryGpuBlitCopy", [Mono.Cecil.MethodAttributes]"Private, Static", $mgMod.TypeSystem.Boolean)
-    $mGpuBlit.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition("src", [Mono.Cecil.ParameterAttributes]::None, $tTex2D)))
-    $mGpuBlit.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition("dst", [Mono.Cecil.ParameterAttributes]::None, $tTex2D)))
-    $mGpuBlit.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition("w",   [Mono.Cecil.ParameterAttributes]::None, $mgMod.TypeSystem.Int32)))
-    $mGpuBlit.Parameters.Add((New-Object Mono.Cecil.ParameterDefinition("h",   [Mono.Cecil.ParameterAttributes]::None, $mgMod.TypeSystem.Int32)))
-    $mGpuBlit.Body.InitLocals = $true
-    $mGpuBlit.Body.MaxStackSize = 12
-    $vGbGd    = New-Object Mono.Cecil.Cil.VariableDefinition($tGfxDev)
-    $vPrevR   = New-Object Mono.Cecil.Cil.VariableDefinition($mgMod.TypeSystem.Int32)
-    $vPrevD   = New-Object Mono.Cecil.Cil.VariableDefinition($mgMod.TypeSystem.Int32)
-    $vRFbo    = New-Object Mono.Cecil.Cil.VariableDefinition($mgMod.TypeSystem.Int32)
-    $vDFbo    = New-Object Mono.Cecil.Cil.VariableDefinition($mgMod.TypeSystem.Int32)
-    $vBlitOk  = New-Object Mono.Cecil.Cil.VariableDefinition($mgMod.TypeSystem.Boolean)
-    foreach ($vv in @($vGbGd, $vPrevR, $vPrevD, $vRFbo, $vDFbo, $vBlitOk)) { $mGpuBlit.Body.Variables.Add($vv) }
-
-    $gbIL = $mGpuBlit.Body.GetILProcessor()
-    $lGbRetFalse = $gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0)
-    $lGbTry      = $gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fGenFb)
-    $lGbFin      = $gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vRFbo)
-    $lGbDelD     = $gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vDFbo)
-    $lGbRestBind = $gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fBindFbGl)
-    $lGbEnd      = $gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vBlitOk)
-    $lGbLeave    = $gbIL.Create([Mono.Cecil.Cil.OpCodes]::Leave, $lGbEnd)
-
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Call, $mGetGD))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Stloc, $vGbGd))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vGbGd))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $lGbRetFalse))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vGbGd))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fGlMajDev))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_3))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Blt, $lGbRetFalse))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fBlitFb))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $lGbRetFalse))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Call, $mEnsureUi))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4, [int]36010)) # GL_READ_FRAMEBUFFER_BINDING
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloca, $vPrevR))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Call, $mGlGetInt))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4, [int]36006)) # GL_DRAW_FRAMEBUFFER_BINDING
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloca, $vPrevD))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Call, $mGlGetInt))
-
-    # try { Gen + Bind + Attach + Check + BlitFramebuffer }
-    $gbIL.Append($lGbTry)
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_1))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloca, $vRFbo))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mGenFbInv))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fGenFb))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_1))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloca, $vDFbo))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mGenFbInv))
-
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fBindFbGl))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4, [int]36008)) # ReadFramebuffer
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vRFbo))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mBindFbInv2))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fFbTex2D))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4, [int]36008))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4, [int]36064)) # ColorAttachment0
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4, [int]3553))  # Texture2D
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fGlTexture))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mFbTexInv))
-
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fBindFbGl))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4, [int]36009)) # DrawFramebuffer
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vDFbo))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mBindFbInv2))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fFbTex2D))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4, [int]36009))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4, [int]36064))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4, [int]3553))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fGlTexture))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mFbTexInv))
-
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fChkFb))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4, [int]36008))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mChkFbInv))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4, [int]36053)) # FramebufferComplete
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Bne_Un, $lGbLeave))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fChkFb))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4, [int]36009))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mChkFbInv))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4, [int]36053))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Bne_Un, $lGbLeave))
-
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fBlitFb))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_2))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_3))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_2))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_3))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4, [int]16384)) # ColorBufferBit
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4, [int]9728))  # Nearest
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mBlitFbInv))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_1))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Stloc, $vBlitOk))
-    $gbIL.Append($lGbLeave)
-
-    # finally { Delete temp FBOs + restore Read/Draw FBO bindings }
-    $gbIL.Append($lGbFin)
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $lGbDelD))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fDelFb))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_1))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloca, $vRFbo))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mDelFbInv))
-    $gbIL.Append($lGbDelD)
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $lGbRestBind))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fDelFb))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_1))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloca, $vDFbo))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mDelFbInv))
-    $gbIL.Append($lGbRestBind)
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4, [int]36008))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vPrevR))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mBindFbInv2))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldsfld, $fBindFbGl))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4, [int]36009))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vPrevD))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mBindFbInv2))
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Endfinally))
-
-    $gbIL.Append($lGbEnd)
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ret))
-    $gbIL.Append($lGbRetFalse)
-    $gbIL.Append($gbIL.Create([Mono.Cecil.Cil.OpCodes]::Ret))
-
-    $ehGb = New-Object Mono.Cecil.Cil.ExceptionHandler([Mono.Cecil.Cil.ExceptionHandlerType]::Finally)
-    $ehGb.TryStart = $lGbTry; $ehGb.TryEnd = $lGbFin; $ehGb.HandlerStart = $lGbFin; $ehGb.HandlerEnd = $lGbEnd
-    $mGpuBlit.Body.ExceptionHandlers.Add($ehGb)
-    $tTex2D.Methods.Add($mGpuBlit)
-}
-
-# try { Zero-alloc GPU Blit fast-path when src & dst match RGBA dimensions, else fallback CPU GetData + SetData
-$lCpuRead = $cil.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vW)
+# try { Scissor/ColorMask-immune CPU GetData<Color> + SetData<Color> (GL.BlitFramebuffer is clipped by LoadGameMenu GL_SCISSOR_TEST -> #GL-V53YS2!) }
 $cil.Append($lTryStart)
 $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fTexFormat))
 $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Brtrue, $lGetColData))
-if ($mGpuBlit) {
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fTexWidth))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vW))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Bne_Un, $lCpuRead))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fTexHeight))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vH))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Bne_Un, $lCpuRead))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fTexFormat))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Brtrue, $lCpuRead))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fLevelCount))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_1))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Bne_Un, $lCpuRead))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fGlTexture))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ble, $lCpuRead))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vW))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vH))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Call, $mGpuBlit))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $lCpuRead))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fActWidth))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Stfld, $fActWidth))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $fActHeight))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Stfld, $fActHeight))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Call, $mGetGD))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Stloc, $vGd))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vGd))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Brfalse, $lLeaveTry))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vGd))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mGetTextures))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $mTexCollDirty))
-    $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Br, $lLeaveTry))
-}
-$cil.Append($lCpuRead)
+$cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vW))
 $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Ldloc, $vH))
 $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Mul))
 $cil.Append($cil.Create([Mono.Cecil.Cil.OpCodes]::Newarr, $tColor))
@@ -2678,6 +2471,9 @@ Write-Host "  iOS Content Patcher Texture Propagation Fix (MonoGame): Implemente
 # 3.7 CRITICAL iOS Shader Mod Fix (DynamicShader ShadowAlphaBoundsCache + WaterTileArtMaskCache):
 # Texture2D.PlatformGetData creates & deletes a temporary FBO without restoring GL_FRAMEBUFFER_BINDING!
 # Wrap BindFramebuffer..ReadPixels in try/finally so DeleteFramebuffers + BindFramebuffer(prevFbo) ALWAYS run!
+$tGL = $mgMod.GetType("MonoGame.OpenGL.GL")
+$mGlGetInt = if ($tGL) { $tGL.Methods | Where-Object { $_.Name -eq "GetInteger" -and $_.Parameters.Count -eq 2 -and $_.Parameters[0].ParameterType.FullName -eq "System.Int32" } | Select-Object -First 1 } else { $null }
+$mPlatGetData = $tTex2D.Methods | Where-Object { $_.Name -eq "PlatformGetData" } | Select-Object -First 1
 if (-not $mPlatGetData -or -not $mGlGetInt) { throw "Missing Texture2D.PlatformGetData or GL.GetInteger(int, out int)!" }
 $fBindFb = $null; $mBindFbInv = $null; $fDelFbPd = $null; $mDelFbInvPd = $null
 foreach ($ins in $mPlatGetData.Body.Instructions) {

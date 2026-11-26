@@ -4,7 +4,7 @@
   <p><b>Launcher &amp; Mod Manager cho Stardew Valley PC 1.6.15 trên iOS &amp; iPadOS</b></p>
 
   <p>
-    <a href="https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/tag/v1.1.0"><img src="https://img.shields.io/badge/Version-v1.1.0-2ea44f?style=flat-square" alt="Version v1.1.0" /></a>
+    <a href="https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/tag/v1.1.1"><img src="https://img.shields.io/badge/Version-v1.1.1-2ea44f?style=flat-square" alt="Version v1.1.1" /></a>
     <a href="https://discord.gg/tuTKv9xQ2Z"><img src="https://img.shields.io/badge/Discord-Vườn%20Bách%20Thú-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord Server" /></a>
     <img src="https://img.shields.io/badge/iOS%20%2F%20iPadOS-14%20–%2027+-007aff?style=flat-square&logo=apple&logoColor=white" alt="iOS & iPadOS 14-27+" />
     <img src="https://img.shields.io/badge/SMAPI-4.5.2-6f42c1?style=flat-square" alt="SMAPI 4.5.2" />
@@ -19,16 +19,20 @@
 
 ---
 
-## 📥 Tải xuống (`v1.1.0`)
+## 📥 Tải xuống (`v1.1.1`)
 
 | Thiết bị | Phiên bản IPA | Tải về |
 | :--- | :--- | :---: |
-| **iOS / iPadOS 14 – 18** | `Garden-Launcher-1.1.0-iOS14-18.ipa` | [**⬇️ Tải ngay**](https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.1.0/Garden-Launcher-1.1.0-iOS14-18.ipa) |
-| **iOS / iPadOS 26 – 27+** | `Garden-Launcher-1.1.0-iOS26-27.ipa` | [**⬇️ Tải ngay**](https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.1.0/Garden-Launcher-1.1.0-iOS26-27.ipa) |
+| **iOS / iPadOS 14 – 18** | `Garden-Launcher-1.1.1-iOS14-18.ipa` | [**⬇️ Tải ngay**](https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.1.1/Garden-Launcher-1.1.1-iOS14-18.ipa) |
+| **iOS / iPadOS 26 – 27+** | `Garden-Launcher-1.1.1-iOS26-27.ipa` | [**⬇️ Tải ngay**](https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.1.1/Garden-Launcher-1.1.1-iOS26-27.ipa) |
 
 ---
 
-## ✨ Điểm mới nổi bật trong `v1.1.0`, `v1.0.8` & `v1.0.7`
+## ✨ Điểm mới nổi bật trong `v1.1.1`, `v1.1.0` & `v1.0.8`
+
+- **🛠️ Bản Vá Khẩn Cấp `v1.1.1` (`#GL-V53YS2`) — Sửa Dứt Điểm Lỗi Texture Nhà Nông Trại (`Buildings/houses`) & Kích Hoạt Đầy Đủ Cold-Boot Stamp Cache:**
+  - Gỡ bỏ nhánh `GL.BlitFramebuffer` trong `Texture2D.CopyFromTexture` (vốn bị khung cắt `GL_SCISSOR_TEST` còn lưu lại từ màn hình `LoadGameMenu` cắt trắng pixel khi Content Patcher cập nhật `Buildings/houses`, làm nhà bị giữ nguyên ảnh gốc vanilla và lộ phần mái nhà tầng 2 dưới bậc thềm), khôi phục cơ chế `GetData/SetData` miễn nhiễm Scissor & ColorMask kết hợp `try/finally` bảo toàn FBO.
+  - Sửa lỗi `syncBundledSmapi` báo `dll-hash-mismatch` mỗi lần mở game khi `StardewModdingAPI.dll` đã được `RuntimeSmapiPatcher` vá tại chỗ, giúp bộ nhớ đệm `.garden/patch_stamps` bỏ qua phân tích `Mono.Cecil` thực sự từ lần mở thứ 2 trở đi.
 
 - **🚀 Siêu Cập Nhật `v1.1.0` — Tối Ưu Cực Đại `0% JIT` / RAM / Tốc Độ Mở Game, Giảm Gần 6 MB IPA (`25.1 MB`) & 6 Tính Năng Mod Garden Mới:**
   - **Khởi động nhanh & Siêu nhẹ RAM (`v7` Engine Patcher):** Bộ nhớ đệm dấu vân tay vá IL (`.garden/patch_stamps`) rút ngắn **2–4 giây** thời gian mở game từ lần thứ 2; sao chép `Texture2D.CopyFromTexture` bằng phần cứng GPU `GL.BlitFramebuffer` (**0 byte RAM trung gian**); tái sử dụng bộ đệm tĩnh `PathFinder` A\* + Delegate đóng cho `PadBridge` giúp **0 cấp phát rác GC mỗi khung hình 60Hz**; nâng cấp trình biên dịch Shader GLSL ES (`#version 420..460`, `texture2DLodEXT`, `[ThreadStatic]` an toàn đa luồng) & phát âm thanh Mod tùy chỉnh (`CueDefinition.SetSound` + `SoundBank.AddCue`); khử trùng lặp tài nguyên giúp giảm dung lượng IPA xuống chỉ còn **`25.13 MB`**.
@@ -85,8 +89,8 @@ dotnet build ModGarden\SDVMobileControls\SDVMobileControls.csproj -c Release
 powershell -ExecutionPolicy Bypass -File scripts\patch_perf_v7.ps1
 
 # 3. Đóng gói 2 bản IPA sạch (iOS / iPadOS 26–27+ & iOS / iPadOS 14–18)
-python scripts\package_embedded.py base-sdvios.ipa build\SDVModGarden_ios26 zsign.exe dist\Garden-Launcher-1.1.0-iOS26-27.ipa "$WorkDir\v7-host.dll" "$WorkDir\v7-touch.dll" "$WorkDir\Lidgren.Network.dll" --launcher --min-ios=16.0
-python scripts\package_embedded.py base-sdvios.ipa build\SDVModGarden_ios14 zsign.exe dist\Garden-Launcher-1.1.0-iOS14-18.ipa "$WorkDir\v7-host.dll" "$WorkDir\v7-touch.dll" "$WorkDir\Lidgren.Network.dll" --launcher --no-scene --min-ios=14.0
+python scripts\package_embedded.py base-sdvios.ipa build\SDVModGarden_ios26 zsign.exe dist\Garden-Launcher-1.1.1-iOS26-27.ipa "$WorkDir\v7-host.dll" "$WorkDir\v7-touch.dll" "$WorkDir\Lidgren.Network.dll" --launcher --min-ios=16.0
+python scripts\package_embedded.py base-sdvios.ipa build\SDVModGarden_ios14 zsign.exe dist\Garden-Launcher-1.1.1-iOS14-18.ipa "$WorkDir\v7-host.dll" "$WorkDir\v7-touch.dll" "$WorkDir\Lidgren.Network.dll" --launcher --no-scene --min-ios=14.0
 ```
 
 </details>

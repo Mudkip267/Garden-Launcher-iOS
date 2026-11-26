@@ -499,8 +499,14 @@ static NSString *syncBundledSmapi(NSString *docsPath) {
                 stamp = [stamp stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
                 if (![stamp isEqualToString:srcHash]) {
                     reason = @"stamp-mismatch";
-                } else if (dstData.length != srcDllData.length || ![hashData(dstData) isEqualToString:srcHash]) {
-                    reason = @"dll-hash-mismatch";
+                } else {
+                    // RuntimeSmapiPatcher patches StardewModdingAPI.dll in-place on first boot, altering its SHA-256 & byte length slightly!
+                    // Accept valid in-place patched iOS SMAPI when .garden_smapi_v1 matches the bundled IPA source hash so Cold-Boot Stamp Cache hits on boot #2+.
+                    NSUInteger minValid = (srcDllData.length > 65536) ? (srcDllData.length - 65536) : 100 * 1024;
+                    NSUInteger maxValid = srcDllData.length + 131072;
+                    if (dstData.length < minValid || dstData.length > maxValid) {
+                        reason = @"dll-size-corrupt";
+                    }
                 }
             }
 
@@ -3152,8 +3158,8 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
 // ============================================================================
 // GARDEN LAUNCHER UPDATE CHECKER + OTA HOT-PATCH ENGINE (0% IPA Re-Signing!)
 // ============================================================================
-#define kSDVAppVersion @"1.1.0"
-#define kSDVAppBuild   11000
+#define kSDVAppVersion @"1.1.1"
+#define kSDVAppBuild   11100
 static NSString *const kSDVUpdateNotification = @"SDVLauncherUpdateDidChangeNotification";
 static NSString *const kSDVDismissedUpdatePrefKey = @"sdv_dismissed_update_id";
 static NSString *const kSDVDefaultDiscordURL = @"https://discord.gg/tuTKv9xQ2Z";

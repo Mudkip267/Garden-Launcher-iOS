@@ -70,9 +70,22 @@
 ## 🚀 Cài đặt nhanh
 
 1. **Cài IPA** bằng KSign / ESign / TrollStore / SideStore / Sideloadly *(cài đè cùng Bundle ID giữ nguyên Save & Mod)*.
-2. **Nạp game PC `1.6.15`**: Nén thư mục game PC (`.ZIP`/`.RAR`/`.7Z`) → mở app → bấm **Nhập gói dữ liệu game** *(hoặc chép thẳng vào `Tệp → Trên iPhone → Garden Launcher → StardewValley`)* → chờ đủ 4 mục xanh → mở lại app.
-3. **Cài Mod / Thay `.XNB`**: Chạm **3 ngón tay × 2** → tab **Cài Mod** → chọn gói Mod/XNB (hoặc sửa trực tiếp trong `StardewValley/Content` rồi nạp lại) → bấm **Khởi động lại**.
+2. **Nạp game PC `1.6.15`**: Nén thư mục game PC (`.ZIP`/`.RAR`/`.7Z`) → mở app → bấm **Nhập gói dữ liệu game** *(hoặc chép thẳng vào `Tệp → Trên iPhone → Garden Launcher → StardewValley`)* → chờ thông báo xanh thành công → bấm **Khởi động lại**.
+3. **Cài Mod / Việt hóa / `.XNB`**: Chạm **3 ngón tay × 2** → tab **Cài Mod** → chọn 1 hoặc nhiều gói Mod/XNB cùng lúc → bấm **Cài tất cả** → bấm **Khởi động lại**.
 4. **Dùng Tay cầm**: Cắm/kết nối tay cầm để game tự nhận ngay, hoặc vào **Mod Garden → Điều khiển → Chế độ Tay cầm thuần** rồi bấm **Khởi động lại ngay** nếu chỉ chơi bằng tay cầm.
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="assets/Huong-Dan-1-Setup-Launcher-Liquid3D.jpg" alt="Hướng dẫn Setup Garden Launcher (Phần 1/2)" /><br/>
+      <sub><b>Phần 1 / 2 · Hướng dẫn Setup Garden Launcher</b></sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="assets/Huong-Dan-2-Cai-Mod-Viet-Hoa-Liquid3D.jpg" alt="Hướng dẫn Cài Mod &amp; Việt Hóa (Phần 2/2)" /><br/>
+      <sub><b>Phần 2 / 2 · Hướng dẫn Cài Mod &amp; Việt Hóa</b></sub>
+    </td>
+  </tr>
+</table>
 
 ---
 

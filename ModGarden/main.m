@@ -4234,7 +4234,7 @@ static BOOL sdvResolveXnaKeyString(NSString *rawKey, NSString **outLabel, NSInte
     NSInteger majorIOS = NSProcessInfo.processInfo.operatingSystemVersion.majorVersion;
     NSString *ipaLabel = (majorIOS >= 19) ? @"Tải IPA (iOS 26–27+)" : @"Tải IPA (iOS 14–18)";
     NSString *dlUrl = sdvRecommendedUpdateDownloadURL(info);
-    NSString *relUrl = info[@"releaseUrl"] ?: @"https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/latest";
+    NSString *relUrl = info[@"releaseUrl"] ?: @"https://github.com/Mudkip267/Garden-Launcher-iOS/releases/latest";
 
     UIStackView *box = mkVStack(8);
 

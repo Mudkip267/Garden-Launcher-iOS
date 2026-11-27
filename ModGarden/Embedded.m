@@ -3943,6 +3943,7 @@ __attribute__((constructor)) static void startGardenControls(void) {
                 @try { sdvMigrateLegacyDocumentsSaves(docs); } @catch (NSException *ignored) { }
                 hpBootNote = sdvInitHotPatchOnBoot(docs);
                 NSString *gdir = sdvHiddenGardenDir(docs);
+                sdvRemoveItemQuiet(join(gdir, @"patch_stamps"));
                 snprintf(gSdvPauseFlagPath, sizeof(gSdvPauseFlagPath), "%s/sdv_pause_now.flag", gdir.UTF8String);
                 snprintf(gSdvHapticFlagPath, sizeof(gSdvHapticFlagPath), "%s/sdv_haptic_bite.flag", gdir.UTF8String);
                 snprintf(gSdvSafeAreaPath, sizeof(gSdvSafeAreaPath), "%s/sdv_safe_area.cfg", gdir.UTF8String);

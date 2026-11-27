@@ -355,6 +355,25 @@ namespace SDVMobileControls
             ResetMailboxWatchdogSnapshot();
         }
 
+        private void OnReturnedToTitle(object sender, ReturnedToTitleEventArgs e)
+        {
+            RestoreMineFloorRelocateIfNeeded();
+            RestoreStashedHudMessagesIfNeeded();
+            _portraitSyncDelayTicks = -1;
+            _pendingReloadAllPortraits = false;
+            _pendingPortraitKeys.Clear();
+            _portraitSyncReason = null;
+            _lastMailboxSnapshot.Clear();
+            _lastMailboxDayKey = -1;
+            _mineFloorPendingHudDraw = false;
+            _fishingHoldRod = null;
+            _fishingHoldStartMs = 0;
+            _stuckReelingTicks = 0;
+            try { RamOptimizer?.OnReturnedToTitle(); } catch { }
+            try { ExternalInput?.OnReturnedToTitle(); } catch { }
+            try { Engine?.OnReturnedToTitle(); } catch { }
+        }
+
         private void LogMailDiagnostic(string phase)
         {
             try
@@ -806,7 +825,6 @@ namespace SDVMobileControls
                     if (Engine != null)
                         ExternalInput.SyncPureGamepadConfig(Engine.IsPureGamepadMode);
                     ExternalInput.SetManagedSuppressed(Engine != null && Engine.IsUiOverlayBlockingExternalInput(null));
-                    ExternalInput.PollFrame();
                     ExternalInput.UpdateControllerRumble();
                 }
             }
@@ -1159,7 +1177,7 @@ namespace SDVMobileControls
         private static GamePadState OnExternalGamePadGetStateHook(int index)
         {
             var ext = ExternalInput;
-            return (index == 0 && ext != null) ? ext.PollAndGetStateForMonoGameHook(0) : default;
+            return (index == 0 && ext != null) ? ext.GetStateForMonoGameHook(0) : default;
         }
 
         private static bool OnHasActiveExtraKeys()

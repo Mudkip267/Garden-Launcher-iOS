@@ -359,6 +359,16 @@ namespace SDVMobileControls
                     string packFor = mod.Manifest?.ContentPackFor?.UniqueID;
                     if (!string.Equals(packFor, "Pathoschild.ContentPatcher", StringComparison.OrdinalIgnoreCase))
                         continue;
+                    string uid = mod.Manifest.UniqueID ?? string.Empty;
+                    string name = mod.Manifest.Name ?? string.Empty;
+                    if (uid.IndexOf("vietnam", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        uid.IndexOf("viethoa", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        uid.IndexOf("translation", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        name.IndexOf("vietnam", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        name.IndexOf("viethoa", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        name.IndexOf("việt", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        name.IndexOf("font", StringComparison.OrdinalIgnoreCase) >= 0)
+                        continue;
                     if (!string.IsNullOrEmpty(mod.Manifest.Name))
                         _cpPackNames.Add(mod.Manifest.Name);
                     // Also capture DirectoryPath via reflection on ModMetadata if available
@@ -523,6 +533,16 @@ namespace SDVMobileControls
                             activeBasenames.Add(baseNm);
                     }
                 }
+
+                // Protect active font textures (including Vietnamese BMFont pages / SpriteFonts)
+                try
+                {
+                    if (Game1.smallFont?.Texture is Texture2D sft && !sft.IsDisposed)
+                        protectedTex.Add(sft);
+                    if (Game1.dialogueFont?.Texture is Texture2D dft && !dft.IsDisposed)
+                        protectedTex.Add(dft);
+                }
+                catch { }
 
                 // Protect all static Game1 Texture2D fields
                 if (_game1StaticTexFields != null)
@@ -966,6 +986,10 @@ namespace SDVMobileControls
             // Never touch Audio / Sound / UI / Fonts / Sprites / Buildings / TerrainFeatures / Characters
             if (normKey.StartsWith("loosesprites/", StringComparison.OrdinalIgnoreCase) ||
                 normKey.StartsWith("fonts/", StringComparison.OrdinalIgnoreCase) ||
+                normKey.IndexOf("minhhien", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                normKey.IndexOf("smallfont", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                normKey.IndexOf("spritefont", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                normKey.IndexOf("loosesprites/font", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 normKey.StartsWith("tilesheets/", StringComparison.OrdinalIgnoreCase) ||
                 normKey.StartsWith("terrainfeatures/", StringComparison.OrdinalIgnoreCase) ||
                 normKey.StartsWith("buildings/", StringComparison.OrdinalIgnoreCase) ||

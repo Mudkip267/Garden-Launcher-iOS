@@ -706,7 +706,7 @@ static NSUInteger syncContentPackLocaleFallbacks(NSString *docsPath) {
                     for (NSString *jRel in je) {
                         NSString *ft = je.fileAttributes.fileType;
                         NSString *topSub = jRel.pathComponents.firstObject.lowercaseString;
-                        if ([ft isEqualToString:NSFileTypeDirectory] && ([topSub isEqualToString:@"assets"] || [topSub isEqualToString:@"i18n"])) {
+                        if ([ft isEqualToString:NSFileTypeDirectory] && [topSub isEqualToString:@"i18n"]) {
                             [je skipDescendants];
                             continue;
                         }
@@ -2972,7 +2972,7 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
             return i > 0 && [s.lowercaseString isEqualToString:@"content"];
         }];
         if (contentIdx != NSNotFound && contentIdx + 1 < parts.count) {
-            if ([extLow isEqualToString:@"xnb"] || [extLow isEqualToString:@"json"] || [extLow isEqualToString:@"png"] || [extLow isEqualToString:@"tmx"] || [extLow isEqualToString:@"yaml"]) {
+            if ([extLow isEqualToString:@"xnb"] || [extLow isEqualToString:@"json"] || [extLow isEqualToString:@"png"] || [extLow isEqualToString:@"tmx"] || [extLow isEqualToString:@"yaml"] || [extLow isEqualToString:@"fnt"]) {
                 NSString *subRel = [NSString pathWithComponents:[parts subarrayWithRange:NSMakeRange(contentIdx + 1, parts.count - contentIdx - 1)]];
                 NSString *fnLow = r.lastPathComponent.lowercaseString;
                 // Protect PC Content UI XNBs from Android/Mobile optional XNB folders bundled inside a Content Patcher ZIP
@@ -3165,9 +3165,9 @@ static NSString *const kSDVDismissedUpdatePrefKey = @"sdv_dismissed_update_id";
 static NSString *const kSDVDefaultDiscordURL = @"https://discord.gg/tuTKv9xQ2Z";
 static NSString *const kSDVDiscordUrlPrefKey = @"sdv_discord_invite_url";
 static NSString *const kSDVDiscordStatsNotification = @"SDVDiscordStatsDidUpdateNotification";
-static NSString *const kSDVVersionApiRawURL = @"https://api.github.com/repos/hanprm9-dot/Garden-Launcher-iOS/contents/version.json?ref=main";
-static NSString *const kSDVVersionJsonURL = @"https://raw.githubusercontent.com/hanprm9-dot/Garden-Launcher-iOS/main/version.json";
-static NSString *const kSDVLatestReleaseApiURL = @"https://api.github.com/repos/hanprm9-dot/Garden-Launcher-iOS/releases/latest";
+static NSString *const kSDVVersionApiRawURL = @"https://api.github.com/repos/Mudkip267/Garden-Launcher-iOS/contents/version.json?ref=main";
+static NSString *const kSDVVersionJsonURL = @"https://raw.githubusercontent.com/Mudkip267/Garden-Launcher-iOS/main/version.json";
+static NSString *const kSDVLatestReleaseApiURL = @"https://api.github.com/repos/Mudkip267/Garden-Launcher-iOS/releases/latest";
 
 static NSInteger gSdvDiscordOnlineCount = 0;
 static NSInteger gSdvDiscordMemberCount = 0;
@@ -3954,11 +3954,11 @@ static void sdvDismissLauncherUpdate(NSString *updateId) {
 }
 
 static NSString *sdvRecommendedUpdateDownloadURL(NSDictionary *info) {
-    if (!info) return @"https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/latest";
+    if (!info) return @"https://github.com/Mudkip267/Garden-Launcher-iOS/releases/latest";
     NSInteger majorIOS = NSProcessInfo.processInfo.operatingSystemVersion.majorVersion;
     NSString *pick = (majorIOS >= 19) ? info[@"ios26Url"] : info[@"ios14Url"];
     if (!pick.length) pick = info[@"releaseUrl"];
-    return pick.length ? pick : @"https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/latest";
+    return pick.length ? pick : @"https://github.com/Mudkip267/Garden-Launcher-iOS/releases/latest";
 }
 
 static void sdvCompletePendingUpdateCallbacks(NSDictionary *info, NSString *msg, BOOL networkSucceeded) {
@@ -3986,7 +3986,7 @@ static void sdvParseAndStoreRemoteUpdateDict(NSDictionary *json, BOOL isGithubRe
     NSString *hotpatchUrl = @"";
     NSString *hotpatchSha256 = @"";
     long long hotpatchSize = 0;
-    NSString *relUrl = @"https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/latest";
+    NSString *relUrl = @"https://github.com/Mudkip267/Garden-Launcher-iOS/releases/latest";
 
     if (!isGithubReleaseApi) {
         ver = [json[@"version"] isKindOfClass:NSString.class] ? json[@"version"] : @"";
@@ -4062,10 +4062,10 @@ static void sdvParseAndStoreRemoteUpdateDict(NSDictionary *json, BOOL isGithubRe
     // Only synthesize default IPA download URLs when version.json omitted them AND this is not a hotpatch-only release!
     if (!isGithubReleaseApi && !hotpatchUrl.length) {
         if (!ios14Url.length) {
-            ios14Url = [NSString stringWithFormat:@"https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v%@/Garden-Launcher-%@-iOS14-18.ipa", ver, ver];
+            ios14Url = [NSString stringWithFormat:@"https://github.com/Mudkip267/Garden-Launcher-iOS/releases/download/v%@/Garden-Launcher-%@-iOS14-18.ipa", ver, ver];
         }
         if (!ios26Url.length) {
-            ios26Url = [NSString stringWithFormat:@"https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v%@/Garden-Launcher-%@-iOS26-27.ipa", ver, ver];
+            ios26Url = [NSString stringWithFormat:@"https://github.com/Mudkip267/Garden-Launcher-iOS/releases/download/v%@/Garden-Launcher-%@-iOS26-27.ipa", ver, ver];
         }
     }
 

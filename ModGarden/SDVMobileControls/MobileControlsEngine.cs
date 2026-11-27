@@ -2517,9 +2517,6 @@ namespace SDVMobileControls
                 _hasCarpenterPreview = false;
                 _gameMenuModClickPulseFrames = 0;
                 _gameMenuModClickRawPos = null;
-
-                _gameMenuModClickPulseFrames = 0;
-                _gameMenuModClickRawPos = null;
                 if (IsSkippableCutsceneActive() && RefreshViewport())
                 {
                     ComputeLayout();

@@ -1,0 +1,353 @@
+name: Build Garden Launcher v1.1.1 Mobile UX + Rumble (iOS 26+ Apple Xcode)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Fork
+        uses: actions/checkout@v4
+
+      - name: Download Verified Base Garden-Launcher-1.1.1-iOS26-27.ipa
+        run: |
+          mkdir -p work/stage
+          curl -fsSL -o work/base-v1.1.1.ipa "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.1.1/Garden-Launcher-1.1.1-iOS26-27.ipa"
+          ACTUAL_SHA=$(shasum -a 256 work/base-v1.1.1.ipa | awk '{print tolower($1)}')
+          EXPECTED_SHA="f9db0cd6bb1a2ee1e80e49dab9e7e4a9e0fd1859b459e4f89ec8eeb022305feb"
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            echo "SHA-256 mismatch: $ACTUAL_SHA != $EXPECTED_SHA"
+            exit 1
+          fi
+          unzip -q work/base-v1.1.1.ipa -d work/stage
+          ls -la work/stage/Payload/SDViOS.app
+
+      - name: Compile Updated SDVModGarden.framework (arm64 iOS + CoreHaptics Controller Rumble)
+        run: |
+          set -euo pipefail
+          IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          CLANG=$(xcrun --sdk iphoneos --find clang)
+          echo "Using SDK: $IOS_SDK"
+          mkdir -p work/native
+
+          "$CLANG" -arch arm64 -isysroot "$IOS_SDK" -miphoneos-version-min=16.0 \
+            -O2 -fvisibility=hidden -c ModGarden/vendor/miniz.c -o work/native/miniz.o
+
+          "$CLANG" -arch arm64 -isysroot "$IOS_SDK" -miphoneos-version-min=16.0 \
+            -O2 -fobjc-arc -fvisibility=hidden -IModGarden \
+            -Wno-deprecated-declarations \
+            -c ModGarden/Embedded.m -o work/native/Embedded.o
+
+          "$CLANG" -arch arm64 -isysroot "$IOS_SDK" -miphoneos-version-min=16.0 \
+            -dynamiclib -install_name @rpath/SDVModGarden.framework/SDVModGarden \
+            -Wl,-fixup_chains \
+            work/native/Embedded.o work/native/miniz.o \
+            -framework Foundation \
+            -framework CoreFoundation \
+            -framework CoreGraphics \
+            -framework UIKit \
+            -framework QuartzCore \
+            -framework AVFoundation \
+            -framework AVFAudio \
+            -framework PhotosUI \
+            -framework GameController \
+            -framework UniformTypeIdentifiers \
+            -weak_framework CoreHaptics \
+            -o work/native/SDVModGarden
+
+          echo "=== Exported symbols of rebuilt SDVModGarden ==="
+          nm -gU work/native/SDVModGarden | grep -E "_sdv_"
+          for sym in _sdv_ext_set_rumble _sdv_ext_poll_input _sdv_ext_set_mouse_norm _sdv_ext_get_direct_touch_count _sdv_boot_report _sdv_boot_on_log _sdv_is_boot_done _sdv_kb_show _sdv_kb_poll _sdv_kb_is_active; do
+            if ! nm -gU work/native/SDVModGarden | grep -q "$sym"; then
+              echo "MISSING EXPORTED SYMBOL: $sym"
+              exit 1
+            fi
+          done
+          echo "=== Linked frameworks ==="
+          otool -L work/native/SDVModGarden
+
+          APP="work/stage/Payload/SDViOS.app"
+          cp -f work/native/SDVModGarden "$APP/Frameworks/SDVModGarden.framework/SDVModGarden"
+
+      - name: Inject Audited SDVMobileControls.dll
+        run: |
+          APP="work/stage/Payload/SDViOS.app"
+          DST="$APP/Frameworks/SDVModGarden.framework/BundledMods/SDVMobileControls"
+          mkdir -p "$DST"
+          cp -f "ModGarden/SDVMobileControls/prebuilt/SDVMobileControls.dll" "$DST/SDVMobileControls.dll"
+          cp -f "ModGarden/SDVMobileControls/manifest.json" "$DST/manifest.json"
+          shasum -a 256 "$DST/SDVMobileControls.dll"
+
+      - name: Patch Deadlocks, Neutralize Stamp Cache & Strictly Verify Managed DLLs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $appDir = (Resolve-Path "work/stage/Payload/SDViOS.app").Path
+          $cecilDll = Join-Path $appDir "Mono.Cecil.dll"
+          Add-Type -Path $cecilDll
+
+          # 1. Patch GC.WaitForPendingFinalizers -> Nop in SDViOSTouchControls*.dll
+          $tcDir = Join-Path $appDir "Mods/SDViOSTouchControls"
+          $tcResolver = New-Object Mono.Cecil.DefaultAssemblyResolver
+          $tcResolver.AddSearchDirectory($appDir)
+          $tcResolver.AddSearchDirectory($tcDir)
+          $tcResolver.AddSearchDirectory([System.IO.Path]::GetDirectoryName([object].Assembly.Location))
+          $tcRp = New-Object Mono.Cecil.ReaderParameters
+          $tcRp.AssemblyResolver = $tcResolver
+          $tcRp.ReadWrite = $false
+
+          $totalDeadlocksPatched = 0
+          foreach ($dllName in @("SDViOSTouchControls.dll", "SDViOSTouchControlsMod.dll")) {
+              $tcPath = Join-Path $tcDir $dllName
+              if (-not (Test-Path $tcPath)) { throw "Missing $tcPath" }
+              $tmpTc = "$tcPath.patched.tmp"
+              $tAsm = [Mono.Cecil.AssemblyDefinition]::ReadAssembly($tcPath, $tcRp)
+              $patched = 0
+              try {
+                  foreach ($t in $tAsm.MainModule.GetTypes()) {
+                      foreach ($m in $t.Methods) {
+                          if (-not $m.HasBody) { continue }
+                          foreach ($ins in $m.Body.Instructions) {
+                              if ($ins.Operand -ne $null -and $ins.Operand.ToString() -eq "System.Void System.GC::WaitForPendingFinalizers()") {
+                                  $ins.OpCode = [Mono.Cecil.Cil.OpCodes]::Nop
+                                  $ins.Operand = $null
+                                  $patched++
+                              }
+                          }
+                      }
+                  }
+                  if ($patched -lt 2) { throw "Expected >=2 WaitForPendingFinalizers in ${dllName}, found $patched" }
+                  $tAsm.Write($tmpTc)
+              } finally {
+                  $tAsm.Dispose()
+              }
+              Move-Item -Force $tmpTc $tcPath
+              $totalDeadlocksPatched += $patched
+
+              $vTc = [Mono.Cecil.AssemblyDefinition]::ReadAssembly($tcPath, $tcRp)
+              try {
+                  $rem = 0
+                  foreach ($t in $vTc.MainModule.GetTypes()) {
+                      foreach ($m in $t.Methods) {
+                          if (-not $m.HasBody) { continue }
+                          foreach ($ins in $m.Body.Instructions) {
+                              if ($ins.Operand -ne $null -and $ins.Operand.ToString() -match "WaitForPendingFinalizers") { $rem++ }
+                          }
+                      }
+                  }
+                  if ($rem -ne 0) { throw "Deadlock patch readback failed on ${dllName}: $rem WaitForPendingFinalizers calls remain!" }
+                  Write-Host "[EXIT-TO-TITLE DEADLOCK FIX OK] ${dllName}: patched $patched WaitForPendingFinalizers -> Nop (remaining=0)"
+              } finally {
+                  $vTc.Dispose()
+              }
+          }
+
+          # 2. Patch SDViOS.dll: replace embedded SDViOSTouchControls.dll + neutralize TryGetValidStamp
+          $hostPath = Join-Path $appDir "SDViOS.dll"
+          $tmpHost = "$hostPath.patched.tmp"
+          $touchBytes = [System.IO.File]::ReadAllBytes((Join-Path $tcDir "SDViOSTouchControls.dll"))
+          $hAsm = [Mono.Cecil.AssemblyDefinition]::ReadAssembly($hostPath, $tcRp)
+          try {
+              $hMod = $hAsm.MainModule
+              $resReplaced = 0
+              for ($r = 0; $r -lt $hMod.Resources.Count; $r++) {
+                  if ($hMod.Resources[$r].Name -like "*SDViOSTouchControls.dll") {
+                      $rName = $hMod.Resources[$r].Name
+                      $hMod.Resources[$r] = New-Object Mono.Cecil.EmbeddedResource($rName, [Mono.Cecil.ManifestResourceAttributes]::Public, $touchBytes)
+                      $resReplaced++
+                      Write-Host "  Updated embedded TouchControls resource in SDViOS.dll: $rName ($($touchBytes.Length) bytes)"
+                  }
+              }
+              if ($resReplaced -lt 1) { throw "Embedded SDViOSTouchControls.dll resource not found in SDViOS.dll!" }
+
+              $tRsp = $hMod.GetType("SDViOS.Compatibility.RuntimeSmapiPatcher")
+              $mTryStamp = if ($tRsp) { $tRsp.Methods | Where-Object { $_.Name -eq "TryGetValidStamp" } | Select-Object -First 1 } else { $null }
+              if (-not $mTryStamp) { throw "TryGetValidStamp not found in RuntimeSmapiPatcher!" }
+              $mTryStamp.Body.Instructions.Clear()
+              $mTryStamp.Body.ExceptionHandlers.Clear()
+              $mTryStamp.Body.Variables.Clear()
+              $mTryStamp.Body.InitLocals = $false
+              $tsIl = $mTryStamp.Body.GetILProcessor()
+              $tsIl.Append($tsIl.Create([Mono.Cecil.Cil.OpCodes]::Ldnull))
+              $tsIl.Append($tsIl.Create([Mono.Cecil.Cil.OpCodes]::Ret))
+              $hAsm.Write($tmpHost)
+          } finally {
+              $hAsm.Dispose()
+          }
+          Move-Item -Force $tmpHost $hostPath
+
+          $vHost = [Mono.Cecil.AssemblyDefinition]::ReadAssembly($hostPath, $tcRp)
+          try {
+              $vRsp = $vHost.MainModule.GetType("SDViOS.Compatibility.RuntimeSmapiPatcher")
+              $vTry = $vRsp.Methods | Where-Object { $_.Name -eq "TryGetValidStamp" } | Select-Object -First 1
+              if ($vTry.Body.Instructions.Count -ne 2 -or $vTry.Body.Instructions[0].OpCode.Name -ne "ldnull" -or $vTry.Body.Instructions[1].OpCode.Name -ne "ret") {
+                  throw "TryGetValidStamp readback failed!"
+              }
+              $emb = $vHost.MainModule.Resources | Where-Object { $_.Name -like "*SDViOSTouchControls.dll" } | Select-Object -First 1
+              $ems = New-Object System.IO.MemoryStream(,$emb.GetResourceData())
+              $eAsm = [Mono.Cecil.AssemblyDefinition]::ReadAssembly($ems, $tcRp)
+              $eRem = 0
+              foreach ($t in $eAsm.MainModule.GetTypes()) {
+                  foreach ($m in $t.Methods) {
+                      if (-not $m.HasBody) { continue }
+                      foreach ($ins in $m.Body.Instructions) {
+                          if ($ins.Operand -ne $null -and $ins.Operand.ToString() -match "WaitForPendingFinalizers") { $eRem++ }
+                      }
+                  }
+              }
+              $eAsm.Dispose(); $ems.Dispose()
+              if ($eRem -ne 0) { throw "Embedded SDViOSTouchControls.dll still has $eRem WaitForPendingFinalizers!" }
+              Write-Host "[SDViOS.dll OK] TryGetValidStamp neutralized (2 IL ops) & embedded SDViOSTouchControls.dll verified (0 WaitForPendingFinalizers)"
+          } finally {
+              $vHost.Dispose()
+          }
+
+          # 3. Verify MonoGame.Framework.dll Audio + UIIS2 + CopyFromTexture + PlatformGetData + GamePad hook
+          $mgDll = Join-Path $appDir "MonoGame.Framework.dll"
+          $vMg = [Mono.Cecil.AssemblyDefinition]::ReadAssembly($mgDll, $tcRp)
+          try {
+              $mMod = $vMg.MainModule
+              $sb = $mMod.GetType("Microsoft.Xna.Framework.Audio.SoundBank")
+              $ex = $sb.Methods | Where-Object { $_.Name -eq "Exists" -and $_.Parameters.Count -eq 1 } | Select-Object -First 1
+              $addCue = $sb.Methods | Where-Object { $_.Name -eq "AddCue" } | Select-Object -First 1
+              $cd = $mMod.GetType("Microsoft.Xna.Framework.Audio.CueDefinition")
+              $lb = $cd.NestedTypes | Where-Object { $_.Name -eq "LimitBehavior" }
+              $ilF = $cd.Fields | Where-Object { $_.Name -eq "instanceLimit" }
+              $lbF = $cd.Fields | Where-Object { $_.Name -eq "limitBehavior" }
+              $ss = $cd.Methods | Where-Object { $_.Name -eq "SetSound" -and $_.Parameters.Count -eq 4 -and $_.Parameters[0].ParameterType.FullName -eq "Microsoft.Xna.Framework.Audio.SoundEffect" }
+              $tex = $mMod.GetType("Microsoft.Xna.Framework.Graphics.Texture2D")
+              $cf = $tex.Methods | Where-Object { $_.Name -eq "CopyFromTexture" } | Select-Object -First 1
+              $pg = $tex.Methods | Where-Object { $_.Name -eq "PlatformGetData" } | Select-Object -First 1
+              $gp = $mMod.GetType("Microsoft.Xna.Framework.Input.GamePad")
+              $gpHook = $gp.Fields | Where-Object { $_.Name -eq "ExternalGetStateHook" }
+              if (-not $ex -or $ex.Body.Instructions.Count -lt 10 -or
+                  -not $addCue -or $addCue.Body.Instructions.Count -lt 50 -or
+                  -not $lb -or -not $ilF -or -not $lbF -or -not $ss -or
+                  -not $cf -or $cf.Body.Instructions.Count -lt 80 -or
+                  -not $pg -or $pg.Body.ExceptionHandlers.Count -lt 1 -or
+                  -not $gpHook) {
+                  throw "MonoGame.Framework.dll readback check failed!"
+              }
+              Write-Host "[MonoGame OK] SoundBank.Exists=$($ex.Body.Instructions.Count), AddCue=$($addCue.Body.Instructions.Count), CopyFromTexture=$($cf.Body.Instructions.Count), PlatformGetData EH=$($pg.Body.ExceptionHandlers.Count), ExternalGetStateHook OK"
+          } finally {
+              $vMg.Dispose()
+          }
+
+      - name: Sign & Strictly Verify Entire App Bundle with Apple codesign
+        run: |
+          APP="work/stage/Payload/SDViOS.app"
+          rm -rf "$APP/_CodeSignature"
+          rm -rf "$APP/Frameworks/SDVModGarden.framework/_CodeSignature"
+          rm -rf "$APP/Frameworks/libSkiaSharp.framework/_CodeSignature"
+
+          chmod 755 "$APP/SDViOS"
+          chmod 755 "$APP/Frameworks/SDVModGarden.framework/SDVModGarden"
+          chmod 755 "$APP/Frameworks/libSkiaSharp.framework/libSkiaSharp"
+
+          codesign --force --sign - "$APP/Frameworks/libSkiaSharp.framework"
+          codesign --force --sign - "$APP/Frameworks/SDVModGarden.framework"
+          codesign --force --sign - "$APP"
+
+          echo "=== Verifying signatures strictly with Apple codesign ==="
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
+      - name: Package Clean IPA & Full Mach-O / Integrity Audit
+        run: |
+          cd work/stage
+          zip -r -y -q ../../Garden-Launcher-1.1.1-iOS26-27-MobileUX.ipa Payload
+          cd ../..
+          python3 - << 'EOF'
+          import zipfile, hashlib, pathlib, struct
+
+          def validate_macho(data, label, is_dylib=False):
+              magic, cputype, cpusub, filetype, ncmds, sizeofcmds, flags, _ = struct.unpack_from("<8I", data, 0)
+              assert magic == 0xfeedfacf, f"{label}: not 64-bit Mach-O"
+              assert filetype == (6 if is_dylib else 2), f"{label}: unexpected filetype {filetype}"
+              pos = 32
+              segs = []
+              has_chained = False
+              has_sig = False
+              for _ in range(ncmds):
+                  cmd, sz = struct.unpack_from("<II", data, pos)
+                  if cmd == 0xe and is_dylib:
+                      raise AssertionError(f"{label}: illegal LC_LOAD_DYLINKER in MH_DYLIB")
+                  if cmd == 0x80000034:
+                      has_chained = True
+                  if cmd == 0x1d:
+                      off, csz = struct.unpack_from("<2I", data, pos + 8)
+                      assert off + csz == len(data), f"{label}: LC_CODE_SIGNATURE end mismatch"
+                      has_sig = True
+                  if cmd == 0x19:
+                      seg = data[pos+8:pos+24].rstrip(b"\0").decode()
+                      va, vs, fo, fs = struct.unpack_from("<4Q", data, pos + 24)
+                      assert vs % 0x4000 == 0, f"{label}: segment {seg} vmsize not 16KB aligned"
+                      if seg not in ("__PAGEZERO", "__LINKEDIT"):
+                          assert fs % 0x4000 == 0, f"{label}: segment {seg} filesize not 16KB aligned"
+                          assert fs <= vs, f"{label}: segment {seg} filesize > vmsize"
+                          segs.append((seg, va, vs))
+                      elif seg == "__LINKEDIT":
+                          assert fo + fs == len(data), f"{label}: __LINKEDIT end mismatch"
+                          segs.append((seg, va, vs))
+                  pos += sz
+              for a, b in zip(segs, segs[1:]):
+                  assert a[1] + a[2] == b[1], f"{label}: VM gap between {a[0]} and {b[0]}"
+              assert has_chained, f"{label}: missing LC_DYLD_CHAINED_FIXUPS"
+              assert has_sig, f"{label}: missing LC_CODE_SIGNATURE"
+              assert bytes.fromhex("fade0cc0") in data, f"{label}: missing SuperBlob signature"
+              print(f"  [Mach-O OK] {label}: 16KB aligned + LC_DYLD_CHAINED_FIXUPS + Apple codesign ({len(data):,} bytes)")
+
+          ipa = pathlib.Path("Garden-Launcher-1.1.1-iOS26-27-MobileUX.ipa")
+          new_dll = pathlib.Path("ModGarden/SDVMobileControls/prebuilt/SDVMobileControls.dll").read_bytes()
+          target_rel = "Payload/SDViOS.app/Frameworks/SDVModGarden.framework/BundledMods/SDVMobileControls/SDVMobileControls.dll"
+          with zipfile.ZipFile(ipa, "r") as z:
+              assert z.testzip() is None, "Corrupt ZIP!"
+              for n in z.namelist():
+                  low = n.lower()
+                  assert "/bundledgame/" not in low and "/content/" not in low, f"Proprietary content found: {n}"
+                  assert pathlib.Path(n).name.lower() not in {"stardew valley.dll", "xtile.dll", "bmfont.dll", "stardewvalley.gamedata.dll"}, f"Proprietary DLL found: {n}"
+              assert hashlib.sha256(z.read(target_rel)).digest() == hashlib.sha256(new_dll).digest(), "SDVMobileControls.dll SHA-256 mismatch!"
+              assert "Payload/SDViOS.app/_CodeSignature/CodeResources" in z.NameToInfo
+              assert "Payload/SDViOS.app/Frameworks/SDVModGarden.framework/_CodeSignature/CodeResources" in z.NameToInfo
+              validate_macho(z.read("Payload/SDViOS.app/SDViOS"), "SDViOS", is_dylib=False)
+              mg_bin = z.read("Payload/SDViOS.app/Frameworks/SDVModGarden.framework/SDVModGarden")
+              validate_macho(mg_bin, "SDVModGarden", is_dylib=True)
+              assert b"_sdv_ext_set_rumble" in mg_bin, "SDVModGarden missing _sdv_ext_set_rumble!"
+          print(f"VERIFIED CLEAN IPA: {ipa} ({ipa.stat().st_size:,} bytes, sha256={hashlib.sha256(ipa.read_bytes()).hexdigest()})")
+          EOF
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Garden-Launcher-1.1.1-iOS26-27-MobileUX
+          path: Garden-Launcher-1.1.1-iOS26-27-MobileUX.ipa
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Garden-Launcher-1.1.1-iOS26-27-MobileUX.ipa
+          tag_name: v1.1.1-mobileux
+          name: Garden Launcher v1.1.1 Mobile UX + Controller Rumble + Vietnamese/Gamepad Fixes (iOS 26+)
+          body: |
+            Bản nâng cấp toàn diện trên nền gốc [`hanprm9-dot/Garden-Launcher-iOS@v1.1.1`](https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/tag/v1.1.1), giữ nguyên các tính năng mới ổn định (Aurora UI, 6 công cụ Mod Garden, Minecart Tap-to-Move, HUD Trứng Calico, khôi phục âm thanh OpenAL, IPA gọn) và thay thế/sửa triệt để các lỗi hồi quy về **Tay cầm, Rung, Tải mod & Việt hóa/Font**.
+
+            ### Các điểm đã sửa & nâng cấp trên v1.1.1
+            1. **Khôi phục trọn vẹn hệ thống Tay cầm ổn định + Tự động bật Rung CoreHaptics**:
+               - Thay thế cơ chế chặn `Hold-A`/`HandleMenuFrameSwitching` dễ gây lỗi của bản gốc bằng luồng tay cầm ổn định từ bản `922e531` (giữ `PureGamepadMode` & đồng bộ `SInputState`).
+               - Khóa `PollFrame()` chạy đúng **1 lần mỗi tick**, và `GamePad.ExternalGetStateHook` chỉ đọc trạng thái đã poll — không bao giờ làm rớt cạnh bấm nút (`X`, `A`, `LB/RB`, `LT/RT`).
+               - Tự động bật rung (`Game1.options.rumble = true`, `Game1.playerOneIndex = PlayerIndex.One`) và truyền tín hiệu CoreHaptics 2 mô-tơ (`LeftHandle`/`RightHandle`).
+            2. **Sửa lỗi xung đột tải Mod, treo Exit-to-Title & Stamp Cache**:
+               - Vô hiệu hóa an toàn `TryGetValidStamp` trong `SDViOS.dll` và tự dọn `.garden/patch_stamps` khi khởi động để `RuntimeSmapiPatcher` luôn vá đúng `Stardew Valley.dll`, `StardewModdingAPI.dll` & `SpaceCore.dll`.
+               - Vá `GC.WaitForPendingFinalizers()` → `Nop` trong cả `SDViOSTouchControls.dll`, `SDViOSTouchControlsMod.dll` và bản nhúng trong `SDViOS.dll` để tránh treo vĩnh viễn khi **Thoát ra tiêu đề**, đồng thời khôi phục `OnReturnedToTitle` cho `SDVMobileControls`.
+            3. **Sửa lỗi Mod Việt hóa & Font**:
+               - Cho phép cài trực tiếp tệp `.fnt` (`BMFont`) trong thư mục `Content/` khi cài gói Việt hóa.
+               - Quét đầy đủ các tệp `.json` bên trong `assets/` khi tạo APFS CoW fallback `*.vi.*` cho các gói Content Patcher dùng `{{Language}}`.
+               - Bảo vệ tuyệt đối thư mục `Fonts/`, `minhhien*`, `SmallFont`, `SpriteFont1` khỏi `MapRamOptimizer` để không bao giờ bị mất nét hoặc hỏng font khi chuyển map / dọn RAM.
+          draft: false
+          prerelease: false
+          make_latest: true

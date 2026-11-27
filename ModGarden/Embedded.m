@@ -34,6 +34,8 @@ static CFAbsoluteTime gSdvBootStartTime = 0;
 static time_t gSdvBootStartEpoch = 0;
 static char gSdvLastSafeAreaBuf[64] = {0};
 static volatile sig_atomic_t gSdvCrashHandled = 0;
+static char gSdvRecentBootLines[16][256];
+static volatile uint32_t gSdvRecentBootIdx = 0;
 
 // ---- Live Real-Time Boot Progress Telemetry (fed directly on Main Thread by SDViOS.dll & SDVMobileControls!) ----
 static os_unfair_lock gBootTelLock = OS_UNFAIR_LOCK_INIT;
@@ -106,6 +108,19 @@ static void sdvSignalCrashHandler(int sig, siginfo_t *info, void *ucontext) {
             for (int i = 15; i >= 0; i--) { hex[15 - i] = hd[(addr >> (i * 4)) & 0xF]; }
             hex[16] = '\n';
             (void)write(fd, hex, 17);
+        }
+        const char *rh = "Recent Boot/SMAPI Lines:\n";
+        (void)write(fd, rh, strlen(rh));
+        uint32_t curIdx = gSdvRecentBootIdx;
+        uint32_t startIdx = (curIdx > 16) ? (curIdx - 16) : 0;
+        for (uint32_t ri = startIdx; ri < curIdx; ri++) {
+            const char *ln = gSdvRecentBootLines[ri & 15];
+            size_t llen = strnlen(ln, 255);
+            if (llen > 0) {
+                (void)write(fd, "  ", 2);
+                (void)write(fd, ln, llen);
+                (void)write(fd, "\n", 1);
+            }
         }
         const char *bh = "Backtrace:\n";
         (void)write(fd, bh, strlen(bh));
@@ -3742,6 +3757,10 @@ void sdv_boot_on_log(const char *utf8Line) {
             const char *nl = strchr(p, '\n');
             size_t len = nl ? (size_t)(nl - p) : strlen(p);
             if (len > 0) {
+                uint32_t slot = __atomic_fetch_add(&gSdvRecentBootIdx, 1, __ATOMIC_RELAXED) & 15;
+                size_t rlen = (len < 255) ? len : 255;
+                memcpy(gSdvRecentBootLines[slot], p, rlen);
+                gSdvRecentBootLines[slot][rlen] = '\0';
                 sdvBootParseSingleLine(p, len, &major);
             }
             if (!nl) break;

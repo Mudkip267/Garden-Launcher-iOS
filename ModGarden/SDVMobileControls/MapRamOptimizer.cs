@@ -266,6 +266,10 @@ namespace SDVMobileControls
                 {
                     if (ch == null || ch.portraitOverridden)
                         return;
+                    if (ch is StardewValley.Monsters.Monster ||
+                        ch is StardewValley.Characters.Pet ||
+                        ch is StardewValley.Characters.Horse)
+                        return;
 
                     Texture2D curTex = _fNpcPortrait.GetValue(ch) as Texture2D;
                     bool shouldRefresh = reloadAll;
@@ -277,14 +281,25 @@ namespace SDVMobileControls
                         else if (!string.IsNullOrEmpty(ch.Name))
                         {
                             string baseKey = "portraits/" + ch.Name.ToLowerInvariant();
-                            if (invalidatedNormKeys.Contains(baseKey))
+                            string texKey = null;
+                            try
+                            {
+                                string tn = ch.getTextureName();
+                                if (!string.IsNullOrEmpty(tn))
+                                    texKey = "portraits/" + tn.ToLowerInvariant();
+                            }
+                            catch { }
+                            if (invalidatedNormKeys.Contains(baseKey) ||
+                                (!string.IsNullOrEmpty(texKey) && invalidatedNormKeys.Contains(texKey)))
                                 shouldRefresh = true;
                             else
                             {
                                 string prefix = baseKey + "_";
+                                string texPrefix = !string.IsNullOrEmpty(texKey) ? (texKey + "_") : null;
                                 foreach (string ik in invalidatedNormKeys)
                                 {
-                                    if (ik.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                                    if (ik.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
+                                        (!string.IsNullOrEmpty(texPrefix) && ik.StartsWith(texPrefix, StringComparison.OrdinalIgnoreCase)))
                                     {
                                         shouldRefresh = true;
                                         break;
@@ -297,17 +312,13 @@ namespace SDVMobileControls
                     if (!shouldRefresh)
                         return;
 
-                    if (!ch.IsVillager && curTex == null)
-                        return;
-
                     _fNpcPortrait.SetValue(ch, null);
-                    if (reloadAll)
-                    {
-                        try { ch.LastAppearanceId = null; } catch { }
-                    }
+                    // Always reset LastAppearanceId so ChooseAppearance() re-evaluates Data/Characters
+                    // seasonal/weather/location portrait overrides even on partial AssetsInvalidated!
+                    try { ch.LastAppearanceId = null; } catch { }
                     refreshedNpcs++;
 
-                    if (isLocalOrEvent || ReferenceEquals(ch.currentLocation, currentLoc))
+                    if (reloadAll || isLocalOrEvent || ReferenceEquals(ch.currentLocation, currentLoc))
                     {
                         try
                         {
@@ -333,7 +344,7 @@ namespace SDVMobileControls
 
                 if (refreshedNpcs > 0 || unlinkedCacheKeys > 0)
                 {
-                    _monitor?.Log($"[PortraitSync:{reason}] Refreshed {refreshedNpcs} NPCs ({eagerReloaded} local eager, {unlinkedCacheKeys} cached Portraits/* reset for fresh Content Patcher load).", LogLevel.Info);
+                    _monitor?.Log($"[PortraitSync:{reason}] Refreshed {refreshedNpcs} NPCs ({eagerReloaded} eager, {unlinkedCacheKeys} cached Portraits/* reset for fresh Content Patcher load).", LogLevel.Info);
                 }
             }
             catch (Exception ex)
@@ -341,6 +352,40 @@ namespace SDVMobileControls
                 _monitor?.Log($"[PortraitSync:{reason}] Error: {ex.Message}", LogLevel.Trace);
             }
             return refreshedNpcs;
+        }
+
+        /// <summary>
+        /// Ensures NPCs in the newly entered location re-evaluate seasonal/indoor/weather/festival
+        /// portrait appearances (handles Content Patcher packs keyed on LocationName / IsOutdoors).
+        /// </summary>
+        public void RefreshLocationPortraits(GameLocation loc)
+        {
+            if (!Context.IsWorldReady || loc == null || !EnsureReflection(Game1.content) || _fNpcPortrait == null)
+                return;
+            try
+            {
+                var chars = loc.characters;
+                if (chars == null || chars.Count == 0)
+                    return;
+                for (int i = 0; i < chars.Count; i++)
+                {
+                    NPC ch = chars[i];
+                    if (ch == null || ch.portraitOverridden)
+                        continue;
+                    if (ch is StardewValley.Monsters.Monster ||
+                        ch is StardewValley.Characters.Pet ||
+                        ch is StardewValley.Characters.Horse)
+                        continue;
+                    Texture2D curTex = _fNpcPortrait.GetValue(ch) as Texture2D;
+                    if (curTex == null || curTex.IsDisposed || string.IsNullOrEmpty(ch.LastAppearanceId))
+                    {
+                        _fNpcPortrait.SetValue(ch, null);
+                        try { ch.LastAppearanceId = null; } catch { }
+                        try { ch.ChooseAppearance(null); } catch { }
+                    }
+                }
+            }
+            catch { }
         }
 
         public static string NormalizePortraitKey(string raw) => NormalizeAssetKey(raw);
@@ -364,10 +409,20 @@ namespace SDVMobileControls
                     if (uid.IndexOf("vietnam", StringComparison.OrdinalIgnoreCase) >= 0 ||
                         uid.IndexOf("viethoa", StringComparison.OrdinalIgnoreCase) >= 0 ||
                         uid.IndexOf("translation", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        uid.IndexOf("portrait", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        uid.IndexOf("anime", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        uid.IndexOf("seasonal", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        uid.IndexOf("character", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        uid.IndexOf("outfit", StringComparison.OrdinalIgnoreCase) >= 0 ||
                         name.IndexOf("vietnam", StringComparison.OrdinalIgnoreCase) >= 0 ||
                         name.IndexOf("viethoa", StringComparison.OrdinalIgnoreCase) >= 0 ||
                         name.IndexOf("việt", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                        name.IndexOf("font", StringComparison.OrdinalIgnoreCase) >= 0)
+                        name.IndexOf("font", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        name.IndexOf("portrait", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        name.IndexOf("anime", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        name.IndexOf("seasonal", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        name.IndexOf("character", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        name.IndexOf("outfit", StringComparison.OrdinalIgnoreCase) >= 0)
                         continue;
                     if (!string.IsNullOrEmpty(mod.Manifest.Name))
                         _cpPackNames.Add(mod.Manifest.Name);

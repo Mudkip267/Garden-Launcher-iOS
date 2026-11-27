@@ -583,6 +583,7 @@ namespace SDVMobileControls
             if (e != null && e.IsLocalPlayer)
             {
                 try { RamOptimizer?.OnWarped(e.NewLocation); } catch { }
+                try { RamOptimizer?.RefreshLocationPortraits(e.NewLocation); } catch { }
                 if (!_shaderDiagRanOutdoor && e.NewLocation != null && e.NewLocation.IsOutdoors)
                 {
                     _shaderDiagRanOutdoor = true;

@@ -14,17 +14,30 @@ jobs:
       - name: Checkout Fork
         uses: actions/checkout@v4
 
-      - name: Download Verified Base Garden-Launcher-1.1.1-iOS26-27.ipa
+      - name: Download Verified Base v1.1.1 IPA + Proven Stable v1.0.2 Runtime DLLs
         run: |
-          mkdir -p work/stage
+          mkdir -p work/stage work/v102
           curl -fsSL -o work/base-v1.1.1.ipa "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.1.1/Garden-Launcher-1.1.1-iOS26-27.ipa"
           ACTUAL_SHA=$(shasum -a 256 work/base-v1.1.1.ipa | awk '{print tolower($1)}')
           EXPECTED_SHA="f9db0cd6bb1a2ee1e80e49dab9e7e4a9e0fd1859b459e4f89ec8eeb022305feb"
           if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
-            echo "SHA-256 mismatch: $ACTUAL_SHA != $EXPECTED_SHA"
+            echo "v1.1.1 SHA-256 mismatch: $ACTUAL_SHA != $EXPECTED_SHA"
             exit 1
           fi
           unzip -q work/base-v1.1.1.ipa -d work/stage
+
+          # Also download proven zero-crash v1.0.2-mobileux IPA so we replace the crashing v1.1.1
+          # MonoGame.Framework.dll (XactSound/AddCue/PlatformGetData/GamePad IL patches that SIGSEGV 0x10000009d)
+          # and SDViOSTouchControls*.dll (v1.1.1 PureGamepad IL hacks) with the verified v1.0.2-mobileux runtime DLLs!
+          curl -fsSL -o work/stable-v1.0.2-mobileux.ipa "https://github.com/Mudkip267/Garden-Launcher-iOS/releases/download/v1.0.2-mobileux/Garden-Launcher-1.0.2-iOS26-27-MobileUX.ipa"
+          unzip -q -o work/stable-v1.0.2-mobileux.ipa \
+            "Payload/SDViOS.app/MonoGame.Framework.dll" \
+            "Payload/SDViOS.app/Mods/SDViOSTouchControls/SDViOSTouchControls.dll" \
+            "Payload/SDViOS.app/Mods/SDViOSTouchControls/SDViOSTouchControlsMod.dll" \
+            -d work/v102
+          cp -f work/v102/Payload/SDViOS.app/MonoGame.Framework.dll work/stage/Payload/SDViOS.app/MonoGame.Framework.dll
+          cp -f work/v102/Payload/SDViOS.app/Mods/SDViOSTouchControls/SDViOSTouchControls.dll work/stage/Payload/SDViOS.app/Mods/SDViOSTouchControls/SDViOSTouchControls.dll
+          cp -f work/v102/Payload/SDViOS.app/Mods/SDViOSTouchControls/SDViOSTouchControlsMod.dll work/stage/Payload/SDViOS.app/Mods/SDViOSTouchControls/SDViOSTouchControlsMod.dll
           ls -la work/stage/Payload/SDViOS.app
 
       - name: Compile Updated SDVModGarden.framework (arm64 iOS + CoreHaptics Controller Rumble)
@@ -100,7 +113,7 @@ jobs:
           }
           Write-Host "[SDViOS.dll OK] 100% untouched original ARM64 entry assembly ($hostSha)"
 
-          # 2. Patch GC.WaitForPendingFinalizers -> Nop in SDViOSTouchControls*.dll
+          # 2. Verify SDViOSTouchControls*.dll have 0 WaitForPendingFinalizers calls (patching if any remain)
           $tcDir = Join-Path $appDir "Mods/SDViOSTouchControls"
           $tcResolver = New-Object Mono.Cecil.DefaultAssemblyResolver
           $tcResolver.AddSearchDirectory($appDir)
@@ -110,11 +123,9 @@ jobs:
           $tcRp.AssemblyResolver = $tcResolver
           $tcRp.ReadWrite = $false
 
-          $totalDeadlocksPatched = 0
           foreach ($dllName in @("SDViOSTouchControls.dll", "SDViOSTouchControlsMod.dll")) {
               $tcPath = Join-Path $tcDir $dllName
               if (-not (Test-Path $tcPath)) { throw "Missing $tcPath" }
-              $tmpTc = "$tcPath.patched.tmp"
               $tAsm = [Mono.Cecil.AssemblyDefinition]::ReadAssembly($tcPath, $tcRp)
               $patched = 0
               try {
@@ -130,13 +141,18 @@ jobs:
                           }
                       }
                   }
-                  if ($patched -lt 2) { throw "Expected >=2 WaitForPendingFinalizers in ${dllName}, found $patched" }
-                  $tAsm.Write($tmpTc)
-              } finally {
+                  if ($patched -gt 0) {
+                      $tmpTc = "$tcPath.patched.tmp"
+                      $tAsm.Write($tmpTc)
+                      $tAsm.Dispose()
+                      Move-Item -Force $tmpTc $tcPath
+                  } else {
+                      $tAsm.Dispose()
+                  }
+              } catch {
                   $tAsm.Dispose()
+                  throw
               }
-              Move-Item -Force $tmpTc $tcPath
-              $totalDeadlocksPatched += $patched
 
               $vTc = [Mono.Cecil.AssemblyDefinition]::ReadAssembly($tcPath, $tcRp)
               try {
@@ -150,20 +166,19 @@ jobs:
                       }
                   }
                   if ($rem -ne 0) { throw "Deadlock patch readback failed on ${dllName}: $rem WaitForPendingFinalizers calls remain!" }
-                  Write-Host "[EXIT-TO-TITLE DEADLOCK FIX OK] ${dllName}: patched $patched WaitForPendingFinalizers -> Nop (remaining=0)"
+                  Write-Host "[EXIT-TO-TITLE DEADLOCK FIX OK] ${dllName}: verified 0 WaitForPendingFinalizers (newly patched=$patched)"
               } finally {
                   $vTc.Dispose()
               }
           }
 
-          # 3. Verify MonoGame.Framework.dll Audio + UIIS2 + CopyFromTexture + PlatformGetData + GamePad hook
+          # 3. Verify proven stable MonoGame.Framework.dll Audio + UIIS2 CueDefinition + CopyFromTexture
           $mgDll = Join-Path $appDir "MonoGame.Framework.dll"
           $vMg = [Mono.Cecil.AssemblyDefinition]::ReadAssembly($mgDll, $tcRp)
           try {
               $mMod = $vMg.MainModule
               $sb = $mMod.GetType("Microsoft.Xna.Framework.Audio.SoundBank")
               $ex = $sb.Methods | Where-Object { $_.Name -eq "Exists" -and $_.Parameters.Count -eq 1 } | Select-Object -First 1
-              $addCue = $sb.Methods | Where-Object { $_.Name -eq "AddCue" } | Select-Object -First 1
               $cd = $mMod.GetType("Microsoft.Xna.Framework.Audio.CueDefinition")
               $lb = $cd.NestedTypes | Where-Object { $_.Name -eq "LimitBehavior" }
               $ilF = $cd.Fields | Where-Object { $_.Name -eq "instanceLimit" }
@@ -171,18 +186,12 @@ jobs:
               $ss = $cd.Methods | Where-Object { $_.Name -eq "SetSound" -and $_.Parameters.Count -eq 4 -and $_.Parameters[0].ParameterType.FullName -eq "Microsoft.Xna.Framework.Audio.SoundEffect" }
               $tex = $mMod.GetType("Microsoft.Xna.Framework.Graphics.Texture2D")
               $cf = $tex.Methods | Where-Object { $_.Name -eq "CopyFromTexture" } | Select-Object -First 1
-              $pg = $tex.Methods | Where-Object { $_.Name -eq "PlatformGetData" } | Select-Object -First 1
-              $gp = $mMod.GetType("Microsoft.Xna.Framework.Input.GamePad")
-              $gpHook = $gp.Fields | Where-Object { $_.Name -eq "ExternalGetStateHook" }
               if (-not $ex -or $ex.Body.Instructions.Count -lt 10 -or
-                  -not $addCue -or $addCue.Body.Instructions.Count -lt 50 -or
                   -not $lb -or -not $ilF -or -not $lbF -or -not $ss -or
-                  -not $cf -or $cf.Body.Instructions.Count -lt 80 -or
-                  -not $pg -or $pg.Body.ExceptionHandlers.Count -lt 1 -or
-                  -not $gpHook) {
+                  -not $cf -or $cf.Body.Instructions.Count -lt 80) {
                   throw "MonoGame.Framework.dll readback check failed!"
               }
-              Write-Host "[MonoGame OK] SoundBank.Exists=$($ex.Body.Instructions.Count), AddCue=$($addCue.Body.Instructions.Count), CopyFromTexture=$($cf.Body.Instructions.Count), PlatformGetData EH=$($pg.Body.ExceptionHandlers.Count), ExternalGetStateHook OK"
+              Write-Host "[MonoGame OK] SoundBank.Exists=$($ex.Body.Instructions.Count), CueDefinition UIIS2 OK, CopyFromTexture=$($cf.Body.Instructions.Count)"
           } finally {
               $vMg.Dispose()
           }

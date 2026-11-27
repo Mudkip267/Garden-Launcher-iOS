@@ -628,6 +628,15 @@ static void syncBundledMobileControls(NSString *docsPath) {
                     [sd writeToFile:dp options:NSDataWritingAtomic error:nil];
                 }
             }
+            // Write the untouched official SDViOS.dll embedded resource SHA-256 so GameHost.EnsureDefaultModsDeployed()
+            // never overwrites our WaitForPendingFinalizers-patched SDViOSTouchControls*.dll while keeping SDViOS.dll 100% original.
+            NSString *embStampPath = join(dstTouchMod, @".embedded_sha256");
+            NSString *officialEmbSha = @"29C5A1D9E6EFF1A4F303F1EAC3672EE927FE487310AB0CBEA1F95DB46BDD3704";
+            NSString *curEmbSha = [NSString stringWithContentsOfFile:embStampPath encoding:NSUTF8StringEncoding error:nil];
+            if (![[curEmbSha stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] isEqualToString:officialEmbSha]) {
+                sdvPrepareWritableFileTarget(embStampPath);
+                [officialEmbSha writeToFile:embStampPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            }
         }
         if (sdvActiveHotPatchInfo() != nil) {
             sdvDeployActiveHotPatchFiles(docsPath);
@@ -692,26 +701,33 @@ static NSUInteger syncContentPackLocaleFallbacks(NSString *docsPath) {
                     [nameLow containsString:@"việt hóa"] || [nameLow containsString:@"vietnamese"] ||
                     [nameLow containsString:@"viethoa"]) continue;
 
-        // Fast pre-check: inspect content.json + non-asset JSONs BEFORE walking huge assets/ trees!
+                // Fast pre-check: inspect content.json BEFORE walking sub-JSONs; only enter assets/ if content.json uses "Include"!
                 NSData *rootCj = [NSData dataWithContentsOfFile:join(packDir, @"content.json") options:NSDataReadingMappedIfSafe error:nil];
                 BOOL usesLanguageToken = NO;
+                BOOL hasIncludeAction = NO;
                 if (rootCj.length > 0 && rootCj.length <= 2 * 1024 * 1024) {
                     NSString *cjs = [[NSString alloc] initWithData:rootCj encoding:NSUTF8StringEncoding];
-                    if (cjs && [cjs rangeOfString:@"{{language}}" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-                        usesLanguageToken = YES;
+                    if (cjs) {
+                        if ([cjs rangeOfString:@"{{language}}" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                            usesLanguageToken = YES;
+                        } else if ([cjs rangeOfString:@"\"include\"" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                            hasIncludeAction = YES;
+                        }
                     }
                 }
-                if (!usesLanguageToken) {
+                if (!usesLanguageToken && hasIncludeAction) {
                     NSDirectoryEnumerator *je = [fm() enumeratorAtPath:packDir];
-                    for (NSString *jRel in je) {
-                        NSString *ft = je.fileAttributes.fileType;
+                    NSString *jRel = nil;
+                    while ((jRel = [je nextObject])) { @autoreleasepool {
                         NSString *topSub = jRel.pathComponents.firstObject.lowercaseString;
-                        if ([ft isEqualToString:NSFileTypeDirectory] && [topSub isEqualToString:@"i18n"]) {
+                        if ([topSub isEqualToString:@"i18n"]) {
                             [je skipDescendants];
                             continue;
                         }
-                        if (![ft isEqualToString:NSFileTypeRegular] || ![jRel.pathExtension.lowercaseString isEqualToString:@"json"]) continue;
-                        if ([jRel.lowercaseString isEqualToString:@"content.json"] || [jRel.lowercaseString isEqualToString:@"manifest.json"]) continue;
+                        if ([jRel.pathExtension caseInsensitiveCompare:@"json"] != NSOrderedSame) continue;
+                        if ([jRel caseInsensitiveCompare:@"content.json"] == NSOrderedSame ||
+                            [jRel caseInsensitiveCompare:@"manifest.json"] == NSOrderedSame) continue;
+                        if (![je.fileAttributes.fileType isEqualToString:NSFileTypeRegular]) continue;
                         NSData *jd = [NSData dataWithContentsOfFile:join(packDir, jRel) options:NSDataReadingMappedIfSafe error:nil];
                         if (jd.length > 0 && jd.length <= 1024 * 1024) {
                             NSString *js = [[NSString alloc] initWithData:jd encoding:NSUTF8StringEncoding];
@@ -720,18 +736,18 @@ static NSUInteger syncContentPackLocaleFallbacks(NSString *docsPath) {
                                 break;
                             }
                         }
-                    }
+                    }}
                 }
                 if (!usesLanguageToken) continue;
 
                 NSMutableArray<NSString *> *packFiles = [NSMutableArray array];
                 NSDirectoryEnumerator *fe = [fm() enumeratorAtPath:packDir];
                 NSString *fRel = nil;
-                while ((fRel = [fe nextObject])) {
+                while ((fRel = [fe nextObject])) { @autoreleasepool {
                     if ([fe.fileAttributes.fileType isEqualToString:NSFileTypeRegular]) {
                         [packFiles addObject:fRel];
                     }
-                }
+                }}
 
                 // Create 0-byte APFS copy-on-write clones (*.en.<ext> -> *.vi.<ext>, *_en.<ext> -> *_vi.<ext>, en/ -> vi/)
                 // Uses copyItemAtPath (APFS clonefile, st_nlink=1) instead of linkItemAtPath (hardlink st_nlink=2 breaks iOS AFC).

@@ -40,9 +40,10 @@ def prepare_binary(path, dependency=None, sig_capacity=128*1024):
     commands = bytearray()
     if dependency:
         name = dependency.encode() + b"\0"
-        length = (24+len(name)+7) & ~7
-        commands.extend(struct.pack("<6I", 12,length,24,0,0x10000,0x10000)+name.ljust(length-24,b"\0"))
-        count += 1
+        if name not in data[32:end]:
+            length = (24+len(name)+7) & ~7
+            commands.extend(struct.pack("<6I", 12,length,24,0,0x10000,0x10000)+name.ljust(length-24,b"\0"))
+            count += 1
     if sig is None:
         offset = (len(data)+15) & ~15
         # Scale code-signature capacity dynamically for large Hybrid AOT binaries (~42 MB+ needs >600 KB!)
@@ -137,9 +138,14 @@ def build(base, library, signer, output, host_dll=None, touch_dll=None, lidgren_
                 for item in smapi_src.infolist():
                     if not item.is_dir() and item.filename.startswith(si_prefix):
                         rel = item.filename[len(si_prefix):]
+                        if rel.lower().endswith(".xml"):
+                            continue
                         dst = smapi_dir / "smapi-internal" / rel
                         dst.parent.mkdir(parents=True, exist_ok=True)
                         dst.write_bytes(smapi_src.read(item.filename))
+                if (smapi_dir / "smapi-internal").is_dir():
+                    for xml_doc in list((smapi_dir / "smapi-internal").rglob("*.xml")):
+                        xml_doc.unlink(missing_ok=True)
                 # Supplement non-AOT compatibility helper DLLs if missing from an upstream Hybrid AOT base IPA
                 if extra_smapi_zip is not None:
                     for helper_dll in (
@@ -158,7 +164,7 @@ def build(base, library, signer, output, host_dll=None, touch_dll=None, lidgren_
         prepare_binary(fw/FRAMEWORK, sig_capacity=48*1024)
         (fw/"Info.plist").write_bytes(plistlib.dumps(dict(CFBundleExecutable=FRAMEWORK,
             CFBundleName=FRAMEWORK,CFBundleIdentifier="dev.stardewmobile.gardenkit",
-            CFBundlePackageType="FMWK",CFBundleVersion="102",CFBundleShortVersionString="1.0.2",
+            CFBundlePackageType="FMWK",CFBundleVersion="111",CFBundleShortVersionString="1.1.1",
             MinimumOSVersion=min_ios,CFBundleSupportedPlatforms=["iPhoneOS"])))
         # Remove stale debug get-task-allow archived-expanded-entitlements.xcent (can conflict with Enterprise/TXM signers on iOS 26/27)
         stale_xcent = app / "archived-expanded-entitlements.xcent"
@@ -168,23 +174,29 @@ def build(base, library, signer, output, host_dll=None, touch_dll=None, lidgren_
         mc_src = mod_root / "SDVMobileControls"
         mc_dll = mc_src / "bin" / "Release" / "net6.0" / "SDVMobileControls.dll"
         mc_man = mc_src / "manifest.json"
-        if mc_dll.is_file() and mc_man.is_file():
-            mc_dst = fw / "BundledMods" / "SDVMobileControls"
-            mc_dst.mkdir(parents=True, exist_ok=True)
-            (mc_dst / "manifest.json").write_bytes(mc_man.read_bytes())
-            (mc_dst / "SDVMobileControls.dll").write_bytes(mc_dll.read_bytes())
+        if not mc_dll.is_file() or not mc_man.is_file():
+            raise FileNotFoundError(f"Missing required SDVMobileControls build output: {mc_dll}")
+        mc_dst = fw / "BundledMods" / "SDVMobileControls"
+        mc_dst.mkdir(parents=True, exist_ok=True)
+        (mc_dst / "manifest.json").write_bytes(mc_man.read_bytes())
+        (mc_dst / "SDVMobileControls.dll").write_bytes(mc_dll.read_bytes())
         for boot_asset in ("boot_bg.jpg", "boot_title_main.png", "boot_title_sub.png"):
             ba_path = mod_root / boot_asset
-            if ba_path.is_file():
-                (fw / boot_asset).write_bytes(ba_path.read_bytes())
+            if not ba_path.is_file():
+                raise FileNotFoundError(f"Missing required boot screen asset: {ba_path}")
+            (fw / boot_asset).write_bytes(ba_path.read_bytes())
         (app/"orchard.png").write_bytes((mod_root/"orchard.png").read_bytes())
         if host_dll:
             (app/"SDViOS.dll").write_bytes(Path(host_dll).read_bytes())
+            wrote_mg = False
             for mg_name in ("v7-monogame.dll", "v6-monogame.dll", "v5-monogame.dll"):
                 mg_candidate = Path(host_dll).parent / mg_name
                 if mg_candidate.is_file():
                     (app/"MonoGame.Framework.dll").write_bytes(mg_candidate.read_bytes())
+                    wrote_mg = True
                     break
+            if not wrote_mg:
+                raise FileNotFoundError(f"Missing patched MonoGame.Framework.dll (v7-monogame.dll) beside {host_dll}")
         if touch_dll:
             td = Path(touch_dll).read_bytes()
             (app/"Mods"/"SDViOSTouchControls"/"SDViOSTouchControls.dll").write_bytes(td)
@@ -198,8 +210,8 @@ def build(base, library, signer, output, host_dll=None, touch_dll=None, lidgren_
         info = plistlib.loads((app/"Info.plist").read_bytes())
         info.update(
             MinimumOSVersion=min_ios,
-            CFBundleShortVersionString="1.0.2",
-            CFBundleVersion="1.0.2",
+            CFBundleShortVersionString="1.1.1",
+            CFBundleVersion="1.1.1",
             UIFileSharingEnabled=True,
             LSSupportsOpeningDocumentsInPlace=True,
             UIApplicationSupportsIndirectInputEvents=True,
@@ -249,21 +261,25 @@ def build(base, library, signer, output, host_dll=None, touch_dll=None, lidgren_
             )
             icon_src = mod_root / "GardenLauncherIcons"
             if icon_src.is_dir():
-                icons_sub = app / "AppIcons"
-                icons_sub.mkdir(exist_ok=True)
-                old_ico = icons_sub / "app_icon.ico"
-                if old_ico.exists():
-                    old_ico.unlink()
+                shutil.rmtree(app / "AppIcons", ignore_errors=True)
+                for stale_icon in list(app.glob("iTunesArtwork*")) + list(app.glob("AppIcon512*")) + list(app.glob("AppIcon1024*")):
+                    stale_icon.unlink(missing_ok=True)
+                allowed_prefixes = (
+                    "AppIcon20x20",
+                    "AppIcon29x29",
+                    "AppIcon40x40",
+                    "AppIcon60x60",
+                    "AppIcon76x76",
+                    "AppIcon83.5x83.5",
+                )
                 for ipng in icon_src.glob("*.png"):
-                    ib = ipng.read_bytes()
-                    (icons_sub / ipng.name).write_bytes(ib)
-                    if ipng.name != "iTunesArtwork@2x.png":
-                        (app / ipng.name).write_bytes(ib)
+                    if ipng.name.startswith(allowed_prefixes):
+                        (app / ipng.name).write_bytes(ipng.read_bytes())
         (app/"Info.plist").write_bytes(plistlib.dumps(info,fmt=plistlib.FMT_BINARY))
         subprocess.run([signer,"-a","-f",str(app)],cwd=temp,check=True)
         pending = Path(output).with_suffix(".building")
         try:
-            with zipfile.ZipFile(pending,"w",compression=zipfile.ZIP_DEFLATED,compresslevel=4) as out:
+            with zipfile.ZipFile(pending,"w",compression=zipfile.ZIP_DEFLATED,compresslevel=9) as out:
                 for p in sorted(app.rglob("*")):
                     if not p.is_file():
                         continue
@@ -274,7 +290,7 @@ def build(base, library, signer, output, host_dll=None, touch_dll=None, lidgren_
                     executable=p.name in {"SDViOS",FRAMEWORK,"libSkiaSharp"} or p.suffix==".dylib"
                     original_mode = original.getinfo(name).external_attr >> 16 if name in original.NameToInfo else 0
                     entry.external_attr=(0o100755 if executable else (original_mode or 0o100644))<<16
-                    out.writestr(entry,p.read_bytes(),compresslevel=4)
+                    out.writestr(entry,p.read_bytes(),compresslevel=9)
             with zipfile.ZipFile(pending) as result:
                 assert result.testzip() is None
                 if launcher_only:

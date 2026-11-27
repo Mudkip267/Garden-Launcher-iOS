@@ -38,6 +38,7 @@ namespace SDVMobileControls
         private readonly IModHelper _helper;
         private readonly IMonitor _monitor;
         private readonly string _pruneFlagPath;
+        private readonly string _gcFlagPath;
 
         // Track pure Pathoschild.ContentPatcher content packs (zero C# code -> safe to prune dead copies)
         private readonly HashSet<string> _cpPackNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -75,6 +76,7 @@ namespace SDVMobileControls
             string gardenDir = Path.Combine(docs, ".garden");
             try { Directory.CreateDirectory(gardenDir); } catch { }
             _pruneFlagPath = Path.Combine(gardenDir, "sdv_prune_now.flag");
+            _gcFlagPath = Path.Combine(gardenDir, "sdv_gc_now.flag");
         }
 
         public void OnGameLaunched()
@@ -119,7 +121,6 @@ namespace SDVMobileControls
             RecordCurrentMapTileSheets();
             EnsureCriticalTexturesIntact(Game1.currentLocation);
             // NEVER run blocking compacting Gen2 GC right as the player wakes up on bed — prevents wake-up freeze!
-            // Also skip prune on fresh load when there are no off-screen tilesheets to evict yet.
             if (_knownTileSheetKeys.Count <= 4)
                 return;
             RunPrune(keepRecentOffscreen: 1, runGc: false, blockingGc: false, reason: "DayStarted");
@@ -136,11 +137,11 @@ namespace SDVMobileControls
                 if (Game1.content != null)
                 {
                     if (Game1.bobbersTexture == null || Game1.bobbersTexture.IsDisposed)
-                        Game1.bobbersTexture = Game1.content.Load<Texture2D>("TileSheets\bobbers");
+                        Game1.bobbersTexture = Game1.content.Load<Texture2D>("TileSheets\\bobbers");
                     if (Game1.mouseCursors == null || Game1.mouseCursors.IsDisposed)
                         Game1.mouseCursors = Game1.content.Load<Texture2D>("LooseSprites/Cursors");
                     if (Game1.animations == null || Game1.animations.IsDisposed)
-                        Game1.animations = Game1.content.Load<Texture2D>("TileSheets\animations");
+                        Game1.animations = Game1.content.Load<Texture2D>("TileSheets\\animations");
                 }
                 if (loc?.Map != null && EnsureReflection(Game1.content) && _fTileSheetTextures != null && Game1.mapDisplayDevice != null)
                 {
@@ -165,7 +166,7 @@ namespace SDVMobileControls
         {
             if (!Context.IsWorldReady)
                 return;
-            if (++_flagPollCounter < 60)
+            if (++_flagPollCounter < 30)
                 return;
             _flagPollCounter = 0;
             try
@@ -174,7 +175,9 @@ namespace SDVMobileControls
                     return;
                 string mode = "";
                 try { mode = File.ReadAllText(_pruneFlagPath)?.Trim() ?? ""; } catch { }
-                File.Delete(_pruneFlagPath);
+                try { File.Delete(_pruneFlagPath); } catch { }
+                // Consume companion sdv_gc_now.flag if also present so TouchVirtualPad.CheckManualGcFlag never runs a duplicate blocking Gen2 GC!
+                try { if (File.Exists(_gcFlagPath)) File.Delete(_gcFlagPath); } catch { }
                 bool critical = string.Equals(mode, "CRIT", StringComparison.OrdinalIgnoreCase);
                 RunPrune(keepRecentOffscreen: 0, runGc: true, blockingGc: critical, reason: critical ? "AutoCritGC" : "ManualGC");
             }
@@ -278,7 +281,6 @@ namespace SDVMobileControls
                                 shouldRefresh = true;
                             else
                             {
-                                // Match seasonal/beach variants like portraits/abigail_winter or portraits/abigail_spring
                                 string prefix = baseKey + "_";
                                 foreach (string ik in invalidatedNormKeys)
                                 {
@@ -295,7 +297,6 @@ namespace SDVMobileControls
                     if (!shouldRefresh)
                         return;
 
-                    // Only touch villagers (or NPCs that already had a loaded portrait)
                     if (!ch.IsVillager && curTex == null)
                         return;
 

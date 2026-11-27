@@ -1,6 +1,7 @@
 using System;
 using Microsoft.Xna.Framework;
 using StardewValley;
+using StardewValley.BellsAndWhistles;
 using StardewValley.Buildings;
 using StardewValley.GameData.Buildings;
 using StardewValley.GameData.Crops;
@@ -42,6 +43,79 @@ namespace SDVMobileControls
 
             Vector2 tv = new Vector2(tile.X, tile.Y);
             Vector2 tileCenter = new Vector2(tile.X * 64f + 32f, tile.Y * 64f + 32f);
+
+            // 0. Playable Event / Festival support (Game1.eventUp && CurrentEvent.playerControlSequence):
+            //    During festivals (Egg Festival, Luau, Fair, Spirit's Eve, Feast of the Winter Star, Ice Festival…),
+            //    villagers live in CurrentEvent.actors and interactive props/eggs live in CurrentEvent.props!
+            if (Game1.eventUp)
+            {
+                try
+                {
+                    Event ev = Game1.CurrentEvent;
+                    if (ev != null && ev.playerControlSequence)
+                    {
+                        if (ev.actors != null)
+                        {
+                            NPC evHitNpc = null;
+                            float bestEvNpcD = 78f;
+                            for (int i = 0; i < ev.actors.Count; i++)
+                            {
+                                NPC npc = ev.actors[i];
+                                if (npc == null || npc is Monster)
+                                    continue;
+                                Rectangle nbb = npc.GetBoundingBox();
+                                Rectangle nSprite = new Rectangle(nbb.X - 12, nbb.Y - 48, nbb.Width + 24, nbb.Height + 56);
+                                float d = nSprite.Contains((int)tileCenter.X, (int)tileCenter.Y)
+                                    ? 0f
+                                    : Vector2.Distance(nbb.Center.ToVector2(), tileCenter);
+                                if (d < bestEvNpcD)
+                                {
+                                    bestEvNpcD = d;
+                                    evHitNpc = npc;
+                                }
+                            }
+                            if (evHitNpc != null)
+                            {
+                                Rectangle nbb = evHitNpc.GetBoundingBox();
+                                intent.Kind = TileActionKind.Interact;
+                                intent.StopAdjacent = true;
+                                intent.AllowSameTile = true;
+                                intent.HasResolvedTile = true;
+                                intent.ResolvedTile = new Point((int)Math.Floor(nbb.Center.X / 64f), (int)Math.Floor(nbb.Center.Y / 64f));
+                                return intent;
+                            }
+                        }
+
+                        if (ev.props != null)
+                        {
+                            for (int i = 0; i < ev.props.Count; i++)
+                            {
+                                SObject prop = ev.props[i];
+                                if (prop != null && prop.TileLocation == tv)
+                                {
+                                    intent.Kind = TileActionKind.Interact;
+                                    intent.StopAdjacent = true;
+                                    intent.AllowSameTile = true;
+                                    return intent;
+                                }
+                            }
+                        }
+
+                        if (!string.IsNullOrEmpty(loc.doesTileHaveProperty(tile.X, tile.Y, "Action", "Buildings")))
+                        {
+                            intent.Kind = TileActionKind.Interact;
+                            intent.StopAdjacent = true;
+                            intent.PreferCardinal = true;
+                            return intent;
+                        }
+
+                        // Unless the festival explicitly enables tools (e.g. Ice Festival fishing contest), skip normal world tool targets
+                        if (!ev.canPlayerUseTool())
+                            return intent;
+                    }
+                }
+                catch { }
+            }
 
             // 1. Living monster near tapped tile
             Monster tappedMonster = FindMonsterNear(loc, tileCenter, 78f);
@@ -534,6 +608,11 @@ namespace SDVMobileControls
             // 8. Building / Action tile (Mailboxes + floating letter envelope, Farm Buildings, Doors, TV, Bed, Calendar, Shipping Bin, Shop Counters)
             try
             {
+                // 8a-0. Universal Minecarts (BusStop, Town, Quarry/Mountain, Mine Entrance, modded MinecartTransport, upper-half sprites),
+                //       Ginger Island Parrot Express / Walnut Perches, and Vanilla 1.6 Hardcoded Tile-Index Actions!
+                if (TryResolveMinecartOrLocationTileAction(loc, tile, who, ref intent))
+                    return intent;
+
                 // 8a. Farm main mailbox (Stardew 1.6 stores Farmhouse & Cabins as Buildings — Mailbox is NOT in map "Action" property!)
                 // Also match 1 tile ABOVE the mailbox so tapping the bobbing white letter envelope opens the mail!
                 if (loc is Farm farm)
@@ -790,14 +869,14 @@ namespace SDVMobileControls
             }
             catch { }
 
-            // 8d. MineShaft / Skull Cavern Ladders (173), Shafts/Holes (174), Exit Ladder (115), Elevator (112), Coal Carts (194), Shrine (284)
+            // 8d. MineShaft / Skull Cavern Ladders (173), Shafts/Holes (174), Exit Ladder (115), Elevator (112), Coal Carts (194), Shrine (284), 1.6 Calico Statues (315..317)
             // MineShaft.checkAction reads Buildings layer tile indices directly (NOT map "Action" properties!).
             if (loc is MineShaft)
             {
                 try
                 {
                     int mIdx = loc.getTileIndexAt(tile.X, tile.Y, "Buildings", "mine");
-                    if (mIdx == 173 || mIdx == 174 || mIdx == 112 || mIdx == 115 || mIdx == 194 || mIdx == 284)
+                    if (mIdx == 173 || mIdx == 174 || mIdx == 112 || mIdx == 115 || mIdx == 194 || mIdx == 284 || (mIdx >= 315 && mIdx <= 317))
                     {
                         intent.Kind = TileActionKind.Interact;
                         intent.StopAdjacent = true;
@@ -805,13 +884,13 @@ namespace SDVMobileControls
                         intent.AllowSameTile = (mIdx == 173 || mIdx == 174);
                         return intent;
                     }
-                    // Upper half of tall exit ladder (115) or elevator (112)
+                    // Upper half (Front layer sprite) of tall exit ladder (115), elevator (112), coal cart/bag (194), shrine (284), or Calico Statue (315..317)
                     int belowIdx = loc.getTileIndexAt(tile.X, tile.Y + 1, "Buildings", "mine");
-                    if (belowIdx == 112 || belowIdx == 115)
+                    if (belowIdx == 112 || belowIdx == 115 || belowIdx == 194 || belowIdx == 284 || (belowIdx >= 315 && belowIdx <= 317))
                     {
                         intent.Kind = TileActionKind.Interact;
                         intent.StopAdjacent = true;
-                        intent.PreferCardinal = true;
+                        intent.PreferCardinal = (belowIdx == 112 || belowIdx == 115);
                         intent.HasResolvedTile = true;
                         intent.ResolvedTile = new Point(tile.X, tile.Y + 1);
                         return intent;
@@ -842,6 +921,278 @@ namespace SDVMobileControls
             }
 
             return intent;
+        }
+
+        private static bool IsMinecartTileAt(GameLocation loc, int tx, int ty)
+        {
+            if (loc == null) return false;
+            try
+            {
+                string act = loc.doesTileHaveProperty(tx, ty, "Action", "Buildings");
+                if (!string.IsNullOrEmpty(act) &&
+                    (act.StartsWith("MinecartTransport", StringComparison.OrdinalIgnoreCase) ||
+                     act.StartsWith("Minecart", StringComparison.OrdinalIgnoreCase)) &&
+                    !act.StartsWith("MinecartGame", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                // BusStop & Mountain (Quarry) check "outdoors" tilesheet indices 958, 1080, 1081 in checkAction!
+                int outIdx = loc.getTileIndexAt(tx, ty, "Buildings", "outdoors");
+                if (outIdx == 958 || outIdx == 1080 || outIdx == 1081)
+                    return true;
+
+                // Town (Blacksmith) checks "Landscape" tilesheet indices 958, 1080, 1081 in Town.checkAction!
+                int landIdx = loc.getTileIndexAt(tx, ty, "Buildings", "Landscape");
+                if (landIdx == 958 || landIdx == 1080 || landIdx == 1081)
+                    return true;
+
+                // Fallback for custom/recolored maps whose outdoor sheet id contains "outdoors" or "landscape" with different casing
+                var bLayer = loc.Map?.GetLayer("Buildings");
+                if (bLayer != null && tx >= 0 && ty >= 0 && tx < bLayer.LayerWidth && ty < bLayer.LayerHeight)
+                {
+                    var t = bLayer.Tiles[tx, ty];
+                    if (t != null && (t.TileIndex == 958 || t.TileIndex == 1080 || t.TileIndex == 1081))
+                    {
+                        string sheetId = t.TileSheet?.Id ?? "";
+                        if (sheetId.IndexOf("outdoors", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            sheetId.IndexOf("landscape", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private static bool HasAnyWalkableNeighbor8(GameLocation loc, int gx, int gy, Farmer who)
+        {
+            Point pTile = who != null ? who.TilePoint : Point.Zero;
+            for (int dy = -1; dy <= 1; dy++)
+            {
+                for (int dx = -1; dx <= 1; dx++)
+                {
+                    if (dx == 0 && dy == 0) continue;
+                    int nx = gx + dx;
+                    int ny = gy + dy;
+                    if ((who != null && nx == pTile.X && ny == pTile.Y) || PathFinder.IsTileWalkable(loc, nx, ny, who))
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        private static Point ResolveAccessibleMinecartTile(GameLocation loc, Point mcTile, Farmer who)
+        {
+            Point pTile = who != null ? who.TilePoint : mcTile;
+            // Minecarts are often 2 tiles wide (1080 + 1081) tucked into rock alcoves where one half has 0 walkable neighbors.
+            // Pick the Minecart tile in [mcTile.X - 1 .. mcTile.X + 1] that has a walkable neighbor and is closest to the player!
+            Point best = mcTile;
+            bool bestReachable = HasAnyWalkableNeighbor8(loc, mcTile.X, mcTile.Y, who);
+            int bestDist = Math.Abs(mcTile.X - pTile.X) + Math.Abs(mcTile.Y - pTile.Y);
+
+            for (int dx = -1; dx <= 1; dx += 2)
+            {
+                int cx = mcTile.X + dx;
+                int cy = mcTile.Y;
+                if (!IsMinecartTileAt(loc, cx, cy))
+                    continue;
+                bool reach = HasAnyWalkableNeighbor8(loc, cx, cy, who);
+                int dist = Math.Abs(cx - pTile.X) + Math.Abs(cy - pTile.Y);
+                if ((reach && !bestReachable) || (reach == bestReachable && dist < bestDist))
+                {
+                    best = new Point(cx, cy);
+                    bestReachable = reach;
+                    bestDist = dist;
+                }
+            }
+            return best;
+        }
+
+        private static bool TryResolveMinecartOrLocationTileAction(GameLocation loc, Point tile, Farmer who, ref TileIntent intent)
+        {
+            if (loc == null || who == null) return false;
+            try
+            {
+                // 1. Minecart on tapped tile OR 1 tile below (when player taps the upper coal/rim Front-layer sprite of a Minecart!)
+                Point? hitMinecart = null;
+                if (IsMinecartTileAt(loc, tile.X, tile.Y))
+                    hitMinecart = tile;
+                else if (!PathFinder.IsTileWalkable(loc, tile.X, tile.Y, who) && IsMinecartTileAt(loc, tile.X, tile.Y + 1))
+                    hitMinecart = new Point(tile.X, tile.Y + 1);
+                else if (IsMinecartTileAt(loc, tile.X, tile.Y + 1) && loc.Map?.GetLayer("Front")?.Tiles[tile.X, tile.Y] != null)
+                    hitMinecart = new Point(tile.X, tile.Y + 1);
+
+                if (hitMinecart.HasValue)
+                {
+                    Point resolvedMc = ResolveAccessibleMinecartTile(loc, hitMinecart.Value, who);
+                    intent.Kind = TileActionKind.Interact;
+                    intent.StopAdjacent = true;
+                    intent.PreferCardinal = false; // Minecart works from all 8 adjacent tiles (including diagonal alcoves!)
+                    intent.HasResolvedTile = true;
+                    intent.ResolvedTile = resolvedMc;
+                    return true;
+                }
+
+                // 2. Ginger Island Parrot Express (ParrotPlatform) & Golden Walnut Upgrade Perches
+                if (loc is IslandLocation isl)
+                {
+                    Vector2 tv = new Vector2(tile.X, tile.Y);
+                    if (isl.parrotPlatforms != null)
+                    {
+                        for (int i = 0; i < isl.parrotPlatforms.Count; i++)
+                        {
+                            ParrotPlatform pp = isl.parrotPlatforms[i];
+                            if (pp != null && pp.OccupiesTile(tv))
+                            {
+                                // ParrotPlatform is 3x2 tiles and triggers automatically when stepping onto (baseX + 1, baseY + 1)
+                                int px = (int)(pp.position.X / 64f) + 1;
+                                int py = (int)(pp.position.Y / 64f) + 1;
+                                intent.Kind = TileActionKind.None;
+                                intent.StopAdjacent = false;
+                                intent.HasResolvedTile = true;
+                                intent.ResolvedTile = new Point(px, py);
+                                return true;
+                            }
+                        }
+                    }
+                    if (isl.parrotUpgradePerches != null)
+                    {
+                        foreach (ParrotUpgradePerch perch in isl.parrotUpgradePerches)
+                        {
+                            if (perch == null) continue;
+                            Point pt = perch.tilePosition.Value;
+                            if ((tile.X == pt.X && tile.Y == pt.Y) || (tile.X == pt.X && tile.Y == pt.Y - 1))
+                            {
+                                intent.Kind = TileActionKind.Interact;
+                                intent.StopAdjacent = true;
+                                intent.PreferCardinal = false;
+                                intent.HasResolvedTile = true;
+                                intent.ResolvedTile = pt;
+                                return true;
+                            }
+                        }
+                    }
+                }
+
+                // 3. Hardcoded Vanilla 1.6 Location.checkAction tile indices (not stored in map "Action" properties!)
+                if (loc is BusStop)
+                {
+                    int bIdx = loc.getTileIndexAt(tile.X, tile.Y, "Buildings", "outdoors");
+                    int bBelow = loc.getTileIndexAt(tile.X, tile.Y + 1, "Buildings", "outdoors");
+                    if (bIdx == 1057 || bBelow == 1057) // Pam's Desert Bus Ticket Machine
+                    {
+                        intent.Kind = TileActionKind.Interact;
+                        intent.StopAdjacent = true;
+                        intent.PreferCardinal = false;
+                        intent.HasResolvedTile = true;
+                        intent.ResolvedTile = (bIdx == 1057) ? tile : new Point(tile.X, tile.Y + 1);
+                        return true;
+                    }
+                }
+                else if (loc is CommunityCenter || string.Equals(loc.Name, "AbandonedJojaMart", StringComparison.Ordinal))
+                {
+                    int ccIdx = loc.getTileIndexAt(tile.X, tile.Y, "Buildings", null);
+                    if (ccIdx == 1799 || (ccIdx >= 1824 && ccIdx <= 1833)) // Golden Bundle Scrolls & Missing Bundle!
+                    {
+                        intent.Kind = TileActionKind.Interact;
+                        intent.StopAdjacent = true;
+                        intent.PreferCardinal = false;
+                        return true;
+                    }
+                }
+                else if (loc is VolcanoDungeon)
+                {
+                    int vIdx = loc.getTileIndexAt(tile.X, tile.Y, "Buildings", "dungeon");
+                    if (vIdx == 77 || vIdx == 367) // Leave Volcano shortcut & Volcano Dwarf Shop!
+                    {
+                        intent.Kind = TileActionKind.Interact;
+                        intent.StopAdjacent = true;
+                        intent.PreferCardinal = false;
+                        return true;
+                    }
+                }
+                else if (loc is Sewer)
+                {
+                    int sIdx = loc.getTileIndexAt(tile.X, tile.Y, "Buildings", "st");
+                    int sBelow = loc.getTileIndexAt(tile.X, tile.Y + 1, "Buildings", "st");
+                    if (sIdx == 21 || sIdx == 84 || sBelow == 21) // Sewer exit ladder & Krobus Shadow Shop!
+                    {
+                        intent.Kind = TileActionKind.Interact;
+                        intent.StopAdjacent = true;
+                        intent.PreferCardinal = false;
+                        if (sIdx != 21 && sIdx != 84 && sBelow == 21)
+                        {
+                            intent.HasResolvedTile = true;
+                            intent.ResolvedTile = new Point(tile.X, tile.Y + 1);
+                        }
+                        return true;
+                    }
+                }
+                else if (loc is Beach)
+                {
+                    int bchIdx = loc.getTileIndexAt(tile.X, tile.Y, "Buildings", "untitled tile sheet");
+                    if (bchIdx == 284 || bchIdx == 496) // Tide-pool 300-wood bridge repair & Willy sign
+                    {
+                        intent.Kind = TileActionKind.Interact;
+                        intent.StopAdjacent = true;
+                        intent.PreferCardinal = false;
+                        return true;
+                    }
+                }
+                else if (loc is Woods)
+                {
+                    int wIdx = loc.getTileIndexAt(tile.X, tile.Y, "Buildings", "untitled tile sheet");
+                    int wBelow = loc.getTileIndexAt(tile.X, tile.Y + 1, "Buildings", "untitled tile sheet");
+                    if (wIdx == 1140 || wBelow == 1140) // Old Master Cannoli statue
+                    {
+                        intent.Kind = TileActionKind.Interact;
+                        intent.StopAdjacent = true;
+                        intent.PreferCardinal = false;
+                        if (wIdx != 1140)
+                        {
+                            intent.HasResolvedTile = true;
+                            intent.ResolvedTile = new Point(tile.X, tile.Y + 1);
+                        }
+                        return true;
+                    }
+                }
+                else if (loc is Railroad)
+                {
+                    int rIdx = loc.getTileIndexAt(tile.X, tile.Y, "Buildings", "untitled tile sheet");
+                    if (rIdx == 287) // Witch's Cave Dark Talisman barrier
+                    {
+                        intent.Kind = TileActionKind.Interact;
+                        intent.StopAdjacent = true;
+                        intent.PreferCardinal = false;
+                        return true;
+                    }
+                }
+                else if (loc is Desert)
+                {
+                    if (tile.Y == 24 && ((tile.X >= 41 && tile.X <= 42) || (tile.X >= 34 && tile.X <= 38))) // Desert Trader & Camel
+                    {
+                        intent.Kind = TileActionKind.Interact;
+                        intent.StopAdjacent = true;
+                        intent.PreferCardinal = false;
+                        return true;
+                    }
+                }
+                else if (loc is BoatTunnel)
+                {
+                    if ((tile.X == 6 && tile.Y == 8) || (tile.X == 8 && tile.Y == 10)) // Willy's Boat Hull & Anchor repairs
+                    {
+                        intent.Kind = TileActionKind.Interact;
+                        intent.StopAdjacent = true;
+                        intent.PreferCardinal = false;
+                        return true;
+                    }
+                }
+            }
+            catch { }
+            return false;
         }
 
         private static Point FindClosestBuildingTile(Building b, Point fromTile)
@@ -877,6 +1228,8 @@ namespace SDVMobileControls
                 return intent;
 
             if (loc == null || who == null)
+                return new TileIntent { Kind = TileActionKind.None, PreferredToolSlot = -1 };
+            if (Game1.eventUp && (Game1.CurrentEvent == null || !Game1.CurrentEvent.canPlayerUseTool()))
                 return new TileIntent { Kind = TileActionKind.None, PreferredToolSlot = -1 };
 
             Vector2 tv = new Vector2(tile.X, tile.Y);
@@ -967,6 +1320,8 @@ namespace SDVMobileControls
             }
 
             if (loc == null || who == null || who.UsingTool || who.isRidingHorse() || who.swimming.Value || who.health <= 0)
+                return false;
+            if (Game1.eventUp && (Game1.CurrentEvent == null || !Game1.CurrentEvent.canPlayerUseTool()))
                 return false;
 
             Vector2 playerCenter = who.GetBoundingBox().Center.ToVector2();

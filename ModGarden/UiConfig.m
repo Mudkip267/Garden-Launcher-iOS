@@ -189,56 +189,48 @@ static long long sdvNextRev(void) {
     NSString *gd = sdvHiddenGardenDir(docsPath);
 
     NSString *ovPath = [gd stringByAppendingPathComponent:@"touch_overlay_config.json"];
-    NSString *mouseStr = (_mouseMode == 1) ? @"\"Trackpad\"" : ((_mouseMode == 2) ? @"\"Disabled\"" : @"\"PointAndClick\"");
-    NSDictionary<NSString *, NSString *> *updates = @{
-        @"Opacity": [NSString stringWithFormat:@"%.2f", sdvClampf(_opacity, 0.15f, 1.00f)],
-        @"Scale": [NSString stringWithFormat:@"%.2f", sdvClampf(_padScale, 0.50f, 2.00f)],
-        @"LeftHanded": _leftHanded ? @"true" : @"false",
-        @"ShowKeyboardBtn": _showKeyboardBtn ? @"true" : @"false",
-        @"ShowMenuBtn": _showMenuBtn ? @"true" : @"false",
-        @"ShowHotkeyDrawerBtn": _showHotkeyDrawerBtn ? @"true" : @"false",
-        @"MouseControlMode": mouseStr
-    };
+    NSString *mouseStr = (_mouseMode == 1) ? @"Trackpad" : ((_mouseMode == 2) ? @"Disabled" : @"PointAndClick");
 
-    NSMutableArray<NSString *> *keys = [NSMutableArray array];
-    NSMutableDictionary<NSString *, NSString *> *vals = [NSMutableDictionary dictionary];
-    NSMutableDictionary<NSString *, NSString *> *lowerToKey = [NSMutableDictionary dictionary];
-
-    NSString *existing = [NSString stringWithContentsOfFile:ovPath encoding:NSUTF8StringEncoding error:nil];
-    if (existing.length) {
-        NSCharacterSet *trim = [NSCharacterSet whitespaceAndNewlineCharacterSet];
-        NSCharacterSet *quotes = [NSCharacterSet characterSetWithCharactersInString:@"\" "];
-        for (NSString *rawLine in [existing componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
-            NSString *line = [rawLine stringByTrimmingCharactersInSet:trim];
-            if ([line hasSuffix:@","]) line = [line substringToIndex:line.length - 1];
-            NSRange colon = [line rangeOfString:@":"];
-            if (colon.location == NSNotFound) continue;
-            NSString *k = [[line substringToIndex:colon.location] stringByTrimmingCharactersInSet:quotes];
-            NSString *v = [[line substringFromIndex:colon.location + 1] stringByTrimmingCharactersInSet:trim];
-            if (!k.length || !v.length) continue;
-            if (!lowerToKey[k.lowercaseString]) {
-                [keys addObject:k];
-                lowerToKey[k.lowercaseString] = k;
-            }
-            vals[lowerToKey[k.lowercaseString]] = v;
+    NSMutableDictionary *rootObj = nil;
+    NSData *existingData = [NSData dataWithContentsOfFile:ovPath options:0 error:nil];
+    if (existingData.length) {
+        id parsed = [NSJSONSerialization JSONObjectWithData:existingData options:NSJSONReadingMutableContainers error:nil];
+        if (![parsed isKindOfClass:NSMutableDictionary.class]) {
+            NSData *san = stripJson5ForIOS14(existingData);
+            parsed = [NSJSONSerialization JSONObjectWithData:san options:NSJSONReadingMutableContainers error:nil];
+        }
+        if ([parsed isKindOfClass:NSMutableDictionary.class]) {
+            rootObj = (NSMutableDictionary *)parsed;
         }
     }
+    if (!rootObj) rootObj = [NSMutableDictionary dictionary];
 
-    NSArray<NSString *> *orderedUpdates = @[@"Opacity", @"Scale", @"LeftHanded", @"ShowKeyboardBtn", @"ShowMenuBtn", @"ShowHotkeyDrawerBtn", @"MouseControlMode"];
-    for (NSString *uk in orderedUpdates) {
-        NSString *existingKey = lowerToKey[uk.lowercaseString];
-        if (existingKey) vals[existingKey] = updates[uk];
-        else { [keys addObject:uk]; lowerToKey[uk.lowercaseString] = uk; vals[uk] = updates[uk]; }
+    // Preserve case-insensitive existing keys while keeping HotkeyKeys / HotkeyLabels JSON arrays 100% intact!
+    NSDictionary<NSString *, id> *typedUpdates = @{
+        @"Opacity": @(round(sdvClampf(_opacity, 0.15f, 1.00f) * 100.0) / 100.0),
+        @"Scale": @(round(sdvClampf(_padScale, 0.50f, 2.00f) * 100.0) / 100.0),
+        @"LeftHanded": @(_leftHanded),
+        @"ShowKeyboardBtn": @(_showKeyboardBtn),
+        @"ShowMenuBtn": @(_showMenuBtn),
+        @"ShowHotkeyDrawerBtn": @(_showHotkeyDrawerBtn),
+        @"MouseControlMode": mouseStr
+    };
+    for (NSString *uk in @[@"Opacity", @"Scale", @"LeftHanded", @"ShowKeyboardBtn", @"ShowMenuBtn", @"ShowHotkeyDrawerBtn", @"MouseControlMode"]) {
+        NSString *matchKey = nil;
+        for (id ek in rootObj.allKeys) {
+            if ([ek isKindOfClass:NSString.class] && [(NSString *)ek caseInsensitiveCompare:uk] == NSOrderedSame) {
+                matchKey = (NSString *)ek;
+                break;
+            }
+        }
+        rootObj[matchKey ?: uk] = typedUpdates[uk];
     }
 
-    NSMutableString *outJson = [NSMutableString stringWithString:@"{\n"];
-    for (NSUInteger i = 0; i < keys.count; i++) {
-        NSString *k = keys[i];
-        NSString *comma = (i + 1 < keys.count) ? @"," : @"";
-        [outJson appendFormat:@"  \"%@\": %@%@\n", k, vals[k], comma];
+    NSData *outJsonData = [NSJSONSerialization dataWithJSONObject:rootObj options:NSJSONWritingPrettyPrinted error:nil];
+    if (outJsonData.length) {
+        sdvPrepareWritableFileTarget(ovPath);
+        [outJsonData writeToFile:ovPath options:NSDataWritingAtomic error:nil];
     }
-    [outJson appendString:@"}\n"];
-    [outJson writeToFile:ovPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
 
     [self saveLiveCfgOnlyToDocuments:docsPath];
 }
@@ -292,6 +284,7 @@ static long long sdvNextRev(void) {
 @property(nonatomic, assign) BOOL leftHandedMobile;
 @property(nonatomic, assign) float joyDeadzone; // 0.05..0.25
 @property(nonatomic, assign) BOOL respectMuteSwitch;
+@property(nonatomic, assign) BOOL pureGamepadMode;
 @property(nonatomic, strong) NSMutableArray<SDVCustomKeyEntry *> *customKeys;
 
 +(instancetype)defaults;
@@ -343,6 +336,7 @@ static long long sdvNextRev(void) {
     c.leftHandedMobile = NO;
     c.joyDeadzone = 0.11f;
     c.respectMuteSwitch = [NSUserDefaults.standardUserDefaults boolForKey:@"sdv_respect_mute_v1"];
+    c.pureGamepadMode = NO;
     c.customKeys = [NSMutableArray array];
     return c;
 }
@@ -350,7 +344,11 @@ static long long sdvNextRev(void) {
 +(instancetype)loadFromDocuments:(NSString *)docsPath {
     SDVMobileCtrlConfig *c = [self defaults];
     if (!docsPath.length) return c;
-    NSString *p = [sdvHiddenGardenDir(docsPath) stringByAppendingPathComponent:@"sdv_mobile_ctrl.cfg"];
+    NSString *gd = sdvHiddenGardenDir(docsPath);
+    NSString *gpFlag = [gd stringByAppendingPathComponent:@"sdv_gamepad_only.flag"];
+    BOOL flagOnDisk = [NSFileManager.defaultManager fileExistsAtPath:gpFlag];
+    c.pureGamepadMode = flagOnDisk;
+    NSString *p = [gd stringByAppendingPathComponent:@"sdv_mobile_ctrl.cfg"];
     NSString *raw = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil];
     if (!raw.length) return c;
     for (NSString *line in [raw componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
@@ -441,6 +439,8 @@ static long long sdvNextRev(void) {
             c.joyDeadzone = sdvClampf(v.floatValue, 0.05f, 0.25f);
         } else if ([k isEqualToString:@"respectmute"]) {
             c.respectMuteSwitch = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
+        } else if ([k isEqualToString:@"puregamepad"]) {
+            c.pureGamepadMode = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
         } else if ([k isEqualToString:@"ckey"] && c.customKeys.count < 16) {
             NSArray<NSString *> *pts = [v componentsSeparatedByString:@"|"];
             if (pts.count >= 7 && pts[2].integerValue > 0) {
@@ -535,7 +535,7 @@ static long long sdvNextRev(void) {
     }
 
     NSMutableString *s = [NSMutableString stringWithFormat:
-        @"mode=%ld\nautotool=%d\nautoattack=%d\npinchzoom=%d\ntouchhint2=%d\ntoputility=%d\nswapbuttons=%d\nmobileshopdrag=%d\nautokeyboard=%d\nsafecrafting=%d\nautosavemin=%ld\nreduceweather=%d\nuiscale=%.2f\nbuttonscale=%.2f\nemotebtn=%d\nautorepeat=%d\nrestoretool=%d\nspecbtn=%d\nautocombatmode=%d\nautohidegp=%d\nautopause=%d\nfishhaptic=%d\nsafepadding=%ld\nsafedialogue=%d\nverticaltb=%d\ntbsize=%.2f\ntbopacity=%.2f\ntbcols=%ld\ntbrows=%ld\ntbside=%ld\ntby=%.3f\ntoolhitbox=%d\nsaver30fps=%d\npixelopacity=%.2f\nlefthanded=%d\njoydeadzone=%.2f\nrespectmute=%d\n",
+        @"mode=%ld\nautotool=%d\nautoattack=%d\npinchzoom=%d\ntouchhint2=%d\ntoputility=%d\nswapbuttons=%d\nmobileshopdrag=%d\nautokeyboard=%d\nsafecrafting=%d\nautosavemin=%ld\nreduceweather=%d\nuiscale=%.2f\nbuttonscale=%.2f\nemotebtn=%d\nautorepeat=%d\nrestoretool=%d\nspecbtn=%d\nautocombatmode=%d\nautohidegp=%d\nautopause=%d\nfishhaptic=%d\nsafepadding=%ld\nsafedialogue=%d\nverticaltb=%d\ntbsize=%.2f\ntbopacity=%.2f\ntbcols=%ld\ntbrows=%ld\ntbside=%ld\ntby=%.3f\ntoolhitbox=%d\nsaver30fps=%d\npixelopacity=%.2f\nlefthanded=%d\njoydeadzone=%.2f\nrespectmute=%d\npuregamepad=%d\n",
         (long)MAX(1, MIN(4, self.mode)), self.autoTool ? 1 : 0, self.autoAttack ? 1 : 0,
         self.pinchZoom ? 1 : 0, self.showTouchHint ? 1 : 0,
         self.showTopUtility ? 1 : 0, self.swapRightButtons ? 1 : 0,
@@ -559,7 +559,8 @@ static long long sdvNextRev(void) {
         self.showToolHitLocation ? 1 : 0,
         (int)MAX(0, MIN(2, self.batterySaverFpsMode)),
         sdvClampf(self.pixelOpacity, 0.25f, 1.00f), self.leftHandedMobile ? 1 : 0,
-        sdvClampf(self.joyDeadzone, 0.05f, 0.25f), self.respectMuteSwitch ? 1 : 0];
+        sdvClampf(self.joyDeadzone, 0.05f, 0.25f), self.respectMuteSwitch ? 1 : 0,
+        self.pureGamepadMode ? 1 : 0];
     for (NSString *ex in extraLines) {
         [s appendFormat:@"%@\n", ex];
     }
@@ -568,6 +569,13 @@ static long long sdvNextRev(void) {
             (long)e.keyId, e.label ?: @"KEY", (long)e.keyCode, e.x, e.y, e.w, e.h];
     }
     [s writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+    NSString *gpFlag = [sdvHiddenGardenDir(docsPath) stringByAppendingPathComponent:@"sdv_gamepad_only.flag"];
+    if (self.pureGamepadMode) {
+        [@"1" writeToFile:gpFlag atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    } else {
+        [NSFileManager.defaultManager removeItemAtPath:gpFlag error:nil];
+    }
 }
 
 +(void)triggerEditLayoutInDocs:(NSString *)docsPath {

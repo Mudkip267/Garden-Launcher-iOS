@@ -13,20 +13,40 @@ namespace SDVMobileControls
         private static readonly int[] Dy = { -1, 0, 1, 0, -1, 1, 1, -1 };
         private static readonly float[] StepCost = { 1.0f, 1.0f, 1.0f, 1.0f, 1.414f, 1.414f, 1.414f, 1.414f };
 
+        // Reusable static A* buffers (0% per-tap GC churn; guarded against re-entrancy via _searchInUse)
+        private static readonly PriorityQueue<Point, float> SharedOpen = new PriorityQueue<Point, float>(MaxExploredNodes);
+        private static readonly Dictionary<long, Point> SharedCameFrom = new Dictionary<long, Point>(256);
+        private static readonly Dictionary<long, float> SharedGScore = new Dictionary<long, float>(256);
+        private static readonly HashSet<long> SharedClosed = new HashSet<long>(256);
+        private static readonly Dictionary<long, byte> SharedWalkCache = new Dictionary<long, byte>(256);
+        private static bool _searchInUse;
+
         private static long Pack(int x, int y) => ((long)x << 32) | (uint)y;
+
+        private static bool IsTileWalkableMemo(Dictionary<long, byte> cache, GameLocation loc, int tx, int ty, Farmer who)
+        {
+            if (cache == null)
+                return IsTileWalkable(loc, tx, ty, who);
+            long k = Pack(tx, ty);
+            if (cache.TryGetValue(k, out byte v))
+                return v != 0;
+            bool res = IsTileWalkable(loc, tx, ty, who);
+            cache[k] = res ? (byte)1 : (byte)0;
+            return res;
+        }
 
         public static bool IsTileWalkable(GameLocation loc, int tx, int ty, Farmer who)
         {
-            if (loc?.Map == null)
-                return false;
-
-            int mapW = loc.Map.Layers[0].LayerWidth;
-            int mapH = loc.Map.Layers[0].LayerHeight;
-            if (tx < 0 || ty < 0 || tx >= mapW || ty >= mapH)
+            if (loc?.Map?.Layers == null || loc.Map.Layers.Count == 0)
                 return false;
 
             try
             {
+                int mapW = loc.Map.Layers[0].LayerWidth;
+                int mapH = loc.Map.Layers[0].LayerHeight;
+                if (tx < 0 || ty < 0 || tx >= mapW || ty >= mapH)
+                    return false;
+
                 if (!loc.isTilePassable(new Location(tx, ty), Game1.viewport))
                     return false;
 
@@ -48,7 +68,26 @@ namespace SDVMobileControls
                     projectile: false,
                     ignoreCharacterRequirement: false,
                     skipCollisionEffects: true))
+                {
+                    // Stardew 1.6 Horse.squeezingThroughGate: mounted horses narrow their horizontal hitbox through open 1-tile Fence gates!
+                    if (riding && HasOpenFenceGateNear(loc, tx, ty))
+                    {
+                        var squeezedBox = new Microsoft.Xna.Framework.Rectangle(tx * 64 + 14, ty * 64 + 16, 36, 44);
+                        if (!loc.isCollidingPosition(
+                            squeezedBox,
+                            Game1.viewport,
+                            isFarmer: true,
+                            damagesFarmer: 0,
+                            glider: false,
+                            character: who,
+                            pathfinding: true,
+                            projectile: false,
+                            ignoreCharacterRequirement: false,
+                            skipCollisionEffects: true))
+                            return true;
+                    }
                     return false;
+                }
 
                 return true;
             }
@@ -56,6 +95,23 @@ namespace SDVMobileControls
             {
                 return false;
             }
+        }
+
+        private static bool HasOpenFenceGateNear(GameLocation loc, int tx, int ty)
+        {
+            if (loc?.objects == null) return false;
+            for (int dy = -1; dy <= 1; dy++)
+            {
+                for (int dx = -1; dx <= 1; dx++)
+                {
+                    if (loc.objects.TryGetValue(new Vector2(tx + dx, ty + dy), out StardewValley.Object obj) &&
+                        obj is Fence fence && fence.isGate.Value)
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
         }
 
         public static List<Point> FindPath(GameLocation loc, Point start, Point goal, Farmer who, bool stopAdjacent, bool preferCardinal = false)
@@ -66,116 +122,136 @@ namespace SDVMobileControls
             if (start == goal)
                 return new List<Point>();
 
-            // Check whether at least one cardinal neighbor of the goal is walkable (or is our current start tile)
-            bool requireCardinal = false;
-            if (stopAdjacent && preferCardinal)
+            bool ownsShared = !_searchInUse;
+            if (ownsShared)
             {
-                for (int i = 0; i < 4; i++)
+                _searchInUse = true;
+                SharedOpen.Clear();
+                SharedCameFrom.Clear();
+                SharedGScore.Clear();
+                SharedClosed.Clear();
+                SharedWalkCache.Clear();
+            }
+
+            var open = ownsShared ? SharedOpen : new PriorityQueue<Point, float>();
+            var cameFrom = ownsShared ? SharedCameFrom : new Dictionary<long, Point>(128);
+            var gScore = ownsShared ? SharedGScore : new Dictionary<long, float>(128);
+            var closed = ownsShared ? SharedClosed : new HashSet<long>();
+            var walkCache = ownsShared ? SharedWalkCache : new Dictionary<long, byte>(256);
+
+            try
+            {
+                // Check whether at least one cardinal neighbor of the goal is walkable (or is our current start tile)
+                bool requireCardinal = false;
+                if (stopAdjacent && preferCardinal)
                 {
-                    int cx = goal.X + Dx[i];
-                    int cy = goal.Y + Dy[i];
-                    if ((cx == start.X && cy == start.Y) || IsTileWalkable(loc, cx, cy, who))
+                    for (int i = 0; i < 4; i++)
                     {
-                        requireCardinal = true;
-                        break;
+                        int cx = goal.X + Dx[i];
+                        int cy = goal.Y + Dy[i];
+                        if ((cx == start.X && cy == start.Y) || IsTileWalkableMemo(walkCache, loc, cx, cy, who))
+                        {
+                            requireCardinal = true;
+                            break;
+                        }
                     }
                 }
-            }
 
-            if (stopAdjacent)
-            {
-                int adx = Math.Abs(start.X - goal.X);
-                int ady = Math.Abs(start.Y - goal.Y);
-                if (requireCardinal ? (adx + ady == 1) : (Math.Max(adx, ady) <= 1))
-                    return new List<Point>();
-            }
-
-            // If goal itself is blocked (e.g. chest, tree, rock, NPC), automatically aim for adjacent walkable tile
-            bool targetAdjacent = stopAdjacent || !IsTileWalkable(loc, goal.X, goal.Y, who);
-
-            var open = new PriorityQueue<Point, float>();
-            var cameFrom = new Dictionary<long, Point>(128);
-            var gScore = new Dictionary<long, float>(128);
-            var closed = new HashSet<long>();
-
-            long startKey = Pack(start.X, start.Y);
-            gScore[startKey] = 0f;
-            open.Enqueue(start, Heuristic(start, goal));
-
-            Point bestClosest = start;
-            float bestClosestDist = Heuristic(start, goal);
-            int explored = 0;
-
-            while (open.Count > 0 && explored < MaxExploredNodes)
-            {
-                Point cur = open.Dequeue();
-                long curKey = Pack(cur.X, cur.Y);
-                if (!closed.Add(curKey))
-                    continue;
-
-                explored++;
-
-                bool reached;
-                if (targetAdjacent)
+                if (stopAdjacent)
                 {
-                    int cdx = Math.Abs(cur.X - goal.X);
-                    int cdy = Math.Abs(cur.Y - goal.Y);
-                    reached = requireCardinal
-                        ? (cdx + cdy == 1)
-                        : (Math.Max(cdx, cdy) <= 1 && cur != goal);
-                }
-                else
-                {
-                    reached = (cur == goal);
+                    int adx = Math.Abs(start.X - goal.X);
+                    int ady = Math.Abs(start.Y - goal.Y);
+                    if (requireCardinal ? (adx + ady == 1) : (Math.Max(adx, ady) <= 1))
+                        return new List<Point>();
                 }
 
-                if (reached)
-                    return Reconstruct(cameFrom, cur, start);
+                // If goal itself is blocked (e.g. chest, tree, rock, NPC), automatically aim for adjacent walkable tile
+                bool targetAdjacent = stopAdjacent || !IsTileWalkableMemo(walkCache, loc, goal.X, goal.Y, who);
 
-                float h = Heuristic(cur, goal);
-                if (h < bestClosestDist && cur != start)
+                long startKey = Pack(start.X, start.Y);
+                gScore[startKey] = 0f;
+                open.Enqueue(start, Heuristic(start, goal));
+
+                Point bestClosest = start;
+                float bestClosestDist = Heuristic(start, goal);
+                int explored = 0;
+
+                while (open.Count > 0 && explored < MaxExploredNodes)
                 {
-                    bestClosestDist = h;
-                    bestClosest = cur;
-                }
-
-                float curG = gScore[curKey];
-
-                for (int i = 0; i < 8; i++)
-                {
-                    int nx = cur.X + Dx[i];
-                    int ny = cur.Y + Dy[i];
-                    long nKey = Pack(nx, ny);
-                    if (closed.Contains(nKey))
+                    Point cur = open.Dequeue();
+                    long curKey = Pack(cur.X, cur.Y);
+                    if (!closed.Add(curKey))
                         continue;
 
-                    if (!IsTileWalkable(loc, nx, ny, who))
-                        continue;
+                    explored++;
 
-                    // Prevent diagonal corner cutting through solid walls/fences
-                    if (i >= 4)
+                    bool reached;
+                    if (targetAdjacent)
                     {
-                        if (!IsTileWalkable(loc, cur.X + Dx[i], cur.Y, who) ||
-                            !IsTileWalkable(loc, cur.X, cur.Y + Dy[i], who))
+                        int cdx = Math.Abs(cur.X - goal.X);
+                        int cdy = Math.Abs(cur.Y - goal.Y);
+                        reached = requireCardinal
+                            ? (cdx + cdy == 1)
+                            : (Math.Max(cdx, cdy) <= 1 && cur != goal);
+                    }
+                    else
+                    {
+                        reached = (cur == goal);
+                    }
+
+                    if (reached)
+                        return Reconstruct(cameFrom, cur, start);
+
+                    float h = Heuristic(cur, goal);
+                    if (h < bestClosestDist && cur != start)
+                    {
+                        bestClosestDist = h;
+                        bestClosest = cur;
+                    }
+
+                    float curG = gScore[curKey];
+
+                    for (int i = 0; i < 8; i++)
+                    {
+                        int nx = cur.X + Dx[i];
+                        int ny = cur.Y + Dy[i];
+                        long nKey = Pack(nx, ny);
+                        if (closed.Contains(nKey))
                             continue;
-                    }
 
-                    float tentativeG = curG + StepCost[i];
-                    if (!gScore.TryGetValue(nKey, out float prevG) || tentativeG < prevG)
-                    {
-                        cameFrom[nKey] = cur;
-                        gScore[nKey] = tentativeG;
-                        float f = tentativeG + Heuristic(new Point(nx, ny), goal) * 1.05f;
-                        open.Enqueue(new Point(nx, ny), f);
+                        if (!IsTileWalkableMemo(walkCache, loc, nx, ny, who))
+                            continue;
+
+                        // Prevent diagonal corner cutting through solid walls/fences
+                        if (i >= 4)
+                        {
+                            if (!IsTileWalkableMemo(walkCache, loc, cur.X + Dx[i], cur.Y, who) ||
+                                !IsTileWalkableMemo(walkCache, loc, cur.X, cur.Y + Dy[i], who))
+                                continue;
+                        }
+
+                        float tentativeG = curG + StepCost[i];
+                        if (!gScore.TryGetValue(nKey, out float prevG) || tentativeG < prevG)
+                        {
+                            cameFrom[nKey] = cur;
+                            gScore[nKey] = tentativeG;
+                            float f = tentativeG + Heuristic(new Point(nx, ny), goal) * 1.05f;
+                            open.Enqueue(new Point(nx, ny), f);
+                        }
                     }
                 }
+
+                // Partial best-effort path if player tapped far across the map
+                if (bestClosest != start && bestClosestDist < Heuristic(start, goal) - 0.5f)
+                    return Reconstruct(cameFrom, bestClosest, start);
+
+                return null;
             }
-
-            // Partial best-effort path if player tapped far across the map
-            if (bestClosest != start && bestClosestDist < Heuristic(start, goal) - 0.5f)
-                return Reconstruct(cameFrom, bestClosest, start);
-
-            return null;
+            finally
+            {
+                if (ownsShared)
+                    _searchInUse = false;
+            }
         }
 
         private static float Heuristic(Point a, Point b)

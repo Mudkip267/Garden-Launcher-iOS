@@ -173,8 +173,8 @@ static void sdvInitBootAndCrashLogging(NSString *docsPath) {
         double ramGB = (double)NSProcessInfo.processInfo.physicalMemory / (1024.0 * 1024.0 * 1024.0);
         NSString *bid = NSBundle.mainBundle.bundleIdentifier ?: @"?";
         sdvBootLogFmt([NSString stringWithFormat:
-            @"[BOOT 1] Garden Launcher 1.0.2 | iOS %@ | Device=%@ | RAM=%.2f GB | Bundle=%@",
-            osVer, model, ramGB, bid]);
+            @"[BOOT 1] Garden Launcher %@ | iOS %@ | Device=%@ | RAM=%.2f GB | Bundle=%@",
+            sdvEffectiveAppVersion(), osVer, model, ramGB, bid]);
     } @catch (NSException *ex) { }
 }
 
@@ -639,6 +639,7 @@ static void sdvApplyAutoHideHomeIndicator(UIViewController *vc) {
 @interface SDVRamHudController : UIViewController
 @property(nonatomic, readonly) UIView *badgeView;
 -(void)stopMonitoring;
+-(void)setMonitoringPaused:(BOOL)paused;
 @end
 
 @implementation SDVRamHudController {
@@ -671,6 +672,15 @@ static void sdvApplyAutoHideHomeIndicator(UIViewController *vc) {
 -(void)stopMonitoring {
     [_link invalidate];
     _link = nil;
+}
+
+-(void)setMonitoringPaused:(BOOL)paused {
+    if (!_link) return;
+    if (!paused && _link.paused) {
+        _frames = 0;
+        _lastFpsStamp = CACurrentMediaTime();
+    }
+    _link.paused = paused;
 }
 
 -(void)viewDidLoad {
@@ -1580,7 +1590,10 @@ static UIImage *sdvLoadBootFrameworkImage(NSString *filename) {
     SDVPixelBadgeView *verPill = [SDVPixelBadgeView new];
     verPill.translatesAutoresizingMaskIntoConstraints = NO;
     UILabel *verPillLbl = [UILabel new];
-    verPillLbl.text = @"v1.0.2 · SMAPI 4.5.2";
+    NSString *effBootVer = sdvEffectiveAppVersion();
+    verPillLbl.text = [effBootVer isEqualToString:kSDVAppVersion]
+        ? (@"v" kSDVAppVersion @" · SMAPI 4.5.2")
+        : [NSString stringWithFormat:@"v%@ · SMAPI 4.5.2", effBootVer];
     verPillLbl.font = iosMonoDigits(10.5, UIFontWeightBold);
     verPillLbl.textColor = rgb(0xFFF0C4);
     verPillLbl.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1630,6 +1643,16 @@ static UIImage *sdvLoadBootFrameworkImage(NSString *filename) {
             [_mainTitleIv.widthAnchor constraintEqualToAnchor:_mainTitleIv.heightAnchor multiplier:mainAspect]
         ]];
         [titleStack addArrangedSubview:_mainTitleIv];
+    } else {
+        UILabel *mainFb = [UILabel new];
+        mainFb.text = @"STARDEW VALLEY";
+        mainFb.font = [UIFont systemFontOfSize:34.0 weight:UIFontWeightHeavy];
+        mainFb.textColor = rgb(0xFFE58F);
+        mainFb.layer.shadowColor = rgb(0x160902).CGColor;
+        mainFb.layer.shadowOpacity = 0.85;
+        mainFb.layer.shadowRadius = 6.0;
+        mainFb.layer.shadowOffset = CGSizeMake(0, 3);
+        [titleStack addArrangedSubview:mainFb];
     }
 
     // 6b. SECONDARY TITLE: ◆ ━━ [GARDEN LAUNCHER] ━━ ◆
@@ -2372,6 +2395,7 @@ static UIImage *sdvLoadBootFrameworkImage(NSString *filename) {
 @property(nonatomic, assign) BOOL autoOpenedSetup;
 @property(nonatomic, assign) BOOL gameDataReadyCached;
 @property(nonatomic, strong) NSTimer *hapticTimer;
+@property(nonatomic, assign) UIBackgroundTaskIdentifier bgSaveTaskId;
 -(BOOL)isGardenOpen;
 -(void)attachToGameWindows;
 -(void)showBootLoadingOverlayIfNeeded;
@@ -2515,6 +2539,7 @@ static void sdvExtSetGardenOpen(BOOL open);
     self = [super init];
     if (self) {
         _attachedWindows = [NSHashTable weakObjectsHashTable];
+        _bgSaveTaskId = UIBackgroundTaskInvalid;
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(syncRamHudVisibility) name:kSDVRamHudToggleNotification object:nil];
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onHighRamWarning:) name:kSDVRamHighWarningNotification object:nil];
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(onSceneOrAppNotification) name:UISceneDidActivateNotification object:nil];
@@ -2544,8 +2569,31 @@ static void sdvExtSetGardenOpen(BOOL open);
     self.hapticTimer = nil;
 }
 
+-(void)endBackgroundSaveGuardIfNeeded {
+    if (self.bgSaveTaskId != UIBackgroundTaskInvalid) {
+        UIBackgroundTaskIdentifier tid = self.bgSaveTaskId;
+        self.bgSaveTaskId = UIBackgroundTaskInvalid;
+        [UIApplication.sharedApplication endBackgroundTask:tid];
+    }
+}
+
 -(void)onAppDidEnterBackground {
     [self stopHapticTimer];
+    if (self.ramHudWindow && [self.ramHudWindow.rootViewController isKindOfClass:SDVRamHudController.class]) {
+        [(SDVRamHudController *)self.ramHudWindow.rootViewController setMonitoringPaused:YES];
+    }
+    // Protect any active end-of-day XML serialization or QuickSave write when user swipes Home!
+    if (self.bgSaveTaskId == UIBackgroundTaskInvalid) {
+        __weak typeof(self) weakSelf = self;
+        self.bgSaveTaskId = [UIApplication.sharedApplication beginBackgroundTaskWithName:@"GardenSaveFlushGuard" expirationHandler:^{
+            [weakSelf endBackgroundSaveGuardIfNeeded];
+        }];
+        if (self.bgSaveTaskId != UIBackgroundTaskInvalid) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(22 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [weakSelf endBackgroundSaveGuardIfNeeded];
+            });
+        }
+    }
 }
 
 -(void)onAudioModeChanged {
@@ -2621,6 +2669,10 @@ static void sdvExtSetGardenOpen(BOOL open);
 
 -(void)onSceneOrAppNotification {
     dispatch_async(dispatch_get_main_queue(), ^{
+        [self endBackgroundSaveGuardIfNeeded];
+        if (self.ramHudWindow && !self.ramHudWindow.hidden && [self.ramHudWindow.rootViewController isKindOfClass:SDVRamHudController.class]) {
+            [(SDVRamHudController *)self.ramHudWindow.rootViewController setMonitoringPaused:[self isGardenOpen]];
+        }
         sdvEnsureAudioSession("did-become-active");
         [self startHapticTimer];
         [self attachToGameWindows];
@@ -2724,8 +2776,10 @@ static void sdvExtSetGardenOpen(BOOL open);
         for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
             if (![scene isKindOfClass:UIWindowScene.class]) continue;
             for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-                if ([self isOwnWindow:w]) continue;
+                if ([self isOwnWindow:w] || w.hidden || [w isKindOfClass:SDVSceneHostWindow.class]) continue;
                 if (w.windowLevel >= UIWindowLevelAlert) continue;
+                NSString *wCls = NSStringFromClass(w.class) ?: @"";
+                if ([wCls hasPrefix:@"UITextEffects"] || [wCls hasPrefix:@"_UI"] || [wCls containsString:@"RemoteKeyboard"]) continue;
                 [candidates addObject:w];
             }
         }
@@ -2792,7 +2846,10 @@ static void sdvExtSetGardenOpen(BOOL open);
     if (self.bootLoadingDismissed || self.loadingWindow || [self isGardenOpen]) return;
     if (gSdvBootReadyPath[0] && access(gSdvBootReadyPath, F_OK) == 0) {
         self.bootLoadingDismissed = YES;
+        gSdvBootDone = 1;
         unlink(gSdvBootReadyPath);
+        NSString *bootDocs = [self docsPath];
+        if (bootDocs.length) sdvMarkHotPatchBootSucceeded(bootDocs);
         return;
     }
     UIWindow *game = [self gameWindow];
@@ -3021,6 +3078,8 @@ static void sdvExtSetGardenOpen(BOOL open);
     [self.bootPollTimer invalidate];
     self.bootPollTimer = nil;
     if (gSdvBootReadyPath[0]) unlink(gSdvBootReadyPath);
+    NSString *bootDocs = [fm() URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject.path;
+    if (bootDocs.length) sdvMarkHotPatchBootSucceeded(bootDocs);
 
     SDVPassThroughWindow *lw = self.loadingWindow;
     self.loadingWindow = nil;
@@ -3084,12 +3143,16 @@ static void sdvExtSetGardenOpen(BOOL open);
     NSDictionary *updToast = sdvAvailableLauncherUpdate(NO);
     NSTimeInterval holdSec = updToast ? 4.6 : 2.8;
     if (updToast) {
+        BOOL isHpToast = [updToast[@"canHotPatch"] boolValue];
         UIStackView *row = mkHStack(9);
-        UIImageView *ic = [[UIImageView alloc] initWithImage:sfIcon(@"arrow.down.circle.fill", 17, UIImageSymbolWeightSemibold)];
+        UIImageView *ic = [[UIImageView alloc] initWithImage:sfIcon(isHpToast ? @"bolt.circle.fill" : @"arrow.down.circle.fill", 17, UIImageSymbolWeightSemibold)];
         ic.tintColor = kTintGreen;
         [ic setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
         UIStackView *col = mkVStack(1.5);
-        UILabel *lbl1 = mkLabel([NSString stringWithFormat:@"Đã có Garden Launcher v%@ mới! (Chạm 3 ngón × 2 để xem)", updToast[@"version"]], 12.5, UIFontWeightSemibold, UIColor.whiteColor);
+        NSString *toastTitle = isHpToast
+            ? [NSString stringWithFormat:@"⚡ Đã có bản cập nhật nhanh v%@ (Không cần ký lại IPA · Chạm 3 ngón × 2)", updToast[@"version"]]
+            : [NSString stringWithFormat:@"Đã có Garden Launcher v%@ mới! (Chạm 3 ngón × 2 để xem)", updToast[@"version"]];
+        UILabel *lbl1 = mkLabel(toastTitle, 12.5, UIFontWeightSemibold, UIColor.whiteColor);
         lbl1.numberOfLines = 1;
         [col addArrangedSubview:lbl1];
         NSString *firstSum = [[(updToast[@"summary"] ?: @"") componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet] firstObject];
@@ -3665,6 +3728,11 @@ static void sdvBootParseSingleLine(const char *s, size_t len, BOOL *outMajor) {
 }
 
 __attribute__((visibility("default")))
+int32_t sdv_is_boot_done(void) {
+    return gSdvBootDone;
+}
+
+__attribute__((visibility("default")))
 void sdv_boot_on_log(const char *utf8Line) {
     if (gSdvBootDone || !utf8Line || !utf8Line[0]) return;
     @autoreleasepool {
@@ -3796,7 +3864,7 @@ int sdv_kb_show(const char *titleUtf8, const char *initialUtf8) {
             kw.backgroundColor = UIColor.clearColor;
             kw.windowLevel = UIWindowLevelAlert + 2;
 
-            UIViewController *hostVC = [UIViewController new];
+            SDVSceneHostViewController *hostVC = [SDVSceneHostViewController new];
             hostVC.view.backgroundColor = UIColor.clearColor;
             kw.rootViewController = hostVC;
             gSdvKbWindow = kw;
@@ -3863,9 +3931,17 @@ __attribute__((constructor)) static void startGardenControls(void) {
     @autoreleasepool {
         @try {
             NSString *docs = [fm() URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject.path;
+            NSString *hpBootNote = @"none";
             if (docs.length) {
-                // Migrate & hide all non-user game/runtime/config files BEFORE .NET GameHost initializes!
+                sdvRepairSandboxPermissions(docs);
+            }
+            // Initialize native crash & boot logger FIRST so constructor migrations are 100% protected & logged!
+            sdvInitBootAndCrashLogging(docs);
+            if (docs.length) {
+                // Migrate & hide all non-user game/runtime/config files + dropped Saves/ BEFORE .NET GameHost initializes!
                 sdvMigrateDocumentsToHiddenLayout(docs);
+                @try { sdvMigrateLegacyDocumentsSaves(docs); } @catch (NSException *ignored) { }
+                hpBootNote = sdvInitHotPatchOnBoot(docs);
                 NSString *gdir = sdvHiddenGardenDir(docs);
                 snprintf(gSdvPauseFlagPath, sizeof(gSdvPauseFlagPath), "%s/sdv_pause_now.flag", gdir.UTF8String);
                 snprintf(gSdvHapticFlagPath, sizeof(gSdvHapticFlagPath), "%s/sdv_haptic_bite.flag", gdir.UTF8String);
@@ -3881,6 +3957,7 @@ __attribute__((constructor)) static void startGardenControls(void) {
                 // Permanently prevent SMAPI LogManager.HandleMarkerFiles() -> System.Console.ReadKey()
                 // from throwing PlatformNotSupportedException on iOS after any previous crash or update!
                 NSArray<NSString *> *markerDirs = @[
+                    [docs stringByAppendingPathComponent:@"StardewValley/smapi-internal"],
                     [docs stringByAppendingPathComponent:@".game/smapi-internal"],
                     [docs stringByAppendingPathComponent:@"smapi-internal"],
                     [docs stringByAppendingPathComponent:@"ErrorLogs"]
@@ -3888,6 +3965,7 @@ __attribute__((constructor)) static void startGardenControls(void) {
                 NSArray<NSString *> *markerNames = @[
                     @"StardewModdingAPI.crash.marker",
                     @"StardewModdingAPI.update.marker",
+                    @"StardewModdingAPI.crash.marker",
                     @"SMAPI-crash.marker",
                     @"SMAPI-update.marker"
                 ];
@@ -3911,14 +3989,14 @@ __attribute__((constructor)) static void startGardenControls(void) {
             } else {
                 setenv("MONO_GC_PARAMS", "nursery-size=4m,soft-heap-limit=384m,evacuation-threshold=66", 1);
             }
-            sdvInitBootAndCrashLogging(docs);
             sdvBootLogFmt([NSString stringWithFormat:@"[GC] MONO_GC_PARAMS=%s", getenv("MONO_GC_PARAMS") ?: "?"]);
             sdvEnsureAudioSession("constructor");
             syncBundledLidgren(docs);
             NSString *smapiSyncNote = syncBundledSmapi(docs);
             syncBundledMobileControls(docs);
+            NSUInteger hpFiles = sdvDeployActiveHotPatchFiles(docs);
             NSUInteger cpFallbackLinked = syncContentPackLocaleFallbacks(docs);
-            sdvBootLogFmt([NSString stringWithFormat:@"[BOOT 2] Bundled Lidgren / SMAPI (%@) / SDVMobileControls synced (cpLocaleFallbacks=%lu)", smapiSyncNote ?: @"?", (unsigned long)cpFallbackLinked]);
+            sdvBootLogFmt([NSString stringWithFormat:@"[BOOT 2] Bundled Lidgren / SMAPI (%@) / SDVMobileControls synced (ver=%@, hotpatch=%@:%lu, cpLocaleFallbacks=%lu)", smapiSyncNote ?: @"?", sdvEffectiveAppVersion(), hpBootNote ?: @"none", (unsigned long)hpFiles, (unsigned long)cpFallbackLinked]);
             [SDVRamMonitor.shared startWithDocsPath:docs];
             sdvBootLog("[BOOT 3] SDVRamMonitor started");
         } @catch (NSException *ex) {

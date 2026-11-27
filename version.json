@@ -1,15 +1,18 @@
 {
-  "version": "1.0.2",
-  "build": 10200,
-  "date": "2026-11-24",
-  "release_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/tag/v1.0.2",
-  "ios14_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.2/Garden-Launcher-1.0.2-iOS14-18.ipa",
-  "ios26_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.0.2/Garden-Launcher-1.0.2-iOS26-27.ipa",
+  "version": "1.1.1",
+  "build": 11100,
+  "min_ipa_build": 11100,
+  "date": "2026-11-26",
+  "discord_url": "https://discord.gg/tuTKv9xQ2Z",
+  "release_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/tag/v1.1.1",
+  "ios14_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.1.1/Garden-Launcher-1.1.1-iOS14-18.ipa",
+  "ios26_url": "https://github.com/hanprm9-dot/Garden-Launcher-iOS/releases/download/v1.1.1/Garden-Launcher-1.1.1-iOS26-27.ipa",
+  "hotpatch_url": "",
+  "hotpatch_sha256": "",
+  "hotpatch_size": 0,
   "summary": [
-    "Sửa dứt điểm lỗi kẹt màn hình tải khi có StardewModdingAPI.crash.marker từ lần văng trước và sửa thanh % nhảy vọt lên 94% lúc mới mở app.",
-    "Sửa lỗi chặn bỏ vật phẩm & dụng cụ từ balô vào Rương (kiểm tra đúng behaviorFunction thay vì chỉ reverseGrab).",
-    "Thêm tính năng tự động Kiểm tra cập nhật Launcher kèm tóm tắt bản vá ngay trong app.",
-    "Khôi phục 100% âm thanh & nhạc nền SoundBank, tối ưu Shop/Rương Mobile UX & sửa tay cầm rời Xbox/PS R-Stick (đóng góp bởi @Mudkip267).",
-    "Sửa bấm OK & chọn nghề Level 5/10 (LevelUpMenu / trang Kỹ năng #GL-LTQ82M) và bảo vệ hòm thư Data/mail 1.6."
+    "Sửa khẩn cấp lỗi #GL-V53YS2 trên v1.1.0 khiến ảnh nhà nông trại (Buildings/houses) và các texture Content Patcher bị giữ nguyên ảnh gốc vanilla hoặc lộ phần mái nhà tầng 2 dưới bậc thềm (gỡ nhánh GL.BlitFramebuffer vốn bị khung cắt GL_SCISSOR_TEST của LoadGameMenu cắt trắng pixel, khôi phục nhánh GetData/SetData miễn nhiễm Scissor & giữ nguyên try/finally FBO).",
+    "Sửa lỗi syncBundledSmapi báo dll-hash-mismatch ở mỗi lần mở app (do RuntimeSmapiPatcher vá StardewModdingAPI.dll tại chỗ) để bộ nhớ đệm khởi động nhanh .garden/patch_stamps hoạt động thực sự từ lần mở thứ 2 trở đi.",
+    "Giữ trọn vẹn toàn bộ tính năng v1.1.0: IPA siêu gọn 25.13 MB, 6 công cụ Mod Garden mới (Hồ sơ Mod & Safe Mode, Offline config.json Editor, Sửa Hoa/Thường APFS, Tự gắn phím tắt Mod, Quản lý QuickSave/20 ô lưu nhanh, Mã #COOP) & hoàn thiện Gameplay 1.6.15."
   ]
 }

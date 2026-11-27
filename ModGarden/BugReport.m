@@ -17,8 +17,9 @@ static NSString *const kSDVBugReportClientKey = @SDV_BUG_REPORT_CLIENT_KEY;
 static NSString *const kSDVBugReportLastSentKey = @"sdv_bug_report_last_sent_ts";
 static const NSTimeInterval kSDVBugReportCooldownSec = 60.0;
 static const NSUInteger kSDVBugReportMaxMediaCount = 3;
-static const unsigned long long kSDVBugReportMaxSingleMediaBytes = 7500ULL * 1024ULL; // 7.5 MB per file
-static const unsigned long long kSDVBugReportMaxTotalUploadBytes = 8500ULL * 1024ULL; // 8.5 MB total (safe for Discord free 8-10 MB)
+static const unsigned long long kSDVBugReportMaxZipBytes         = 3900ULL * 1024ULL;               // <= 3.9 MiB (compatible with both 4 MiB & 7.5 MiB Worker limits)
+static const unsigned long long kSDVBugReportMaxSingleMediaBytes = 7ULL * 1024ULL * 1024ULL + 512ULL * 1024ULL; // 7.5 MiB (7,864,320 B)
+static const unsigned long long kSDVBugReportMaxTotalUploadBytes = 8ULL * 1024ULL * 1024ULL + 512ULL * 1024ULL; // 8.5 MiB (8,912,896 B)
 
 static NSString *sdvHardwareModelId(void) {
     size_t sz = 0;
@@ -151,17 +152,14 @@ static NSData *sdvReadTrimmedLogUtf8(NSString *path, NSUInteger maxBytes) {
     if (!raw.length) return nil;
     NSString *text = nil;
     if (raw.length <= maxBytes) {
-        text = [[NSString alloc] initWithData:raw encoding:NSUTF8StringEncoding]
-            ?: [[NSString alloc] initWithData:raw encoding:NSISOLatin1StringEncoding];
+        text = sdvDecodeUtf8Slice(raw, NO, NO);
     } else {
         NSUInteger headLen = MIN((NSUInteger)24576, maxBytes / 4);
         NSUInteger tailLen = maxBytes - headLen;
         NSData *headD = [raw subdataWithRange:NSMakeRange(0, headLen)];
         NSData *tailD = [raw subdataWithRange:NSMakeRange(raw.length - tailLen, tailLen)];
-        NSString *hs = [[NSString alloc] initWithData:headD encoding:NSUTF8StringEncoding]
-            ?: [[NSString alloc] initWithData:headD encoding:NSISOLatin1StringEncoding] ?: @"";
-        NSString *ts = [[NSString alloc] initWithData:tailD encoding:NSUTF8StringEncoding]
-            ?: [[NSString alloc] initWithData:tailD encoding:NSISOLatin1StringEncoding] ?: @"";
+        NSString *hs = sdvDecodeUtf8Slice(headD, NO, YES);
+        NSString *ts = sdvDecodeUtf8Slice(tailD, YES, NO);
         NSUInteger skippedKb = (raw.length - headLen - tailLen) / 1024;
         text = [NSString stringWithFormat:@"%@\n\n... [trimmed %lu KB middle log for compact upload] ...\n\n%@",
             hs, (unsigned long)skippedKb, ts];
@@ -173,7 +171,9 @@ static NSData *sdvReadTrimmedLogUtf8(NSString *path, NSUInteger maxBytes) {
 
 // Builds a compact, privacy-sanitized ErrorLogs.zip plus structured system metadata for online report or Share Sheet export.
 static NSDictionary *sdvBuildBugReportBundle(NSString *docsPath) {
-    NSString *appVer = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"] ?: @"1.0.2";
+    NSString *ipaVer = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"] ?: kSDVAppVersion;
+    NSString *effVer = sdvEffectiveAppVersion();
+    NSString *appVer = [effVer isEqualToString:ipaVer] ? ipaVer : [NSString stringWithFormat:@"%@ (IPA %@)", effVer, ipaVer];
     NSString *iosVer = UIDevice.currentDevice.systemVersion ?: @"?";
     NSString *hwModel = sdvHardwareModelId();
     SDVRamSnapshot ram = [SDVRamMonitor.shared sample];
@@ -182,7 +182,7 @@ static NSDictionary *sdvBuildBugReportBundle(NSString *docsPath) {
         sdvFmtMemMB(ram.availBytes), (double)ram.deviceBytes / (1024.0 * 1024.0 * 1024.0)];
 
     SDVMobileCtrlConfig *mc = [SDVMobileCtrlConfig loadFromDocuments:docsPath];
-    NSString *ctrlMode = sdvControlModeDisplayName(mc.mode);
+    NSString *ctrlMode = mc.pureGamepadMode ? @"Tay cầm thuần (Pure Gamepad)" : sdvControlModeDisplayName(mc.mode);
 
     NSArray<NSDictionary *> *catalog = docsPath.length ? (modCatalog(docsPath) ?: @[]) : @[];
     NSArray<NSDictionary *> *issues = docsPath.length ? (sdvDiagnoseMods(docsPath) ?: @[]) : @[];
@@ -200,7 +200,7 @@ static NSDictionary *sdvBuildBugReportBundle(NSString *docsPath) {
             en ? @"ON " : @"OFF", line, uid, m[@"topFolder"] ?: @""]];
     }
     NSString *modsShort = enabledLines.count ? [enabledLines componentsJoinedByString:@"\n"] : @"Không có mod nào đang bật";
-    if (modsShort.length > 900) modsShort = [[modsShort substringToIndex:896] stringByAppendingString:@"\n..."];
+    if (modsShort.length > 900) modsShort = [sdvSafeTruncateUtf16(modsShort, 896) stringByAppendingString:@"\n..."];
 
     NSMutableArray<NSString *> *issueLines = [NSMutableArray array];
     for (NSDictionary *it in issues) {
@@ -208,7 +208,7 @@ static NSDictionary *sdvBuildBugReportBundle(NSString *docsPath) {
         [issueLines addObject:[NSString stringWithFormat:@"[%@] %@: %@", sev, it[@"title"] ?: @"", it[@"detail"] ?: @""]];
     }
     NSString *issueShort = issueLines.count ? [issueLines componentsJoinedByString:@"\n"] : @"";
-    if (issueShort.length > 850) issueShort = [[issueShort substringToIndex:846] stringByAppendingString:@"\n..."];
+    if (issueShort.length > 850) issueShort = [sdvSafeTruncateUtf16(issueShort, 846) stringByAppendingString:@"\n..."];
 
     NSString *vid = UIDevice.currentDevice.identifierForVendor.UUIDString ?: hwModel;
     NSString *devHash = [hashData([vid dataUsingEncoding:NSUTF8StringEncoding]) substringToIndex:16];
@@ -232,7 +232,18 @@ static NSDictionary *sdvBuildBugReportBundle(NSString *docsPath) {
         for (NSString *il in issueLines) [sysTxt appendFormat:@"  %@\n", il];
     }
 
-    NSString *zipPath = join(NSTemporaryDirectory(), @"GardenLauncher-ErrorLogs.zip");
+    NSString *tmpDir = NSTemporaryDirectory();
+    NSDate *nowSweep = NSDate.date;
+    for (NSString *fn in ([fm() contentsOfDirectoryAtPath:tmpDir error:nil] ?: @[])) {
+        if ([fn hasPrefix:@"GardenLauncher-ErrorLogs"] && [fn hasSuffix:@".zip"]) {
+            NSString *oldP = join(tmpDir, fn);
+            NSDate *mdt = [fm() attributesOfItemAtPath:oldP error:nil][NSFileModificationDate];
+            if (mdt && [nowSweep timeIntervalSinceDate:mdt] > 600.0) {
+                [fm() removeItemAtPath:oldP error:nil];
+            }
+        }
+    }
+    NSString *zipPath = join(tmpDir, [NSString stringWithFormat:@"GardenLauncher-ErrorLogs-%@.zip", NSUUID.UUID.UUIDString]);
     [fm() removeItemAtPath:zipPath error:nil];
 
     NSUInteger fileCount = 0;
@@ -305,7 +316,8 @@ static NSData *sdvBuildMultipartBody(
         NSString *v = fields[k] ?: @"";
         [body appendData:[[NSString stringWithFormat:@"--%@%@", boundary, crlf] dataUsingEncoding:NSUTF8StringEncoding]];
         [body appendData:[[NSString stringWithFormat:@"Content-Disposition: form-data; name=\"%@\"%@%@", k, crlf, crlf] dataUsingEncoding:NSUTF8StringEncoding]];
-        [body appendData:[v dataUsingEncoding:NSUTF8StringEncoding]];
+        NSData *valData = [v dataUsingEncoding:NSUTF8StringEncoding allowLossyConversion:YES] ?: [NSData data];
+        [body appendData:valData];
         [body appendData:[crlf dataUsingEncoding:NSUTF8StringEncoding]];
     }
     if (zipData.length) {
@@ -371,7 +383,14 @@ static NSData *sdvBuildMultipartBody(
 
 -(void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = kBgCanvas;
+    if (self.embeddedInTab) {
+        self.view.backgroundColor = UIColor.clearColor;
+    } else {
+        self.view.backgroundColor = kBgCanvas;
+        SDVAuroraCanvasView *aurora = [SDVAuroraCanvasView new];
+        [self.view insertSubview:aurora atIndex:0];
+        pinAll(aurora, self.view, 0);
+    }
     _categories = @[
         @"Văng game (Crash)",
         @"Lỗi Mod / Xung đột",
@@ -425,6 +444,7 @@ static NSData *sdvBuildMultipartBody(
     }
 
     _scroll = [UIScrollView new];
+    _scroll.backgroundColor = UIColor.clearColor;
     _scroll.alwaysBounceVertical = YES;
     _scroll.keyboardDismissMode = UIScrollViewKeyboardDismissModeInteractive;
     _scroll.translatesAutoresizingMaskIntoConstraints = NO;
@@ -615,6 +635,10 @@ static NSData *sdvBuildMultipartBody(
     [actRow addArrangedSubview:_shareBtn];
     [pane addArrangedSubview:actRow];
 
+    SDVAppleButton *discordHelpBtn = mkIOSButton(@"Cần hỗ trợ trực tiếp? Tham gia Server Discord Garden Launcher", @"bubble.left.and.bubble.right.fill", rgba(0x5865F2, 0.14), rgb(0x5865F2), 13.0, UIEdgeInsetsMake(10, 14, 10, 14));
+    [discordHelpBtn addTarget:self action:@selector(openDiscordSupportTapped) forControlEvents:UIControlEventTouchUpInside];
+    [pane addArrangedSubview:discordHelpBtn];
+
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(kbWillShow:) name:UIKeyboardWillShowNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(kbWillHide:) name:UIKeyboardWillHideNotification object:nil];
 
@@ -660,6 +684,14 @@ static NSData *sdvBuildMultipartBody(
     _scroll.scrollIndicatorInsets = UIEdgeInsetsZero;
 }
 -(void)endEditingNow { [self.view endEditing:YES]; }
+-(void)openDiscordSupportTapped {
+    NSString *s = sdvDiscordInviteURL();
+    if (!s.length) return;
+    UIPasteboard.generalPasteboard.string = s;
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
+    NSURL *u = [NSURL URLWithString:s];
+    if (u) [UIApplication.sharedApplication openURL:u options:@{} completionHandler:nil];
+}
 -(void)dismissSelf {
     if (self.embeddedInTab) {
         _descView.text = @"";
@@ -777,36 +809,60 @@ static NSData *sdvBuildMultipartBody(
 }
 
 -(void)processPickedVideoAtTempUrl:(NSURL *)tempUrl suggestedExt:(NSString *)extHint cleanupTemp:(BOOL)cleanupTemp {
+    unsigned long long rawBytes = [[fm() attributesOfItemAtPath:tempUrl.path error:nil][NSFileSize] unsignedLongLongValue];
+    if (rawBytes == 0 || rawBytes > 200ULL * 1024ULL * 1024ULL) {
+        if (cleanupTemp) [fm() removeItemAtURL:tempUrl error:nil];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self endMediaLoad];
+            if (rawBytes > 200ULL * 1024ULL * 1024ULL) {
+                [self showAlertTitle:@"Video quá lớn (> 200 MB)"
+                    msg:@"Để tránh tràn RAM văng game trên iOS, vui lòng cắt ngắn đoạn video quay lỗi dưới ~25 giây trước khi đính kèm."
+                    closeAfter:NO];
+            } else {
+                [self showAlertTitle:@"Không đọc được video" msg:@"Tệp video trống hoặc không truy cập được." closeAfter:NO];
+            }
+        });
+        return;
+    }
+
     UIImage *thumb = sdvMakeVideoThumb(tempUrl);
-    NSData *rawData = [NSData dataWithContentsOfURL:tempUrl];
     NSString *ext = (extHint.length ? extHint : tempUrl.pathExtension).lowercaseString;
     BOOL isMp4 = [ext isEqualToString:@"mp4"] || [ext isEqualToString:@"m4v"];
 
     void (^finishWithData)(NSData *, BOOL) = ^(NSData *finalData, BOOL forceMp4) {
         if (cleanupTemp) [fm() removeItemAtURL:tempUrl error:nil];
         dispatch_async(dispatch_get_main_queue(), ^{
+            [self endMediaLoad];
+            if (!finalData.length || finalData.length > kSDVBugReportMaxSingleMediaBytes) {
+                [self showAlertTitle:@"Video vượt giới hạn 7.5 MB"
+                    msg:@"Sau khi nén tối đa, video vẫn lớn hơn 7.5 MB. Vui lòng cắt ngắn đoạn video (khoảng 10–20 giây) rồi thử lại."
+                    closeAfter:NO];
+                return;
+            }
             self->_mediaSeq++;
             BOOL outMp4 = forceMp4 || isMp4;
             NSString *fn = [NSString stringWithFormat:@"video_%lu.%@", (unsigned long)self->_mediaSeq, outMp4 ? @"mp4" : @"mov"];
             NSString *mime = outMp4 ? @"video/mp4" : @"video/quicktime";
-            [self endMediaLoad];
             [self appendPreparedMediaData:finalData name:fn mime:mime thumb:thumb isVideo:YES];
         });
     };
 
-    if (rawData.length > 0 && rawData.length <= kSDVBugReportMaxSingleMediaBytes) {
-        finishWithData(rawData, NO);
-        return;
+    if (rawBytes <= kSDVBugReportMaxSingleMediaBytes) {
+        NSData *smallRaw = [NSData dataWithContentsOfURL:tempUrl options:NSDataReadingMappedIfSafe error:nil];
+        if (smallRaw.length > 0 && smallRaw.length <= kSDVBugReportMaxSingleMediaBytes) {
+            finishWithData(smallRaw, NO);
+            return;
+        }
     }
 
-    // Video exceeds 7.5 MB (e.g. Retina iPhone screen recording) -> auto-compress to MP4 (Medium -> Low fallback)!
+    // Video exceeds 7.5 MB (up to 200 MB): stream-transcode directly from disk URL without reading raw video into RAM!
     sdvCompressVideoToMp4(tempUrl, AVAssetExportPresetMediumQuality, ^(NSData *medData) {
         if (medData.length > 0 && medData.length <= kSDVBugReportMaxSingleMediaBytes) {
             finishWithData(medData, YES);
             return;
         }
         sdvCompressVideoToMp4(tempUrl, AVAssetExportPresetLowQuality, ^(NSData *lowData) {
-            finishWithData(lowData.length ? lowData : (medData.length ? medData : rawData), YES);
+            finishWithData((lowData.length > 0 && lowData.length <= kSDVBugReportMaxSingleMediaBytes) ? lowData : nil, YES);
         });
     });
 }
@@ -904,8 +960,11 @@ static NSData *sdvBuildMultipartBody(
                     NSError *cpErr = nil;
                     BOOL copied = [fm() copyItemAtPath:url.path toPath:tmpPath error:&cpErr];
                     if (!copied) {
-                        NSData *fallback = [NSData dataWithContentsOfURL:url];
-                        copied = fallback.length && [fallback writeToFile:tmpPath atomically:YES];
+                        unsigned long long fbSz = [[fm() attributesOfItemAtPath:url.path error:nil][NSFileSize] unsignedLongLongValue];
+                        if (fbSz > 0 && fbSz <= 32ULL * 1024ULL * 1024ULL) {
+                            NSData *fallback = [NSData dataWithContentsOfURL:url options:NSDataReadingMappedIfSafe error:nil];
+                            copied = fallback.length && [fallback writeToFile:tmpPath atomically:YES];
+                        }
                     }
                     if (!copied) {
                         dispatch_async(dispatch_get_main_queue(), ^{
@@ -986,7 +1045,7 @@ static NSData *sdvBuildMultipartBody(
 -(void)textViewDidChange:(UITextView *)tv {
     NSString *txt = tv.text ?: @"";
     if (txt.length > 2000) {
-        tv.text = [txt substringToIndex:2000];
+        tv.text = sdvSafeTruncateUtf16(txt, 2000);
         txt = tv.text;
     }
     _descPlaceholder.hidden = (txt.length > 0);
@@ -1052,7 +1111,16 @@ static NSData *sdvBuildMultipartBody(
         return;
     }
 
+    if (_attachSwitch.isOn && !_bundle) {
+        _bundle = sdvBuildBugReportBundle(self.docsPath ?: @"");
+    }
     unsigned long long preZipSz = _attachSwitch.isOn ? [_bundle[@"bytes"] unsignedLongLongValue] : 0;
+    if (_attachSwitch.isOn && preZipSz > kSDVBugReportMaxZipBytes) {
+        [self showAlertTitle:@"Tệp ErrorLogs.zip vượt giới hạn"
+            msg:@"Tệp nhật ký ErrorLogs.zip quá lớn so với giới hạn máy chủ nhận lỗi. Bạn có thể bấm Xuất ErrorLogs.zip để chia sẻ trực tiếp hoặc tắt công tắc đính kèm tệp log."
+            closeAfter:NO];
+        return;
+    }
     if ([self totalMediaBytes] + preZipSz > kSDVBugReportMaxTotalUploadBytes) {
         [self showAlertTitle:@"Tổng dung lượng vượt 8.5 MB"
             msg:@"Tổng dung lượng ảnh/video + ErrorLogs.zip vượt giới hạn gửi của Discord. Hãy xóa bớt tệp đính kèm hoặc tắt đính kèm tệp log."
@@ -1085,13 +1153,13 @@ static NSData *sdvBuildMultipartBody(
         NSData *zipData = nil;
         if (attachZip && [b[@"url"] isKindOfClass:NSURL.class]) {
             zipData = [NSData dataWithContentsOfURL:b[@"url"]];
-            if (zipData.length > 4 * 1024 * 1024) zipData = nil;
+            if (zipData.length > kSDVBugReportMaxZipBytes) zipData = nil;
         }
         NSDictionary<NSString *, NSString *> *fields = @{
             @"category":     cat,
             @"description":  desc,
             @"contact":      contact,
-            @"appVersion":   b[@"appVersion"] ?: @"1.0.2",
+            @"appVersion":   b[@"appVersion"] ?: sdvEffectiveAppVersion(),
             @"iosVersion":   b[@"iosVersion"] ?: @"?",
             @"device":       b[@"device"] ?: @"iPhone",
             @"ramInfo":      b[@"ramInfo"] ?: @"?",
@@ -1111,7 +1179,7 @@ static NSData *sdvBuildMultipartBody(
         [req setValue:[NSString stringWithFormat:@"multipart/form-data; boundary=%@", boundary] forHTTPHeaderField:@"Content-Type"];
         [req setValue:@"GardenLauncher-iOS" forHTTPHeaderField:@"X-Garden-App"];
         [req setValue:kSDVBugReportClientKey forHTTPHeaderField:@"X-Garden-Key"];
-        [req setValue:@"GardenLauncher-iOS/1.0.2" forHTTPHeaderField:@"User-Agent"];
+        [req setValue:[NSString stringWithFormat:@"GardenLauncher-iOS/%@", sdvEffectiveAppVersion()] forHTTPHeaderField:@"User-Agent"];
         req.HTTPBody = body;
 
         NSURLSessionDataTask *task = [NSURLSession.sharedSession dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {

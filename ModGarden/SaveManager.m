@@ -59,9 +59,8 @@ static NSString *sdvReadFilePrefixUtf8(NSString *path, NSUInteger maxBytes) {
     NSData *d = [fh readDataOfLength:maxBytes];
     [fh closeFile];
     if (!d.length) return nil;
-    d = sdvStripUtf8Bom(d);
-    return [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding]
-        ?: [[NSString alloc] initWithData:d encoding:NSISOLatin1StringEncoding];
+    NSString *s = sdvDecodeUtf8Slice(d, NO, YES);
+    return s.length ? s : nil;
 }
 
 // Reads the last `maxBytes` of a Stardew SaveGame XML where <dayOfMonth>, <currentSeason>, <year>,
@@ -77,9 +76,8 @@ static NSString *sdvReadFileTailUtf8(NSString *path, NSUInteger maxBytes) {
     NSData *d = [fh readDataOfLength:maxBytes];
     [fh closeFile];
     if (!d.length) return nil;
-    if (off == 0) d = sdvStripUtf8Bom(d);
-    return [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding]
-        ?: [[NSString alloc] initWithData:d encoding:NSISOLatin1StringEncoding];
+    NSString *s = sdvDecodeUtf8Slice(d, off > 0, NO);
+    return s.length ? s : nil;
 }
 
 static BOOL sdvLooksLikeMainSaveXml(NSString *path) {
@@ -187,8 +185,11 @@ static NSString *sdvFormatFileSizeMB(unsigned long long bytes) {
     return [NSString stringWithFormat:@"%.2f MB", (double)bytes / (1024.0 * 1024.0)];
 }
 
+static NSString *sdvRepairSaveFolder(NSString *folderPath);
+
 // Auto-migrate any save folders users manually dropped into visible Documents/Saves/
-// (since .config/StardewValley/Saves is hidden in the iOS Files app!) into the real live directory.
+// (since .config/StardewValley/Saves is hidden in the iOS Files app!) into the real live directory,
+// backing up any older existing save with the same name and normalizing SaveGameInfo/BOM/casing!
 static void sdvMigrateLegacyDocumentsSaves(NSString *docsPath) {
     if (!docsPath.length) return;
     NSString *legacyDir = join(docsPath, @"Saves");
@@ -197,6 +198,7 @@ static void sdvMigrateLegacyDocumentsSaves(NSString *docsPath) {
     if (!entries.count) return;
 
     NSString *liveDir = sdvLiveSavesDir(docsPath);
+    NSString *backupRoot = join(docsPath, @"Saves_Backup");
     for (NSString *entry in entries) {
         if ([entry hasPrefix:@"."] || [entry isEqualToString:@"__MACOSX"]) continue;
         NSString *srcFolder = join(legacyDir, entry);
@@ -210,9 +212,17 @@ static void sdvMigrateLegacyDocumentsSaves(NSString *docsPath) {
 
         mkdirs(liveDir);
         NSString *dstFolder = join(liveDir, entry);
-        if (![fm() fileExistsAtPath:dstFolder]) {
-            NSError *me = nil;
-            [fm() moveItemAtPath:srcFolder toPath:dstFolder error:&me];
+        if ([fm() fileExistsAtPath:dstFolder]) {
+            mkdirs(backupRoot);
+            NSDateFormatter *df = [NSDateFormatter new];
+            df.dateFormat = @"yyyyMMdd_HHmmss";
+            NSString *bk = join(backupRoot, [NSString stringWithFormat:@"%@_%@", entry, [df stringFromDate:NSDate.date]]);
+            sdvRemoveItemQuiet(bk);
+            [fm() moveItemAtPath:dstFolder toPath:bk error:nil];
+            sdvRemoveItemQuiet(dstFolder);
+        }
+        if ([fm() moveItemAtPath:srcFolder toPath:dstFolder error:nil]) {
+            @try { (void)sdvRepairSaveFolder(dstFolder); } @catch (NSException *ignored) { }
         }
     }
 }
@@ -357,9 +367,14 @@ static void sdvDeleteSaveFolder(NSString *folderPath, NSString *docsPath) {
     removeItem(folderPath);
     if (docsPath.length && folderName.length) {
         NSString *qs = sdvQuickSaveJsonPath(docsPath, folderName);
-        if (qs.length && [fm() fileExistsAtPath:qs]) [fm() removeItemAtPath:qs error:nil];
+        if (qs.length && [fm() fileExistsAtPath:qs]) sdvRemoveItemQuiet(qs);
         NSString *slotsDir = join(docsPath, [NSString stringWithFormat:@"Mods/SDVMobileControls/SaveSlots/%@", folderName]);
-        if ([fm() fileExistsAtPath:slotsDir]) [fm() removeItemAtPath:slotsDir error:nil];
+        if ([fm() fileExistsAtPath:slotsDir]) sdvRemoveItemQuiet(slotsDir);
+        NSString *sanitized = [[folderName componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/\\:*?\"<>|"]] componentsJoinedByString:@"_"];
+        if (sanitized.length && ![sanitized isEqualToString:folderName]) {
+            NSString *altSlotsDir = join(docsPath, [NSString stringWithFormat:@"Mods/SDVMobileControls/SaveSlots/%@", sanitized]);
+            if ([fm() fileExistsAtPath:altSlotsDir]) sdvRemoveItemQuiet(altSlotsDir);
+        }
     }
 }
 
@@ -533,18 +548,30 @@ static NSDictionary *sdvImportSavesFromURLs(NSArray<NSURL *> *urls, NSString *do
                 writeFile(cleanInfo, join(dstDir, @"SaveGameInfo"));
             }
 
-            // Restore companion QuickSave JSON directly into SDViOSTouchControls/data/<canonical>_quicksave.json!
+            // Restore companion QuickSave JSON + any mod-specific companion files inside the save folder!
+            NSString *mainFileLow = mainPath.lastPathComponent.lowercaseString;
             for (NSString *sib in ([fm() contentsOfDirectoryAtPath:srcDir error:nil] ?: @[])) {
+                if ([sib hasPrefix:@"."]) continue;
                 NSString *lo = sib.lowercaseString;
+                NSString *sibPath = join(srcDir, sib);
+                if (dir(sibPath)) continue;
                 if ([lo containsString:@"quicksave"] && [lo hasSuffix:@".json"]) {
-                    NSData *qd = [NSData dataWithContentsOfFile:join(srcDir, sib)];
+                    NSData *qd = [NSData dataWithContentsOfFile:sibPath];
                     if (qd.length > 2) {
                         NSString *dstQs = sdvQuickSaveJsonPath(docsPath, canonical);
                         mkdirs(dstQs.stringByDeletingLastPathComponent);
                         writeFile(qd, dstQs);
                         quickRestoredCount++;
-                        break;
                     }
+                    continue;
+                }
+                if ([lo isEqualToString:mainFileLow] || [lo isEqualToString:canonical.lowercaseString] ||
+                    [lo isEqualToString:@"savegameinfo"] || [lo hasSuffix:@"_old"] || [lo hasSuffix:@"_svbak"]) {
+                    continue;
+                }
+                NSData *extraData = [NSData dataWithContentsOfFile:sibPath];
+                if (extraData.length > 0 && extraData.length <= 32 * 1024 * 1024) {
+                    writeFile(extraData, join(dstDir, sib));
                 }
             }
 
@@ -575,7 +602,86 @@ static NSDictionary *sdvImportSavesFromURLs(NSArray<NSURL *> *urls, NSString *do
         };
     } @finally {
         removeItem(tmpRoot);
+        for (NSURL *u in urls) {
+            NSString *up = u.path ?: @"";
+            if ([up containsString:@"/Inbox/"] || [up containsString:@"-Inbox/"]) {
+                sdvRemoveItemQuiet(up);
+            }
+        }
     }
+}
+
+// Lists active QuickSave snapshots (SDViOSTouchControls) & 20-slot SaveSlots (SDVMobileControls) for Launcher Tab 2
+static NSArray<NSDictionary *> *sdvListQuickSavesAndSlots(NSString *docsPath) {
+    if (!docsPath.length) return @[];
+    NSMutableArray<NSDictionary *> *out = [NSMutableArray array];
+    NSDateFormatter *df = [NSDateFormatter new];
+    df.dateFormat = @"dd/MM HH:mm";
+
+    // 1. SDViOSTouchControls QuickSaves: Mods/SDViOSTouchControls/data/*_quicksave.json
+    NSString *qsDir = join(docsPath, @"Mods/SDViOSTouchControls/data");
+    if (dir(qsDir)) {
+        for (NSString *fn in ([[fm() contentsOfDirectoryAtPath:qsDir error:nil] sortedArrayUsingSelector:@selector(compare:)] ?: @[])) {
+            if (![fn.lowercaseString hasSuffix:@"_quicksave.json"]) continue;
+            NSString *full = join(qsDir, fn);
+            if (dir(full)) continue;
+            NSDictionary *attr = [fm() attributesOfItemAtPath:full error:nil];
+            unsigned long long sz = [attr[NSFileSize] unsignedLongLongValue];
+            if (sz < 4) continue;
+            NSDate *dt = attr[NSFileModificationDate];
+            NSString *saveKey = [fn substringToIndex:fn.length - @"_quicksave.json".length];
+            NSString *charName = [[saveKey componentsSeparatedByString:@"_"].firstObject ?: saveKey copy];
+            [out addObject:@{
+                @"kind": @"quicksave",
+                @"title": [NSString stringWithFormat:@"QuickSave · %@", charName],
+                @"subtitle": [NSString stringWithFormat:@"%@ · %@%@", saveKey, formatBytes(sz), dt ? [NSString stringWithFormat:@" · %@", [df stringFromDate:dt]] : @""],
+                @"path": full,
+                @"bytes": @(sz),
+                @"mtime": @(dt ? dt.timeIntervalSince1970 : 0.0)
+            }];
+        }
+    }
+
+    // 2. SDVMobileControls 20-Slot SaveSlots: Mods/SDVMobileControls/SaveSlots/<SaveFolder>/<SlotDir>
+    NSString *slotsRoot = join(docsPath, @"Mods/SDVMobileControls/SaveSlots");
+    if (dir(slotsRoot)) {
+        for (NSString *saveFolder in ([[fm() contentsOfDirectoryAtPath:slotsRoot error:nil] sortedArrayUsingSelector:@selector(compare:)] ?: @[])) {
+            if ([saveFolder hasPrefix:@"."]) continue;
+            NSString *charRoot = join(slotsRoot, saveFolder);
+            if (!dir(charRoot)) continue;
+            NSString *charName = [saveFolder componentsSeparatedByString:@"_"].firstObject ?: saveFolder;
+            for (NSString *slotSub in ([[fm() contentsOfDirectoryAtPath:charRoot error:nil] sortedArrayUsingSelector:@selector(compare:)] ?: @[])) {
+                if ([slotSub hasPrefix:@"."]) continue;
+                NSString *slotPath = join(charRoot, slotSub);
+                BOOL isD = NO;
+                if (![fm() fileExistsAtPath:slotPath isDirectory:&isD]) continue;
+                unsigned long long sz = 0;
+                NSDate *dt = nil;
+                if (isD) {
+                    for (NSString *f in ([fm() contentsOfDirectoryAtPath:slotPath error:nil] ?: @[])) {
+                        NSDictionary *fa = [fm() attributesOfItemAtPath:join(slotPath, f) error:nil];
+                        sz += [fa[NSFileSize] unsignedLongLongValue];
+                        NSDate *fdt = fa[NSFileModificationDate];
+                        if (fdt && (!dt || [fdt compare:dt] == NSOrderedDescending)) dt = fdt;
+                    }
+                } else {
+                    NSDictionary *fa = [fm() attributesOfItemAtPath:slotPath error:nil];
+                    sz = [fa[NSFileSize] unsignedLongLongValue];
+                    dt = fa[NSFileModificationDate];
+                }
+                if (sz < 4) continue;
+                [out addObject:@{
+                    @"kind": @"slot",
+                    @"title": [NSString stringWithFormat:@"%@ · %@", charName, slotSub],
+                    @"subtitle": [NSString stringWithFormat:@"Ô lưu nhanh · %@%@", formatBytes(sz), dt ? [NSString stringWithFormat:@" · %@", [df stringFromDate:dt]] : @""],
+                    @"path": slotPath,
+                    @"bytes": @(sz),
+                    @"mtime": @(dt ? dt.timeIntervalSince1970 : 0.0)
+                }];
+            }
+        }
+    }
+    return out;
 }
 
 // Exports a save folder to a clean cross-platform .ZIP archive using miniz.
@@ -610,6 +716,15 @@ static NSURL *sdvExportSaveToZip(NSString *saveFolderPath, NSString *docsPath, N
 
     NSString *expDir = join(NSTemporaryDirectory(), @"GardenSaveExports");
     mkdirs(expDir);
+    // Clean temporary exported zips older than 15 minutes
+    NSDate *nowExp = NSDate.date;
+    for (NSString *oldFn in ([fm() contentsOfDirectoryAtPath:expDir error:nil] ?: @[])) {
+        NSString *oldP = join(expDir, oldFn);
+        NSDate *mdt = [fm() attributesOfItemAtPath:oldP error:nil][NSFileModificationDate];
+        if (mdt && [nowExp timeIntervalSinceDate:mdt] > 900.0) {
+            sdvRemoveItemQuiet(oldP);
+        }
+    }
     NSString *suffix = (exportMode == 1) ? @"_iOS_Backup" : ((exportMode == 2) ? @"_Mobile" : @"_CrossPlatform");
     NSString *zipPath = join(expDir, [NSString stringWithFormat:@"%@%@.zip", folderName, suffix]);
     removeItem(zipPath);
@@ -662,6 +777,24 @@ static NSURL *sdvExportSaveToZip(NSString *saveFolderPath, NSString *docsPath, N
                             break;
                         }
                     }
+                }
+            }
+            // Preserve mod companion files (e.g. SpaceCore/JsonAssets/CustomSaveData) inside the save folder
+            NSString *mainLeafLow = mainPath.lastPathComponent.lowercaseString;
+            for (NSString *sub in ([fm() contentsOfDirectoryAtPath:saveFolderPath error:nil] ?: @[])) {
+                if ([sub hasPrefix:@"."]) continue;
+                NSString *lo = sub.lowercaseString;
+                NSString *subFull = join(saveFolderPath, sub);
+                if (dir(subFull)) continue;
+                if ([lo isEqualToString:mainLeafLow] || [lo isEqualToString:folderName.lowercaseString] ||
+                    [lo isEqualToString:@"savegameinfo"] || [lo hasSuffix:@"_old"] || [lo hasSuffix:@"_svbak"] ||
+                    ([lo containsString:@"quicksave"] && [lo hasSuffix:@".json"])) {
+                    continue;
+                }
+                NSData *extraD = [NSData dataWithContentsOfFile:subFull];
+                if (extraD.length > 0 && extraD.length <= 32 * 1024 * 1024) {
+                    NSString *entry = [NSString stringWithFormat:@"%@/%@", folderName, sub];
+                    mz_zip_writer_add_mem(&z, entry.UTF8String, extraD.bytes, extraD.length, MZ_DEFAULT_COMPRESSION);
                 }
             }
         }

@@ -73,6 +73,7 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
     NSInteger _tickCount;
     BOOL _started;
     NSTimer *_timer;
+    NSTimeInterval _lastLightPruneTime;
     NSTimeInterval _lastAutoGcTime;
     NSTimeInterval _lastWarn85Time;
     NSTimeInterval _lastCrit90Time;
@@ -195,12 +196,12 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
     NSString *docsCopy = [docsPath copy];
     dispatch_async([self ioQueue], ^{
         NSString *gd = sdvHiddenGardenDir(docsCopy);
+        NSString *pruneFlag = [gd stringByAppendingPathComponent:@"sdv_prune_now.flag"];
+        [(critical ? @"CRIT" : @"1") writeToFile:pruneFlag atomically:YES encoding:NSUTF8StringEncoding error:nil];
         if (critical) {
             NSString *flag = [gd stringByAppendingPathComponent:@"sdv_gc_now.flag"];
             [@"1" writeToFile:flag atomically:YES encoding:NSUTF8StringEncoding error:nil];
         }
-        NSString *pruneFlag = [gd stringByAppendingPathComponent:@"sdv_prune_now.flag"];
-        [(critical ? @"CRIT" : @"1") writeToFile:pruneFlag atomically:YES encoding:NSUTF8StringEncoding error:nil];
     });
 }
 
@@ -251,8 +252,8 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
         }
         _logPath = cur;
         SDVRamSnapshot s0 = [self sample];
-        [self appendLogLine:[NSString stringWithFormat:@"=== Garden Launcher 1.0.2 RAM Monitor Started | Device RAM: %.2f GB | Initial Budget: %@ | Alerts: 85%% Warn / 90%% Critical ===",
-            (double)s0.deviceBytes / (1024.0 * 1024.0 * 1024.0), sdvFmtMemMB(s0.budgetBytes)]];
+        [self appendLogLine:[NSString stringWithFormat:@"=== Garden Launcher %@ RAM Monitor Started | Device RAM: %.2f GB | Initial Budget: %@ | Alerts: 85%% Warn / 90%% Critical ===",
+            sdvEffectiveAppVersion(), (double)s0.deviceBytes / (1024.0 * 1024.0 * 1024.0), sdvFmtMemMB(s0.budgetBytes)]];
     }
 
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -288,13 +289,21 @@ static NSString *sdvThermalLabel(NSProcessInfoThermalState st) {
         if (isCrit90 || isWarn85) {
             NSTimeInterval now = NSDate.date.timeIntervalSinceReferenceDate;
             // 1. Auto-trigger lightweight tilesheet pruning at 85-90.9% (every 45s, zero blocking freeze),
-            //    and critical Gen2 compacting GC ONLY at >=91% RAM (every 25s) to prevent gameplay stutters!
+            //    and critical Gen2 compacting GC at >=91% RAM (every 25s, independent cooldown so LIGHT prune never blocks CRIT GC!)
             BOOL isCritGc = (s.usagePct >= 91.0);
-            if (_docsPath.length && (now - _lastAutoGcTime >= (isCritGc ? 25.0 : 45.0))) {
-                _lastAutoGcTime = now;
-                [self triggerPruneInDocs:_docsPath critical:isCritGc];
-                [self appendLogLine:[NSString stringWithFormat:@"[AUTO-GC] Triggered (%@) at %.1f%% (Avail=%@)",
-                    isCritGc ? @"CRIT" : @"LIGHT", s.usagePct, sdvFmtMemMB(s.availBytes)]];
+            if (_docsPath.length) {
+                if (isCritGc && (now - _lastAutoGcTime >= 25.0)) {
+                    _lastAutoGcTime = now;
+                    _lastLightPruneTime = now;
+                    [self triggerPruneInDocs:_docsPath critical:YES];
+                    [self appendLogLine:[NSString stringWithFormat:@"[AUTO-GC] Triggered (CRIT) at %.1f%% (Avail=%@)",
+                        s.usagePct, sdvFmtMemMB(s.availBytes)]];
+                } else if (!isCritGc && (now - _lastLightPruneTime >= 45.0)) {
+                    _lastLightPruneTime = now;
+                    [self triggerPruneInDocs:_docsPath critical:NO];
+                    [self appendLogLine:[NSString stringWithFormat:@"[AUTO-GC] Triggered (LIGHT) at %.1f%% (Avail=%@)",
+                        s.usagePct, sdvFmtMemMB(s.availBytes)]];
+                }
             }
             // 2. Tier 2 (90%+): Strong Critical Alert (fires immediately when crossing 90%, repeats every 20s)
             if (isCrit90 && [self ramAlertEnabled] && (now - _lastCrit90Time >= 20.0)) {

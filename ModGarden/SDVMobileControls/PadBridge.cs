@@ -72,8 +72,42 @@ namespace SDVMobileControls
         private readonly object _mouseModePointAndClick;
 
         private readonly MethodInfo _drawCenteredString;
+        private Action<SpriteBatch, Texture2D, string, Rectangle, Color, int> _drawCenteredDel;
 
-        // Pre-allocated tiny argument arrays to avoid per-frame allocations
+        // Cached closed delegates bound to the singleton TouchVirtualPad instance (0% MethodInfo.Invoke & 0% boxing at 60Hz!)
+        private object _boundPad;
+        private Func<bool> _fnGetSettingsOpen;
+        private Func<bool> _fnGetEditLayout;
+        private Func<bool> _fnGetDrawerOpen;
+        private Action<bool> _fnSetDrawerOpen;
+        private Func<bool> _fnGetKeyPickerOpen;
+        private Action<Vector2> _fnSetLeftStick;
+        private Func<bool> _fnGetBtnX;
+        private Action<bool> _fnSetBtnX;
+        private Action<bool> _fnSetBtnA;
+        private Action<bool> _fnSetBtnB;
+        private Action<bool> _fnSetBtnY;
+        private Action<bool> _fnSetBtnLT;
+        private Action<bool> _fnSetBtnRT;
+        private Action<bool> _fnSetBtnMenu;
+        private Action<bool> _fnSetPlayerReqMenu;
+        private Action _fnResetSimMouse;
+        private Action<Point> _fnSetSimMousePos;
+        private Action<bool> _fnSetSimMouseLeft;
+        private Action<bool> _fnSetSimMouseRight;
+        private Action _fnForwardInput;
+        private Action<bool> _fnSyncMenuBar;
+        private Action _fnTriggerKb;
+        private Func<bool> _fnGetSingle;
+        private Action<bool> _fnSetSingle;
+        private Func<bool> _fnGetHalf;
+        private Action<bool> _fnSetHalf;
+        private Func<bool> _fnGetQuick;
+        private Action<bool> _fnSetQuick;
+        private FieldInfo _cachedSInputKbField;
+        private bool _sInputKbResolved;
+
+        // Pre-allocated tiny argument arrays for fallback only
         private readonly object[] _arg1 = new object[1];
         private readonly object[] _argBoolFalse = new object[] { false };
         private readonly object[] _argBoolTrue = new object[] { true };
@@ -154,21 +188,74 @@ namespace SDVMobileControls
             Type fontType = asm.GetType("SDViOSTouchControls.OverlayFont");
             _drawCenteredString = fontType?.GetMethod("DrawCenteredString", stat, null,
                 new[] { typeof(SpriteBatch), typeof(Texture2D), typeof(string), typeof(Rectangle), typeof(Color), typeof(int) }, null);
+            if (_drawCenteredString != null)
+            {
+                try
+                {
+                    _drawCenteredDel = (Action<SpriteBatch, Texture2D, string, Rectangle, Color, int>)Delegate.CreateDelegate(
+                        typeof(Action<SpriteBatch, Texture2D, string, Rectangle, Color, int>), _drawCenteredString);
+                }
+                catch { }
+            }
+        }
+
+        private static T BindInstanceDel<T>(object target, MethodInfo mi) where T : Delegate
+        {
+            if (target == null || mi == null) return null;
+            try { return Delegate.CreateDelegate(typeof(T), target, mi, throwOnBindFailure: false) as T; }
+            catch { return null; }
+        }
+
+        private void EnsurePadDelegates(object pad)
+        {
+            if (pad == null || ReferenceEquals(_boundPad, pad))
+                return;
+            _boundPad = pad;
+            _fnGetSettingsOpen  = BindInstanceDel<Func<bool>>(pad, _getIsSettingsOpen);
+            _fnGetEditLayout    = BindInstanceDel<Func<bool>>(pad, _getIsEditLayoutMode);
+            _fnGetDrawerOpen    = BindInstanceDel<Func<bool>>(pad, _getIsHotkeyDrawerOpen);
+            _fnSetDrawerOpen    = BindInstanceDel<Action<bool>>(pad, _setIsHotkeyDrawerOpen);
+            _fnGetKeyPickerOpen = BindInstanceDel<Func<bool>>(pad, _getIsKeyPickerOpen);
+            _fnSetLeftStick     = BindInstanceDel<Action<Vector2>>(pad, _setLeftStick);
+            _fnGetBtnX          = BindInstanceDel<Func<bool>>(pad, _getButtonX);
+            _fnSetBtnX          = BindInstanceDel<Action<bool>>(pad, _setButtonX);
+            _fnSetBtnA          = BindInstanceDel<Action<bool>>(pad, _setButtonA);
+            _fnSetBtnB          = BindInstanceDel<Action<bool>>(pad, _setButtonB);
+            _fnSetBtnY          = BindInstanceDel<Action<bool>>(pad, _setButtonY);
+            _fnSetBtnLT         = BindInstanceDel<Action<bool>>(pad, _setButtonLT);
+            _fnSetBtnRT         = BindInstanceDel<Action<bool>>(pad, _setButtonRT);
+            _fnSetBtnMenu       = BindInstanceDel<Action<bool>>(pad, _setButtonMenu);
+            _fnSetPlayerReqMenu = BindInstanceDel<Action<bool>>(pad, _setPlayerRequestedMenuOpen);
+            _fnResetSimMouse    = BindInstanceDel<Action>(pad, _resetSimulatedMouse);
+            _fnSetSimMousePos   = BindInstanceDel<Action<Point>>(pad, _setSimulatedMousePosition);
+            _fnSetSimMouseLeft  = BindInstanceDel<Action<bool>>(pad, _setSimulatedMouseLeftDown);
+            _fnSetSimMouseRight = BindInstanceDel<Action<bool>>(pad, _setSimulatedMouseRightDown);
+            _fnForwardInput     = BindInstanceDel<Action>(pad, _forwardInputToGame);
+            _fnSyncMenuBar      = BindInstanceDel<Action<bool>>(pad, _syncMenuBarConfig);
+            _fnTriggerKb        = BindInstanceDel<Action>(pad, _triggerVirtualKeyboard);
+            _fnGetSingle        = BindInstanceDel<Func<bool>>(pad, _getSingleItem);
+            _fnSetSingle        = BindInstanceDel<Action<bool>>(pad, _setSingleItem);
+            _fnGetHalf          = BindInstanceDel<Func<bool>>(pad, _getHalfStack);
+            _fnSetHalf          = BindInstanceDel<Action<bool>>(pad, _setHalfStack);
+            _fnGetQuick         = BindInstanceDel<Func<bool>>(pad, _getQuickTransfer);
+            _fnSetQuick         = BindInstanceDel<Action<bool>>(pad, _setQuickTransfer);
         }
 
         public bool IsFullScreenModalOpen(object pad)
         {
             if (pad == null) return false;
-            return GetBool(_getIsSettingsOpen, pad) ||
-                   GetBool(_getIsEditLayoutMode, pad) ||
-                   GetBool(_getIsKeyPickerOpen, pad);
+            EnsurePadDelegates(pad);
+            return (_fnGetSettingsOpen != null ? _fnGetSettingsOpen() : GetBool(_getIsSettingsOpen, pad)) ||
+                   (_fnGetEditLayout != null ? _fnGetEditLayout() : GetBool(_getIsEditLayoutMode, pad)) ||
+                   (_fnGetKeyPickerOpen != null ? _fnGetKeyPickerOpen() : GetBool(_getIsKeyPickerOpen, pad));
         }
 
         public bool IsAnyOverlayOpen(object pad)
         {
             if (pad == null) return false;
+            EnsurePadDelegates(pad);
             return IsFullScreenModalOpen(pad) ||
-                   GetBool(_getIsHotkeyDrawerOpen, pad);
+                   (_fnGetDrawerOpen != null ? _fnGetDrawerOpen() : GetBool(_getIsHotkeyDrawerOpen, pad));
         }
 
         public void CloseHotkeyDrawer(object pad)
@@ -347,10 +434,10 @@ namespace SDVMobileControls
             try { _triggerVirtualKeyboard?.Invoke(pad, null); } catch { }
         }
 
-        public bool GetButtonX(object pad) => GetBool(_getButtonX, pad);
-        public bool GetSingleItemMode(object pad) => GetBool(_getSingleItem, pad);
-        public bool GetHalfStackMode(object pad) => GetBool(_getHalfStack, pad);
-        public bool GetQuickTransferMode(object pad) => GetBool(_getQuickTransfer, pad);
+        public bool GetButtonX(object pad) { EnsurePadDelegates(pad); return _fnGetBtnX != null ? _fnGetBtnX() : GetBool(_getButtonX, pad); }
+        public bool GetSingleItemMode(object pad) { EnsurePadDelegates(pad); return _fnGetSingle != null ? _fnGetSingle() : GetBool(_getSingleItem, pad); }
+        public bool GetHalfStackMode(object pad) { EnsurePadDelegates(pad); return _fnGetHalf != null ? _fnGetHalf() : GetBool(_getHalfStack, pad); }
+        public bool GetQuickTransferMode(object pad) { EnsurePadDelegates(pad); return _fnGetQuick != null ? _fnGetQuick() : GetBool(_getQuickTransfer, pad); }
 
         public void ToggleSingleItemMode(object pad)
         {
@@ -442,29 +529,29 @@ namespace SDVMobileControls
         public void ResetVirtualPad(object pad)
         {
             if (pad == null) return;
-            _arg1[0] = Vector2.Zero;
-            _setLeftStick?.Invoke(pad, _arg1);
-            _setButtonX?.Invoke(pad, _argBoolFalse);
-            _setButtonA?.Invoke(pad, _argBoolFalse);
-            _setButtonB?.Invoke(pad, _argBoolFalse);
-            _setButtonY?.Invoke(pad, _argBoolFalse);
-            _setButtonLT?.Invoke(pad, _argBoolFalse);
-            _setButtonRT?.Invoke(pad, _argBoolFalse);
-            _setButtonMenu?.Invoke(pad, _argBoolFalse);
+            EnsurePadDelegates(pad);
+            if (_fnSetLeftStick != null) _fnSetLeftStick(Vector2.Zero); else { _arg1[0] = Vector2.Zero; _setLeftStick?.Invoke(pad, _arg1); }
+            if (_fnSetBtnX != null) _fnSetBtnX(false); else _setButtonX?.Invoke(pad, _argBoolFalse);
+            if (_fnSetBtnA != null) _fnSetBtnA(false); else _setButtonA?.Invoke(pad, _argBoolFalse);
+            if (_fnSetBtnB != null) _fnSetBtnB(false); else _setButtonB?.Invoke(pad, _argBoolFalse);
+            if (_fnSetBtnY != null) _fnSetBtnY(false); else _setButtonY?.Invoke(pad, _argBoolFalse);
+            if (_fnSetBtnLT != null) _fnSetBtnLT(false); else _setButtonLT?.Invoke(pad, _argBoolFalse);
+            if (_fnSetBtnRT != null) _fnSetBtnRT(false); else _setButtonRT?.Invoke(pad, _argBoolFalse);
+            if (_fnSetBtnMenu != null) _fnSetBtnMenu(false); else _setButtonMenu?.Invoke(pad, _argBoolFalse);
             var ext = ModEntry.ExternalInput;
             if (ext != null && ext.ShouldPushMouseStateNow)
             {
                 var ms = ext.CurrentMouseState;
-                _arg1[0] = new Point(ms.X, ms.Y);
-                _setSimulatedMousePosition?.Invoke(pad, _arg1);
-                _setSimulatedMouseLeftDown?.Invoke(pad, _argBoolFalse);
-                _setSimulatedMouseRightDown?.Invoke(pad, _argBoolFalse);
+                Point pt = new Point(ms.X, ms.Y);
+                if (_fnSetSimMousePos != null) _fnSetSimMousePos(pt); else { _arg1[0] = pt; _setSimulatedMousePosition?.Invoke(pad, _arg1); }
+                if (_fnSetSimMouseLeft != null) _fnSetSimMouseLeft(false); else _setSimulatedMouseLeftDown?.Invoke(pad, _argBoolFalse);
+                if (_fnSetSimMouseRight != null) _fnSetSimMouseRight(false); else _setSimulatedMouseRightDown?.Invoke(pad, _argBoolFalse);
             }
             else
             {
                 // CRITICAL: In menus driven by native SnappyMenus, keep TouchVirtualPad.IsMouseOverridden=false
                 // so SDViOSTouchControls.PrefixSetMousePositionRaw & PrefixMouseGetState never block cursor snaps!
-                _resetSimulatedMouse?.Invoke(pad, null);
+                if (_fnResetSimMouse != null) _fnResetSimMouse(); else _resetSimulatedMouse?.Invoke(pad, null);
             }
 
             // Clear any leftover touch-simulated WASD keys inside TouchVirtualPad and Game1.input
@@ -478,11 +565,18 @@ namespace SDVMobileControls
                     simSet.Clear();
                 if (ModEntry.ExternalInput == null || !ModEntry.ExternalInput.HasPhysicalKeysPressed)
                 {
-                    object inp = _inputInstanceField?.GetValue(null);
-                    if (inp != null && _currentKeyboardStateFieldInfo?.GetValue(null) is FieldInfo curKbFld)
+                    object inp = _inputInstanceField?.GetValue(null) ?? StardewValley.Game1.input;
+                    if (inp != null)
                     {
                         object emptyKb = _emptyKeyboardStateField?.GetValue(null) ?? default(KeyboardState);
-                        curKbFld.SetValue(inp, emptyKb);
+                        if (_currentKeyboardStateFieldInfo?.GetValue(null) is FieldInfo curKbFld)
+                            curKbFld.SetValue(inp, emptyKb);
+                        if (!_sInputKbResolved)
+                        {
+                            _sInputKbResolved = true;
+                            _cachedSInputKbField = inp.GetType().GetField("<KeyboardState>k__BackingField", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                        }
+                        _cachedSInputKbField?.SetValue(inp, emptyKb);
                     }
                 }
             }
@@ -492,49 +586,54 @@ namespace SDVMobileControls
         public void ApplyPhysicalGamePad(object pad, Vector2 stick, bool btnX, bool btnA, bool btnB, bool btnY, bool btnLT, bool btnRT, bool btnMenu)
         {
             if (pad == null) return;
-            _arg1[0] = stick;
-            _setLeftStick?.Invoke(pad, _arg1);
-            _setButtonX?.Invoke(pad, btnX ? _argBoolTrue : _argBoolFalse);
-            _setButtonA?.Invoke(pad, btnA ? _argBoolTrue : _argBoolFalse);
-            _setButtonB?.Invoke(pad, btnB ? _argBoolTrue : _argBoolFalse);
-            _setButtonY?.Invoke(pad, btnY ? _argBoolTrue : _argBoolFalse);
-            _setButtonLT?.Invoke(pad, btnLT ? _argBoolTrue : _argBoolFalse);
-            _setButtonRT?.Invoke(pad, btnRT ? _argBoolTrue : _argBoolFalse);
-            _setButtonMenu?.Invoke(pad, btnMenu ? _argBoolTrue : _argBoolFalse);
-            _resetSimulatedMouse?.Invoke(pad, null);
-            _forwardInputToGame?.Invoke(pad, null);
+            EnsurePadDelegates(pad);
+            if (_fnSetLeftStick != null) _fnSetLeftStick(stick); else { _arg1[0] = stick; _setLeftStick?.Invoke(pad, _arg1); }
+            if (_fnSetBtnX != null) _fnSetBtnX(btnX); else _setButtonX?.Invoke(pad, btnX ? _argBoolTrue : _argBoolFalse);
+            if (_fnSetBtnA != null) _fnSetBtnA(btnA); else _setButtonA?.Invoke(pad, btnA ? _argBoolTrue : _argBoolFalse);
+            if (_fnSetBtnB != null) _fnSetBtnB(btnB); else _setButtonB?.Invoke(pad, btnB ? _argBoolTrue : _argBoolFalse);
+            if (_fnSetBtnY != null) _fnSetBtnY(btnY); else _setButtonY?.Invoke(pad, btnY ? _argBoolTrue : _argBoolFalse);
+            if (_fnSetBtnLT != null) _fnSetBtnLT(btnLT); else _setButtonLT?.Invoke(pad, btnLT ? _argBoolTrue : _argBoolFalse);
+            if (_fnSetBtnRT != null) _fnSetBtnRT(btnRT); else _setButtonRT?.Invoke(pad, btnRT ? _argBoolTrue : _argBoolFalse);
+            if (_fnSetBtnMenu != null) _fnSetBtnMenu(btnMenu); else _setButtonMenu?.Invoke(pad, btnMenu ? _argBoolTrue : _argBoolFalse);
+            if (_fnResetSimMouse != null) _fnResetSimMouse(); else _resetSimulatedMouse?.Invoke(pad, null);
+            if (_fnForwardInput != null) _fnForwardInput(); else _forwardInputToGame?.Invoke(pad, null);
         }
 
         public void ApplyInputWithMouse(object pad, Vector2 stick, bool btnX, bool btnA, bool btnMenu, Point? mousePos, bool mouseLeftDown, bool mouseRightDown = false, int rawW = 0, int rawH = 0)
         {
             if (pad == null) return;
+            EnsurePadDelegates(pad);
             if (rawW > 0 && rawH > 0)
                 SyncScreenBoundsAndMouseOverride(pad, rawW, rawH);
-            _arg1[0] = stick;
-            _setLeftStick?.Invoke(pad, _arg1);
-            _setButtonX?.Invoke(pad, btnX ? _argBoolTrue : _argBoolFalse);
-            _setButtonA?.Invoke(pad, btnA ? _argBoolTrue : _argBoolFalse);
-            _setButtonB?.Invoke(pad, _argBoolFalse);
-            _setButtonY?.Invoke(pad, _argBoolFalse);
-            _setButtonLT?.Invoke(pad, _argBoolFalse);
-            _setButtonRT?.Invoke(pad, _argBoolFalse);
-            _setButtonMenu?.Invoke(pad, btnMenu ? _argBoolTrue : _argBoolFalse);
+            if (_fnSetLeftStick != null) _fnSetLeftStick(stick); else { _arg1[0] = stick; _setLeftStick?.Invoke(pad, _arg1); }
+            if (_fnSetBtnX != null) _fnSetBtnX(btnX); else _setButtonX?.Invoke(pad, btnX ? _argBoolTrue : _argBoolFalse);
+            if (_fnSetBtnA != null) _fnSetBtnA(btnA); else _setButtonA?.Invoke(pad, btnA ? _argBoolTrue : _argBoolFalse);
+            if (_fnSetBtnB != null) _fnSetBtnB(false); else _setButtonB?.Invoke(pad, _argBoolFalse);
+            if (_fnSetBtnY != null) _fnSetBtnY(false); else _setButtonY?.Invoke(pad, _argBoolFalse);
+            if (_fnSetBtnLT != null) _fnSetBtnLT(false); else _setButtonLT?.Invoke(pad, _argBoolFalse);
+            if (_fnSetBtnRT != null) _fnSetBtnRT(false); else _setButtonRT?.Invoke(pad, _argBoolFalse);
+            if (_fnSetBtnMenu != null) _fnSetBtnMenu(btnMenu); else _setButtonMenu?.Invoke(pad, btnMenu ? _argBoolTrue : _argBoolFalse);
             if (mousePos.HasValue)
             {
-                _arg1[0] = mousePos.Value;
-                _setSimulatedMousePosition?.Invoke(pad, _arg1);
-                _setSimulatedMouseLeftDown?.Invoke(pad, mouseLeftDown ? _argBoolTrue : _argBoolFalse);
-                _setSimulatedMouseRightDown?.Invoke(pad, mouseRightDown ? _argBoolTrue : _argBoolFalse);
+                Point pt = mousePos.Value;
+                if (_fnSetSimMousePos != null) _fnSetSimMousePos(pt); else { _arg1[0] = pt; _setSimulatedMousePosition?.Invoke(pad, _arg1); }
+                if (_fnSetSimMouseLeft != null) _fnSetSimMouseLeft(mouseLeftDown); else _setSimulatedMouseLeftDown?.Invoke(pad, mouseLeftDown ? _argBoolTrue : _argBoolFalse);
+                if (_fnSetSimMouseRight != null) _fnSetSimMouseRight(mouseRightDown); else _setSimulatedMouseRightDown?.Invoke(pad, mouseRightDown ? _argBoolTrue : _argBoolFalse);
             }
             else
             {
-                _resetSimulatedMouse?.Invoke(pad, null);
+                if (_fnResetSimMouse != null) _fnResetSimMouse(); else _resetSimulatedMouse?.Invoke(pad, null);
             }
-            _forwardInputToGame?.Invoke(pad, null);
+            if (_fnForwardInput != null) _fnForwardInput(); else _forwardInputToGame?.Invoke(pad, null);
         }
 
         public void DrawCenteredString(SpriteBatch sb, Texture2D pixel, string text, Rectangle rect, Color color, int scale)
         {
+            if (_drawCenteredDel != null)
+            {
+                try { _drawCenteredDel(sb, pixel, text, rect, color, scale); } catch { }
+                return;
+            }
             if (_drawCenteredString == null) return;
             try
             {

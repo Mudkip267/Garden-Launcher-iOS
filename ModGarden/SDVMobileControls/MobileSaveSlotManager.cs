@@ -175,6 +175,13 @@ namespace SDVMobileControls
                 string charDir = Path.Combine(_slotsRoot, SanitizeName(meta.SaveFolderName));
                 string slotDir = Path.Combine(charDir, meta.SlotId);
                 string filesDir = Path.Combine(slotDir, "save_files");
+                if (Directory.Exists(filesDir))
+                {
+                    foreach (string oldFile in Directory.GetFiles(filesDir))
+                    {
+                        try { File.Delete(oldFile); } catch { }
+                    }
+                }
                 Directory.CreateDirectory(filesDir);
 
                 int copied = 0;
@@ -214,6 +221,16 @@ namespace SDVMobileControls
             message = "KHONG THE TAI BAN LUU";
             if (slot == null || string.IsNullOrEmpty(slot.SlotDir) || bridge == null)
                 return false;
+            if (Game1.IsMultiplayer && !Game1.IsMasterGame)
+            {
+                message = "CHI CHU PHONG MOI TAI DUOC";
+                return false;
+            }
+            if (bridge.IsMiddaySaving() || bridge.IsQuickSaveReloading())
+            {
+                message = "DANG XU LY LUU / TAI";
+                return false;
+            }
 
             try
             {
@@ -225,8 +242,24 @@ namespace SDVMobileControls
                     return false;
                 }
 
+                string[] snapFiles = Directory.GetFiles(filesDir);
+                if (snapFiles.Length == 0)
+                {
+                    message = "THIEU FILE BAN LUU";
+                    return false;
+                }
+
+                string snapQs = Path.Combine(slot.SlotDir, "quicksave.json");
+                string liveQs = bridge.GetQuickSaveStateFilePath(slot.SaveFolderName);
+                bool hasSnapQs = File.Exists(snapQs);
+                if (!hasSnapQs && string.IsNullOrEmpty(liveQs))
+                {
+                    message = "THIEU TRANG THAI LUU NHANH";
+                    return false;
+                }
+
                 // 1. Copy snapshot save XMLs back into the live character save folder
-                foreach (string src in Directory.GetFiles(filesDir))
+                foreach (string src in snapFiles)
                 {
                     string fn = Path.GetFileName(src);
                     string dst = Path.Combine(targetSaveDir, fn);
@@ -237,13 +270,19 @@ namespace SDVMobileControls
                     File.Move(tmp, dst);
                 }
 
-                // 2. Restore snapshot quicksave.json so QuickSaveManager restores exact time/location/tile/HP/energy
-                string snapQs = Path.Combine(slot.SlotDir, "quicksave.json");
-                string liveQs = bridge.GetQuickSaveStateFilePath(slot.SaveFolderName);
-                if (!string.IsNullOrEmpty(liveQs) && File.Exists(snapQs))
+                // 2. Restore snapshot quicksave.json (or synthesize clean morning/slot state and NEVER leave a stale newer liveQs!)
+                if (!string.IsNullOrEmpty(liveQs))
                 {
                     Directory.CreateDirectory(Path.GetDirectoryName(liveQs));
-                    File.Copy(snapQs, liveQs, overwrite: true);
+                    if (hasSnapQs)
+                    {
+                        File.Copy(snapQs, liveQs, overwrite: true);
+                    }
+                    else
+                    {
+                        string synthJson = $"{{\"SaveFolderName\":\"{slot.SaveFolderName}\",\"TimeOfDay\":{Math.Max(600, slot.TimeOfDay)},\"Health\":{Math.Max(1, slot.Health)},\"Stamina\":{Math.Max(1, slot.Stamina)},\"MineLevel\":{slot.MineLevel},\"TimestampText\":\"{slot.FormatGameTime()}\"}}";
+                        File.WriteAllText(liveQs, synthJson, Encoding.UTF8);
+                    }
                     bridge.InvalidateQuickSaveCache();
                 }
 

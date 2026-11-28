@@ -359,7 +359,6 @@ namespace SDVMobileControls
             _bootGameLaunched = true;
             WriteBootStage("90|Kích hoạt GameLaunched — chuẩn bị vào game…");
             ReportNativeBoot(90, "Kích hoạt GameLaunched — chuẩn bị vào game…", "Hoàn tất đồng bộ Content Patcher & cảm ứng", 4);
-            try { if (Game1.options != null) Game1.options.rumble = true; } catch { }
             BindAllLoadedTouchVirtualPads("GameLaunched");
             EnsureGardenModHooksInstalled("GameLaunched");
             InstallMobileHarmonyPatches("GameLaunched");
@@ -374,7 +373,6 @@ namespace SDVMobileControls
 
         private void OnSaveLoaded(object sender, SaveLoadedEventArgs e)
         {
-            try { if (Game1.options != null) Game1.options.rumble = true; } catch { }
             try { RamOptimizer?.OnSaveLoaded(); } catch { }
             // Stagger portrait sync past bed wake-up fade so the player can walk immediately without hitching!
             SchedulePortraitSync(reloadAll: true, delayTicks: 35, reason: "SaveLoaded");
@@ -395,7 +393,6 @@ namespace SDVMobileControls
 
         private void OnDayStarted(object sender, DayStartedEventArgs e)
         {
-            try { if (Game1.options != null) Game1.options.rumble = true; } catch { }
             try { RamOptimizer?.OnDayStarted(); } catch { }
             SchedulePortraitSync(reloadAll: true, delayTicks: 35, reason: "DayStarted");
             ResetMailboxWatchdogSnapshot();
@@ -403,6 +400,7 @@ namespace SDVMobileControls
 
         private void OnReturnedToTitle(object sender, ReturnedToTitleEventArgs e)
         {
+            try { Rumble.stopRumbling(); ExternalInput?.StopRumbleImmediate(); } catch { }
             RestoreMineFloorRelocateIfNeeded();
             RestoreStashedHudMessagesIfNeeded();
             _portraitSyncDelayTicks = -1;
@@ -628,6 +626,7 @@ namespace SDVMobileControls
         {
             if (e != null && e.IsLocalPlayer)
             {
+                try { Rumble.stopRumbling(); ExternalInput?.StopRumbleImmediate(); } catch { }
                 try { RamOptimizer?.OnWarped(e.NewLocation); } catch { }
                 try { RamOptimizer?.RefreshLocationPortraits(e.NewLocation); } catch { }
                 if (!_shaderDiagRanOutdoor && e.NewLocation != null && e.NewLocation.IsOutdoors)

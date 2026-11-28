@@ -65,6 +65,9 @@ namespace SDVMobileControls
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate void SetRumbleDelegate(float leftMotor, float rightMotor);
 
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate void SetRumbleExDelegate(float leftMotor, float rightMotor, float durationSec);
+
         [DllImport("/usr/lib/libSystem.dylib", EntryPoint = "dlsym")]
         private static extern IntPtr DarwinDlsym(IntPtr handle, [MarshalAs(UnmanagedType.LPStr)] string symbol);
 
@@ -111,8 +114,11 @@ namespace SDVMobileControls
         private SetMouseNormDelegate _nativeSetMouseNorm;
         private GetDirectTouchCountDelegate _nativeDirectTouches;
         private SetRumbleDelegate _nativeSetRumble;
+        private SetRumbleExDelegate _nativeSetRumbleEx;
         private float _lastSentRumbleL;
         private float _lastSentRumbleR;
+        private long _lastRumbleHeartbeatMs;
+        private int _lastSetVibrationTick = -1;
         private bool _nativeResolved;
         private bool _nativeAvailable;
         private bool _abiMismatchLogged;
@@ -213,6 +219,7 @@ namespace SDVMobileControls
                 IntPtr pSetMouse = IntPtr.Zero;
                 IntPtr pDirectTouch = IntPtr.Zero;
                 IntPtr pSetRumble = IntPtr.Zero;
+                IntPtr pSetRumbleEx = IntPtr.Zero;
 
                 string[] libNames =
                 {
@@ -228,6 +235,7 @@ namespace SDVMobileControls
                         NativeLibrary.TryGetExport(h, "sdv_ext_set_mouse_norm", out pSetMouse);
                         NativeLibrary.TryGetExport(h, "sdv_ext_get_direct_touch_count", out pDirectTouch);
                         NativeLibrary.TryGetExport(h, "sdv_ext_set_rumble", out pSetRumble);
+                        NativeLibrary.TryGetExport(h, "sdv_ext_set_rumble_ex", out pSetRumbleEx);
                         if (pPoll != IntPtr.Zero) break;
                     }
                 }
@@ -240,12 +248,16 @@ namespace SDVMobileControls
                         pSetMouse = DarwinDlsym(RTLD_DEFAULT, "sdv_ext_set_mouse_norm");
                         pDirectTouch = DarwinDlsym(RTLD_DEFAULT, "sdv_ext_get_direct_touch_count");
                         pSetRumble = DarwinDlsym(RTLD_DEFAULT, "sdv_ext_set_rumble");
+                        pSetRumbleEx = DarwinDlsym(RTLD_DEFAULT, "sdv_ext_set_rumble_ex");
                     }
                     catch { }
                 }
-                else if (pSetRumble == IntPtr.Zero)
+                else
                 {
-                    try { pSetRumble = DarwinDlsym(RTLD_DEFAULT, "sdv_ext_set_rumble"); } catch { }
+                    if (pSetRumble == IntPtr.Zero)
+                        try { pSetRumble = DarwinDlsym(RTLD_DEFAULT, "sdv_ext_set_rumble"); } catch { }
+                    if (pSetRumbleEx == IntPtr.Zero)
+                        try { pSetRumbleEx = DarwinDlsym(RTLD_DEFAULT, "sdv_ext_set_rumble_ex"); } catch { }
                 }
 
                 if (pPoll != IntPtr.Zero)
@@ -257,8 +269,10 @@ namespace SDVMobileControls
                         _nativeDirectTouches = Marshal.GetDelegateForFunctionPointer<GetDirectTouchCountDelegate>(pDirectTouch);
                     if (pSetRumble != IntPtr.Zero)
                         _nativeSetRumble = Marshal.GetDelegateForFunctionPointer<SetRumbleDelegate>(pSetRumble);
+                    if (pSetRumbleEx != IntPtr.Zero)
+                        _nativeSetRumbleEx = Marshal.GetDelegateForFunctionPointer<SetRumbleExDelegate>(pSetRumbleEx);
                     _nativeAvailable = true;
-                    _monitor?.Log($"[ExternalInput] Bound native iOS GameController bridge (Gamepad + Keyboard + Mouse + CoreHapticsRumble={_nativeSetRumble != null}).", LogLevel.Info);
+                    _monitor?.Log($"[ExternalInput] Bound native iOS GameController bridge (Gamepad + Keyboard + Mouse + CoreHapticsRumble={_nativeSetRumble != null || _nativeSetRumbleEx != null}, FiniteEx={_nativeSetRumbleEx != null}).", LogLevel.Info);
                 }
                 else
                 {
@@ -475,10 +489,8 @@ namespace SDVMobileControls
                         Game1.options.gamepadMode = Options.GamepadModes.ForceOn;
                     if (!Game1.options.gamepadControls)
                         Game1.options.gamepadControls = true;
-                    // Auto-enable controller rumble in launcher so bombs, fishing, combat & tools always vibrate Xbox/PS/MFi controllers!
-                    if (!Game1.options.rumble)
-                        Game1.options.rumble = true;
                     // CRITICAL for StardewValley.Rumble.update(): if playerOneIndex == -1, Rumble returns early before SetVibration!
+                    // (Respect user's Game1.options.rumble preference — never force it back ON if they disabled rumble!)
                     if ((int)Game1.playerOneIndex < 0)
                         Game1.playerOneIndex = PlayerIndex.One;
                 }
@@ -831,39 +843,106 @@ namespace SDVMobileControls
             catch { }
         }
 
+        public void StopRumbleImmediate()
+        {
+            _lastSentRumbleL = 0f;
+            _lastSentRumbleR = 0f;
+            _lastRumbleHeartbeatMs = 0;
+            try
+            {
+                if (_nativeSetRumbleEx != null)
+                    _nativeSetRumbleEx(0f, 0f, 0f);
+                else
+                    _nativeSetRumble?.Invoke(0f, 0f);
+            }
+            catch { }
+        }
+
+        private bool ShouldSuppressRumbleNow(out bool isWarpingOrFading)
+        {
+            isWarpingOrFading = false;
+            try
+            {
+                if (Game1.fadeToBlack || Game1.locationRequest != null || Game1.isWarping || Game1.pauseTime > 0f)
+                {
+                    isWarpingOrFading = true;
+                    return true;
+                }
+            }
+            catch { }
+            return (!IsPhysicalGamepadActive && !_gpConnected) ||
+                   IsSuppressed ||
+                   Game1.options == null ||
+                   !Game1.options.rumble ||
+                   Game1.paused;
+        }
+
+        private float GetRemainingRumbleSeconds(float fallbackSec)
+        {
+            EnsureRumbleFieldsResolved();
+            try
+            {
+                if (_fRumbleIsRumbling != null && (bool)_fRumbleIsRumbling.GetValue(null))
+                {
+                    float tCur = _fRumbleTimerCurrent != null ? (float)_fRumbleTimerCurrent.GetValue(null) : 0f;
+                    float tMax = _fRumbleTimerMax != null ? (float)_fRumbleTimerMax.GetValue(null) : 0f;
+                    float remMs = tMax - tCur;
+                    if (remMs <= 1f) return 0f;
+                    return Math.Clamp(remMs / 1000f, 0.05f, 0.24f);
+                }
+            }
+            catch { }
+            return Math.Clamp(fallbackSec, 0.05f, 0.24f);
+        }
+
         /// <summary>
         /// Direct vibration entrypoint (called by Harmony GamePad.SetVibration prefix when JIT/Harmony is active,
         /// or by our Zero-Harmony StardewValley.Rumble mirror on 0% JIT iOS).
         /// </summary>
         public void SetRumbleDirect(float leftMotor, float rightMotor)
         {
-            if ((!IsPhysicalGamepadActive && !_gpConnected) || IsSuppressed || Game1.options == null || Game1.paused)
+            _lastSetVibrationTick = Game1.ticks;
+            if (ShouldSuppressRumbleNow(out bool warping))
             {
-                PushRumbleToNative(0f, 0f);
+                if (warping)
+                {
+                    try { Rumble.stopRumbling(); } catch { }
+                }
+                PushRumbleToNative(0f, 0f, 0f);
                 return;
             }
-            if (!Game1.options.rumble)
-                Game1.options.rumble = true;
-            ShapeAndPushConsoleRumble(leftMotor, rightMotor);
+            float remSec = GetRemainingRumbleSeconds(0.16f);
+            if (remSec <= 0f && leftMotor <= 0.005f && rightMotor <= 0.005f)
+            {
+                PushRumbleToNative(0f, 0f, 0f);
+                return;
+            }
+            ShapeAndPushConsoleRumble(leftMotor, rightMotor, remSec > 0f ? remSec : 0.14f);
         }
 
         /// <summary>
         /// Zero-Harmony frame driver mirroring StardewValley.Rumble's exact live console/Switch vibration state
         /// (explosions, fish bite, casting, bobber reel, sword parry, damage/KO, monster hits, heavy tools,
-        /// horse footsteps on dirt vs stone, doors/warps) straight into iOS CoreHaptics GCController.haptics!
+        /// horse footsteps on dirt vs stone) straight into iOS CoreHaptics GCController.haptics!
         /// </summary>
         public void UpdateControllerRumble()
         {
-            if (_nativeSetRumble == null)
+            if (_nativeSetRumble == null && _nativeSetRumbleEx == null)
                 return;
 
-            if ((!IsPhysicalGamepadActive && !_gpConnected) || IsSuppressed || Game1.options == null || Game1.paused)
+            if (ShouldSuppressRumbleNow(out bool warping))
             {
-                PushRumbleToNative(0f, 0f);
+                if (warping)
+                {
+                    try { Rumble.stopRumbling(); } catch { }
+                }
+                PushRumbleToNative(0f, 0f, 0f);
                 return;
             }
-            if (!Game1.options.rumble)
-                Game1.options.rumble = true;
+
+            // If Harmony PrefixExtSetVibration already drove this tick cleanly, don't double-drive or fight it!
+            if (_lastSetVibrationTick == Game1.ticks)
+                return;
 
             EnsureRumbleFieldsResolved();
             if (_fRumbleIsRumbling == null)
@@ -873,19 +952,20 @@ namespace SDVMobileControls
             {
                 bool active = (bool)_fRumbleIsRumbling.GetValue(null);
                 float strength = 0f;
+                float remSec = 0.14f;
                 if (active)
                 {
                     float tCur = _fRumbleTimerCurrent != null ? (float)_fRumbleTimerCurrent.GetValue(null) : 0f;
                     float tMax = _fRumbleTimerMax != null ? (float)_fRumbleTimerMax.GetValue(null) : 0f;
-                    if (tCur <= tMax)
+                    float remMs = tMax - tCur;
+                    if (remMs > 1f)
                     {
+                        remSec = Math.Clamp(remMs / 1000f, 0.05f, 0.24f);
                         bool fading = _fRumbleFade != null && (bool)_fRumbleFade.GetValue(null);
                         if (fading)
                         {
                             float rawFade = _fRumbleDuringFade != null ? (float)_fRumbleDuringFade.GetValue(null) : 0f;
-                            // Vanilla Stardew's 500ms bomb rumbleAndFade starts at ~0.48 due to (500-1000)/1000 lerp;
-                            // boost fade curve cleanly so explosions feel unmistakably strong on Xbox/PS motors!
-                            strength = Math.Clamp(rawFade * 1.45f, 0f, 1f);
+                            strength = Math.Clamp(rawFade, 0f, 1f);
                         }
                         else
                         {
@@ -894,52 +974,53 @@ namespace SDVMobileControls
                     }
                 }
                 strength = Math.Clamp(strength, 0f, 1f);
-                ShapeAndPushConsoleRumble(strength, strength);
+                ShapeAndPushConsoleRumble(strength, strength, remSec);
             }
             catch
             {
-                PushRumbleToNative(0f, 0f);
+                PushRumbleToNative(0f, 0f, 0f);
             }
         }
 
-        private void ShapeAndPushConsoleRumble(float rawLeft, float rawRight)
+        private void ShapeAndPushConsoleRumble(float rawLeft, float rawRight, float durationSec)
         {
             float l = Math.Clamp(rawLeft, 0f, 1f);
             float r = Math.Clamp(rawRight, 0f, 1f);
             float peak = Math.Max(l, r);
             if (peak <= 0.005f)
             {
-                PushRumbleToNative(0f, 0f);
+                PushRumbleToNative(0f, 0f, 0f);
                 return;
             }
 
-            // Dual-motor console/Switch HD-rumble shaping:
-            // - Strong impacts (>=0.60: explosions, fish bite, damage/KO): deep left heavy motor + punchy right
-            // - Medium actions (0.25..0.60: casting, horse dirt gallop, heavy axe/pickaxe): balanced dual motor
-            // - Subtle cues (<0.25: fishing reel 0.10, monster hits 0.10-0.225, doors, wood/stone footsteps):
-            //   crisp high-frequency right handle lift so subtle 0.10 Switch-style tactile feedback is clearly felt!
+            // Perceptual gamma shaping for iOS CoreHaptics ERM/Bluetooth gamepads:
+            // Raw linear CoreHaptics intensity feels way too strong on physical Xbox/Switch/PS/MFi motors
+            // (0.15 linear already feels near-max on many Bluetooth controllers!).
+            // - Subtle cues (<0.25: footsteps 0.10, reel 0.10, door 0.15, light hits): light right-motor tap ONLY (L=0)
+            // - Medium actions (0.25..0.60: horse dirt 0.30, fishing cast 0.50, tools): gentle balanced dual motor
+            // - Strong impacts (>=0.60: damage 0.75, fish bite 0.75-0.95, bombs 1.0): firm punch capped safely
             float outL, outR;
-            if (peak >= 0.60f)
+            if (peak < 0.25f)
             {
-                outL = l;
-                outR = r * 0.85f;
+                outL = 0f;
+                outR = Math.Clamp(MathF.Pow(peak, 1.50f) * 0.65f, 0.03f, 0.14f);
             }
-            else if (peak >= 0.25f)
+            else if (peak < 0.60f)
             {
-                outL = l;
-                outR = r * 0.92f;
+                outL = MathF.Pow(l, 1.70f) * 0.50f;
+                outR = MathF.Pow(r, 1.50f) * 0.55f;
             }
             else
             {
-                outL = l * 0.72f;
-                outR = Math.Clamp(Math.Max(r * 1.28f, 0.15f), 0f, 1f);
+                outL = MathF.Pow(l, 1.55f) * 0.68f;
+                outR = MathF.Pow(r, 1.45f) * 0.58f;
             }
-            PushRumbleToNative(outL, outR);
+            PushRumbleToNative(outL, outR, durationSec);
         }
 
-        private void PushRumbleToNative(float left, float right)
+        private void PushRumbleToNative(float left, float right, float durationSec = 0.16f)
         {
-            if (_nativeSetRumble == null)
+            if (_nativeSetRumble == null && _nativeSetRumbleEx == null)
                 return;
             left = Math.Clamp(left, 0f, 1f);
             right = Math.Clamp(right, 0f, 1f);
@@ -947,14 +1028,26 @@ namespace SDVMobileControls
             bool activePrev = _lastSentRumbleL > 0.005f || _lastSentRumbleR > 0.005f;
             if (!activeNow && !activePrev)
                 return;
+
+            long nowMs = Environment.TickCount64;
+            bool heartbeatDue = activeNow && (nowMs - _lastRumbleHeartbeatMs) >= 100;
             if (activeNow == activePrev &&
-                Math.Abs(left - _lastSentRumbleL) < 0.015f &&
-                Math.Abs(right - _lastSentRumbleR) < 0.015f)
+                !heartbeatDue &&
+                Math.Abs(left - _lastSentRumbleL) < 0.02f &&
+                Math.Abs(right - _lastSentRumbleR) < 0.02f)
                 return;
 
             _lastSentRumbleL = left;
             _lastSentRumbleR = right;
-            try { _nativeSetRumble(left, right); } catch { }
+            _lastRumbleHeartbeatMs = activeNow ? nowMs : 0;
+            try
+            {
+                if (_nativeSetRumbleEx != null)
+                    _nativeSetRumbleEx(left, right, activeNow ? Math.Clamp(durationSec, 0.05f, 0.24f) : 0f);
+                else
+                    _nativeSetRumble?.Invoke(left, right);
+            }
+            catch { }
         }
 
         public void OnGameSetMousePositionRaw(int x, int y)

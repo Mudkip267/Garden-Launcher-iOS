@@ -441,9 +441,12 @@ static void sdvInstallIndirectTouchFilterOnView(UIView *v) {
 
 // ---- Native iOS 14–27+ CoreHaptics Controller Rumble Engine (Xbox / DualSense / Switch / MFi) ----
 static dispatch_queue_t gRumbleQueue = nil;
+static dispatch_source_t gRumbleWatchdog = nil;
 static os_unfair_lock gRumbleLock = OS_UNFAIR_LOCK_INIT;
 static float gRumbleTargetL = 0.0f;
 static float gRumbleTargetR = 0.0f;
+static float gRumbleTargetDur = 0.18f;
+static uint64_t gRumbleSeq = 0;
 static BOOL gRumbleDirty = NO;
 
 static __weak GCController *gRumbleController = nil;
@@ -458,6 +461,8 @@ static BOOL gRumbleNeedsRestartL = NO;
 static BOOL gRumbleNeedsRestartR = NO;
 static float gRumbleAppliedL = 0.0f;
 static float gRumbleAppliedR = 0.0f;
+static CFTimeInterval gRumbleExpireL = 0.0;
+static CFTimeInterval gRumbleExpireR = 0.0;
 static BOOL gRumbleErrLogged = NO;
 
 static void sdvRumbleEnsureQueue(void) {
@@ -467,11 +472,36 @@ static void sdvRumbleEnsureQueue(void) {
     });
 }
 
+static void sdvRumbleCancelWatchdogOnQueue(void) {
+    if (gRumbleWatchdog) {
+        dispatch_source_cancel(gRumbleWatchdog);
+        gRumbleWatchdog = nil;
+    }
+}
+
+static void sdvRumbleStopPlayerOnQueue(id<CHHapticPatternPlayer> __strong *playerPtr) API_AVAILABLE(ios(14.0)) {
+    if (!playerPtr || !*playerPtr) return;
+    @try {
+        // Send explicit 0.0 intensity before stop so Bluetooth HID controllers (Xbox/Switch/PS/MFi)
+        // immediately clear actuator PWM instead of coasting or lingering.
+        CHHapticDynamicParameter *zeroP = [[CHHapticDynamicParameter alloc]
+            initWithParameterID:CHHapticDynamicParameterIDHapticIntensityControl
+                          value:0.0f
+                   relativeTime:0.0];
+        [*playerPtr sendParameters:@[zeroP] atTime:CHHapticTimeImmediate error:nil];
+    } @catch (NSException *ignored) { }
+    @try {
+        [*playerPtr stopAtTime:CHHapticTimeImmediate error:nil];
+    } @catch (NSException *ignored) { }
+    *playerPtr = nil;
+}
+
 static void sdvRumbleTeardownOnQueue(void) {
+    sdvRumbleCancelWatchdogOnQueue();
     if (@available(iOS 14.0, *)) {
         @try {
-            if (gRumblePlayerL) { [gRumblePlayerL stopAtTime:CHHapticTimeImmediate error:nil]; }
-            if (gRumblePlayerR) { [gRumblePlayerR stopAtTime:CHHapticTimeImmediate error:nil]; }
+            sdvRumbleStopPlayerOnQueue(&gRumblePlayerL);
+            sdvRumbleStopPlayerOnQueue(&gRumblePlayerR);
             if (gRumbleEngineL) { [gRumbleEngineL stopWithCompletionHandler:nil]; }
             if (gRumbleEngineR) { [gRumbleEngineR stopWithCompletionHandler:nil]; }
         } @catch (NSException *ignored) { }
@@ -488,6 +518,8 @@ static void sdvRumbleTeardownOnQueue(void) {
     gRumbleNeedsRestartR = NO;
     gRumbleAppliedL = 0.0f;
     gRumbleAppliedR = 0.0f;
+    gRumbleExpireL = 0.0;
+    gRumbleExpireR = 0.0;
     gRumbleErrLogged = NO;
 }
 
@@ -502,8 +534,8 @@ static BOOL sdvRumbleCreateEngineOnQueue(GCController *ctrl, GCHapticsLocality l
         eng.resetHandler = ^{
             if (gRumbleQueue) {
                 dispatch_async(gRumbleQueue, ^{
-                    if (isLeft) { gRumbleNeedsRestartL = YES; gRumbleRunningL = NO; gRumblePlayerL = nil; gRumbleAppliedL = 0.0f; }
-                    else        { gRumbleNeedsRestartR = YES; gRumbleRunningR = NO; gRumblePlayerR = nil; gRumbleAppliedR = 0.0f; }
+                    if (isLeft) { gRumbleNeedsRestartL = YES; gRumbleRunningL = NO; gRumblePlayerL = nil; gRumbleAppliedL = 0.0f; gRumbleExpireL = 0.0; }
+                    else        { gRumbleNeedsRestartR = YES; gRumbleRunningR = NO; gRumblePlayerR = nil; gRumbleAppliedR = 0.0f; gRumbleExpireR = 0.0; }
                 });
             }
         };
@@ -511,8 +543,8 @@ static BOOL sdvRumbleCreateEngineOnQueue(GCController *ctrl, GCHapticsLocality l
             (void)reason;
             if (gRumbleQueue) {
                 dispatch_async(gRumbleQueue, ^{
-                    if (isLeft) { gRumbleNeedsRestartL = YES; gRumbleRunningL = NO; gRumblePlayerL = nil; gRumbleAppliedL = 0.0f; }
-                    else        { gRumbleNeedsRestartR = YES; gRumbleRunningR = NO; gRumblePlayerR = nil; gRumbleAppliedR = 0.0f; }
+                    if (isLeft) { gRumbleNeedsRestartL = YES; gRumbleRunningL = NO; gRumblePlayerL = nil; gRumbleAppliedL = 0.0f; gRumbleExpireL = 0.0; }
+                    else        { gRumbleNeedsRestartR = YES; gRumbleRunningR = NO; gRumblePlayerR = nil; gRumbleAppliedR = 0.0f; gRumbleExpireR = 0.0; }
                 });
             }
         };
@@ -570,24 +602,27 @@ static void sdvRumbleEnsureControllerOnQueue(GCController *ctrl) API_AVAILABLE(i
     }
 }
 
-// SDL2-proven iOS Xbox/PS/MFi rumble driver:
-// Uses standard CHHapticPatternPlayer + GCHapticDurationInfinite + direct CHHapticEventParameterIDHapticIntensity
-// (Xbox Bluetooth controllers ignore CHHapticDynamicParameter & CHHapticAdvancedPatternPlayer loopEnabled on iOS!).
+// Finite-duration, watchdog-guarded iOS Xbox/PS/Switch/MFi rumble driver:
+// NEVER uses GCHapticDurationInfinite (which gets stuck at full blast for seconds during
+// door warps / map loads when the game thread pauses!). Every event is strictly finite
+// (0.04s..0.28s) and backed by a native dispatch_source watchdog on gRumbleQueue.
 static void sdvRumbleApplyMotorOnQueue(CHHapticEngine *eng, id<CHHapticPatternPlayer> __strong *playerPtr,
-                                       float intensity, float sharpness,
-                                       BOOL *runningFlag, BOOL *needsRestartFlag, float *appliedPtr) API_AVAILABLE(ios(14.0)) {
+                                       float intensity, float sharpness, NSTimeInterval durSec,
+                                       BOOL *runningFlag, BOOL *needsRestartFlag,
+                                       float *appliedPtr, CFTimeInterval *expirePtr) API_AVAILABLE(ios(14.0)) {
     if (!eng || !playerPtr) return;
     @try {
         if (intensity <= 0.005f) {
-            if (*playerPtr) {
-                [*playerPtr stopAtTime:CHHapticTimeImmediate error:nil];
-                *playerPtr = nil;
-            }
+            sdvRumbleStopPlayerOnQueue(playerPtr);
             *runningFlag = NO;
             *appliedPtr = 0.0f;
+            *expirePtr = 0.0;
             return;
         }
-        if (*runningFlag && *playerPtr != nil && fabsf(intensity - *appliedPtr) < 0.055f) {
+        CFTimeInterval now = CACurrentMediaTime();
+        if (*runningFlag && *playerPtr != nil &&
+            fabsf(intensity - *appliedPtr) < 0.045f &&
+            now < (*expirePtr - 0.06)) {
             return;
         }
         if (*needsRestartFlag) {
@@ -596,7 +631,11 @@ static void sdvRumbleApplyMotorOnQueue(CHHapticEngine *eng, id<CHHapticPatternPl
             *needsRestartFlag = NO;
             *runningFlag = NO;
             *playerPtr = nil;
+            *expirePtr = 0.0;
         }
+
+        if (durSec < 0.04) durSec = 0.04;
+        else if (durSec > 0.28) durSec = 0.28;
 
         NSError *err = nil;
         CHHapticEventParameter *pInt = [[CHHapticEventParameter alloc]
@@ -607,7 +646,7 @@ static void sdvRumbleApplyMotorOnQueue(CHHapticEngine *eng, id<CHHapticPatternPl
             initWithEventType:CHHapticEventTypeHapticContinuous
                    parameters:@[pInt, pShp]
                  relativeTime:0.0
-                     duration:(NSTimeInterval)GCHapticDurationInfinite];
+                     duration:durSec];
         CHHapticPattern *pat = [[CHHapticPattern alloc] initWithEvents:@[ev] parameters:@[] error:&err];
         if (!pat) {
             if (!gRumbleErrLogged) {
@@ -634,9 +673,11 @@ static void sdvRumbleApplyMotorOnQueue(CHHapticEngine *eng, id<CHHapticPatternPl
             if ([eng startAndReturnError:&err] && [newPlayer startAtTime:CHHapticTimeImmediate error:&err]) {
                 *runningFlag = YES;
                 *appliedPtr = intensity;
+                *expirePtr = now + durSec;
             } else {
                 *runningFlag = NO;
                 *appliedPtr = 0.0f;
+                *expirePtr = 0.0;
                 if (!gRumbleErrLogged) {
                     gRumbleErrLogged = YES;
                     sdvBootLogFmt([NSString stringWithFormat:@"[EXT-RUMBLE] Player start error: %@", err.localizedDescription]);
@@ -645,41 +686,81 @@ static void sdvRumbleApplyMotorOnQueue(CHHapticEngine *eng, id<CHHapticPatternPl
         } else {
             *runningFlag = YES;
             *appliedPtr = intensity;
+            *expirePtr = now + durSec;
         }
     } @catch (NSException *ignored) {
         *needsRestartFlag = YES;
         *runningFlag = NO;
         *playerPtr = nil;
         *appliedPtr = 0.0f;
+        *expirePtr = 0.0;
     }
+}
+
+static void sdvRumbleArmWatchdogOnQueue(NSTimeInterval durSec, uint64_t expectedSeq) API_AVAILABLE(ios(14.0)) {
+    sdvRumbleCancelWatchdogOnQueue();
+    if (!gRumbleQueue) return;
+    NSTimeInterval timeoutSec = durSec + 0.035;
+    if (timeoutSec < 0.08) timeoutSec = 0.08;
+    else if (timeoutSec > 0.32) timeoutSec = 0.32;
+
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, gRumbleQueue);
+    if (!timer) return;
+    dispatch_source_set_timer(timer,
+                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeoutSec * (double)NSEC_PER_SEC)),
+                              DISPATCH_TIME_FOREVER,
+                              (uint64_t)(10 * NSEC_PER_MSEC));
+    dispatch_source_set_event_handler(timer, ^{
+        @autoreleasepool {
+            os_unfair_lock_lock(&gRumbleLock);
+            BOOL stillSame = (gRumbleSeq == expectedSeq);
+            if (stillSame) {
+                gRumbleTargetL = 0.0f;
+                gRumbleTargetR = 0.0f;
+            }
+            os_unfair_lock_unlock(&gRumbleLock);
+            if (stillSame) {
+                sdvRumbleApplyMotorOnQueue(gRumbleEngineL, &gRumblePlayerL, 0.0f, 0.35f, 0.0, &gRumbleRunningL, &gRumbleNeedsRestartL, &gRumbleAppliedL, &gRumbleExpireL);
+                sdvRumbleApplyMotorOnQueue(gRumbleEngineR, &gRumblePlayerR, 0.0f, 0.48f, 0.0, &gRumbleRunningR, &gRumbleNeedsRestartR, &gRumbleAppliedR, &gRumbleExpireR);
+            }
+            sdvRumbleCancelWatchdogOnQueue();
+        }
+    });
+    gRumbleWatchdog = timer;
+    dispatch_resume(timer);
 }
 
 static void sdvRumbleStopImmediate(BOOL teardown) {
     os_unfair_lock_lock(&gRumbleLock);
     gRumbleTargetL = 0.0f;
     gRumbleTargetR = 0.0f;
+    gRumbleTargetDur = 0.0f;
+    gRumbleSeq++;
     gRumbleDirty = NO;
     os_unfair_lock_unlock(&gRumbleLock);
 
     if (!gRumbleQueue) return;
     dispatch_async(gRumbleQueue, ^{
         @autoreleasepool {
+            sdvRumbleCancelWatchdogOnQueue();
             if (teardown) {
                 sdvRumbleTeardownOnQueue();
             } else if (@available(iOS 14.0, *)) {
-                sdvRumbleApplyMotorOnQueue(gRumbleEngineL, &gRumblePlayerL, 0.0f, 0.15f, &gRumbleRunningL, &gRumbleNeedsRestartL, &gRumbleAppliedL);
-                sdvRumbleApplyMotorOnQueue(gRumbleEngineR, &gRumblePlayerR, 0.0f, 0.65f, &gRumbleRunningR, &gRumbleNeedsRestartR, &gRumbleAppliedR);
+                sdvRumbleApplyMotorOnQueue(gRumbleEngineL, &gRumblePlayerL, 0.0f, 0.35f, 0.0, &gRumbleRunningL, &gRumbleNeedsRestartL, &gRumbleAppliedL, &gRumbleExpireL);
+                sdvRumbleApplyMotorOnQueue(gRumbleEngineR, &gRumblePlayerR, 0.0f, 0.48f, 0.0, &gRumbleRunningR, &gRumbleNeedsRestartR, &gRumbleAppliedR, &gRumbleExpireR);
             }
         }
     });
 }
 
 __attribute__((visibility("default")))
-void sdv_ext_set_rumble(float leftMotor, float rightMotor) {
+void sdv_ext_set_rumble_ex(float leftMotor, float rightMotor, float durationSec) {
     if (isnan(leftMotor) || leftMotor < 0.0f) leftMotor = 0.0f;
     else if (leftMotor > 1.0f) leftMotor = 1.0f;
     if (isnan(rightMotor) || rightMotor < 0.0f) rightMotor = 0.0f;
     else if (rightMotor > 1.0f) rightMotor = 1.0f;
+    if (isnan(durationSec) || durationSec <= 0.0f) durationSec = 0.16f;
+    else if (durationSec > 0.28f) durationSec = 0.28f;
 
     if (gGardenOpenCached || gNativeTextEditingCount > 0) {
         leftMotor = 0.0f;
@@ -687,18 +768,16 @@ void sdv_ext_set_rumble(float leftMotor, float rightMotor) {
     }
 
     os_unfair_lock_lock(&gRumbleLock);
-    BOOL activeNowL = (leftMotor > 0.005f);
-    BOOL activeOldL = (gRumbleTargetL > 0.005f);
-    BOOL activeNowR = (rightMotor > 0.005f);
-    BOOL activeOldR = (gRumbleTargetR > 0.005f);
-    if (activeNowL == activeOldL && activeNowR == activeOldR &&
-        fabsf(leftMotor - gRumbleTargetL) < 0.015f &&
-        fabsf(rightMotor - gRumbleTargetR) < 0.015f) {
+    BOOL activeNow = (leftMotor > 0.005f || rightMotor > 0.005f);
+    BOOL activeOld = (gRumbleTargetL > 0.005f || gRumbleTargetR > 0.005f);
+    if (!activeNow && !activeOld && !gRumbleDirty) {
         os_unfair_lock_unlock(&gRumbleLock);
         return;
     }
     gRumbleTargetL = leftMotor;
     gRumbleTargetR = rightMotor;
+    gRumbleTargetDur = durationSec;
+    gRumbleSeq++;
     BOOL shouldSchedule = !gRumbleDirty;
     gRumbleDirty = YES;
     os_unfair_lock_unlock(&gRumbleLock);
@@ -713,6 +792,8 @@ void sdv_ext_set_rumble(float leftMotor, float rightMotor) {
                 os_unfair_lock_lock(&gRumbleLock);
                 float l = gRumbleTargetL;
                 float r = gRumbleTargetR;
+                float dur = gRumbleTargetDur;
+                uint64_t seq = gRumbleSeq;
                 gRumbleDirty = NO;
                 os_unfair_lock_unlock(&gRumbleLock);
 
@@ -721,20 +802,31 @@ void sdv_ext_set_rumble(float leftMotor, float rightMotor) {
                     if (gRumbleEngineL || gRumbleEngineR) sdvRumbleTeardownOnQueue();
                     return;
                 }
-                if (l <= 0.005f && r <= 0.005f && !gRumbleRunningL && !gRumbleRunningR) {
+                if (l <= 0.005f && r <= 0.005f) {
+                    sdvRumbleCancelWatchdogOnQueue();
+                    if (gRumbleRunningL || gRumbleRunningR || gRumblePlayerL || gRumblePlayerR) {
+                        sdvRumbleApplyMotorOnQueue(gRumbleEngineL, &gRumblePlayerL, 0.0f, 0.35f, 0.0, &gRumbleRunningL, &gRumbleNeedsRestartL, &gRumbleAppliedL, &gRumbleExpireL);
+                        sdvRumbleApplyMotorOnQueue(gRumbleEngineR, &gRumblePlayerR, 0.0f, 0.48f, 0.0, &gRumbleRunningR, &gRumbleNeedsRestartR, &gRumbleAppliedR, &gRumbleExpireR);
+                    }
                     return;
                 }
                 sdvRumbleEnsureControllerOnQueue(ctrl);
                 if (gRumbleDualMotor) {
-                    sdvRumbleApplyMotorOnQueue(gRumbleEngineL, &gRumblePlayerL, l, 0.15f, &gRumbleRunningL, &gRumbleNeedsRestartL, &gRumbleAppliedL);
-                    sdvRumbleApplyMotorOnQueue(gRumbleEngineR, &gRumblePlayerR, r, 0.65f, &gRumbleRunningR, &gRumbleNeedsRestartR, &gRumbleAppliedR);
+                    sdvRumbleApplyMotorOnQueue(gRumbleEngineL, &gRumblePlayerL, l, 0.35f, (NSTimeInterval)dur, &gRumbleRunningL, &gRumbleNeedsRestartL, &gRumbleAppliedL, &gRumbleExpireL);
+                    sdvRumbleApplyMotorOnQueue(gRumbleEngineR, &gRumblePlayerR, r, 0.48f, (NSTimeInterval)dur, &gRumbleRunningR, &gRumbleNeedsRestartR, &gRumbleAppliedR, &gRumbleExpireR);
                 } else {
                     float combined = fmaxf(l, r);
-                    sdvRumbleApplyMotorOnQueue(gRumbleEngineL, &gRumblePlayerL, combined, 0.35f, &gRumbleRunningL, &gRumbleNeedsRestartL, &gRumbleAppliedL);
+                    sdvRumbleApplyMotorOnQueue(gRumbleEngineL, &gRumblePlayerL, combined, 0.42f, (NSTimeInterval)dur, &gRumbleRunningL, &gRumbleNeedsRestartL, &gRumbleAppliedL, &gRumbleExpireL);
                 }
+                sdvRumbleArmWatchdogOnQueue((NSTimeInterval)dur, seq);
             }
         }
     });
+}
+
+__attribute__((visibility("default")))
+void sdv_ext_set_rumble(float leftMotor, float rightMotor) {
+    sdv_ext_set_rumble_ex(leftMotor, rightMotor, 0.18f);
 }
 
 @interface SDVExternalInputHost : NSObject

@@ -40,7 +40,7 @@ namespace SDVMobileControls
         public bool SafeCrafting { get; set; } = true;      // Hover-first 2-tap safe crafting/cooking/bundles
         public int AutoSaveMinutes { get; set; } = 0;       // 0 = OFF (default, zero stutter), 3 / 5 / 10 minutes periodic AutoSave slot
         public bool ReduceWeather { get; set; } = false;    // Default OFF; optional cap on excessive rain/wind debris particles for smoother FPS
-        public float UiScaleOverride { get; set; } = 0.0f;  // 0 = game default, or 0.75..1.50 live UI scale for PC mod menus
+        public float UiScaleOverride { get; set; } = 0.0f;  // 0 = game default, or 0.75..2.50 live UI scale for PC mod menus
         public float ButtonScale { get; set; } = 1.0f;
 
         // v7.11 Mobile Pro toggles (all cleanly switchable in Mod Garden!)
@@ -375,8 +375,8 @@ namespace SDVMobileControls
                             break;
                         case "reduceweather": ReduceWeather = ParseBool(v, false); break;
                         case "uiscale":
-                            float us = ParseFloat(v, 0.0f, 0.0f, 1.50f);
-                            UiScaleOverride = (us >= 0.70f) ? Math.Clamp(us, 0.75f, 1.50f) : 0.0f;
+                            float us = ParseFloat(v, 0.0f, 0.0f, 2.50f);
+                            UiScaleOverride = (us >= 0.70f) ? Math.Clamp(us, 0.75f, 2.50f) : 0.0f;
                             break;
                         case "buttonscale": ButtonScale = ParseFloat(v, 1.0f, 0.75f, 1.45f); break;
                         case "emotebtn": ShowEmoteButton = ParseBool(v, true); break;

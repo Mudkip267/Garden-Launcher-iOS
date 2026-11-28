@@ -225,6 +225,7 @@ namespace SDVMobileControls
             helper.Events.Display.RenderedWorld += OnRenderedWorldRestoreMineFloor;
             helper.Events.Display.RenderingStep += OnRenderingStepHudRelocate;
             helper.Events.Display.RenderedStep += OnRenderedStepHudRelocate;
+            helper.Events.Display.MenuChanged += OnMenuChangedExtendUiScale;
             helper.Events.GameLoop.Saved += OnSaved;
             helper.Events.GameLoop.SaveLoaded += OnSaveLoaded;
             helper.Events.GameLoop.DayStarted += OnDayStarted;
@@ -285,6 +286,51 @@ namespace SDVMobileControls
                     File.WriteAllText(Path.Combine(_bootDocsDir, "sdv_boot_ready.flag"), "1");
             }
             catch { }
+        }
+
+        private void OnMenuChangedExtendUiScale(object sender, MenuChangedEventArgs e)
+        {
+            try
+            {
+                if (e?.NewMenu is GameMenu gm && gm.pages != null)
+                {
+                    for (int i = 0; i < gm.pages.Count; i++)
+                    {
+                        if (gm.pages[i] is OptionsPage op)
+                            ExtendUiScaleOptionsPage(op);
+                    }
+                }
+                else if (e?.NewMenu is OptionsPage directOp)
+                {
+                    ExtendUiScaleOptionsPage(directOp);
+                }
+            }
+            catch { }
+        }
+
+        private static void ExtendUiScaleOptionsPage(OptionsPage op)
+        {
+            if (op?.options == null)
+                return;
+            for (int i = 0; i < op.options.Count; i++)
+            {
+                if (op.options[i] is not OptionsPlusMinus opm || opm.whichOption != 39 || opm.options == null)
+                    continue;
+                if (!opm.options.Contains("250%"))
+                {
+                    bool sameList = ReferenceEquals(opm.displayOptions, opm.options);
+                    for (int pct = 155; pct <= 250; pct += 5)
+                    {
+                        string label = pct + "%";
+                        if (!opm.options.Contains(label))
+                            opm.options.Add(label);
+                        if (!sameList && opm.displayOptions != null && !opm.displayOptions.Contains(label))
+                            opm.displayOptions.Add(label);
+                    }
+                    Game1.options?.setPlusMinusToProperValue(opm);
+                }
+                break;
+            }
         }
 
         private void OnRenderedBootCheck(object sender, RenderedEventArgs e)

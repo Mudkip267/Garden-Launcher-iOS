@@ -2828,7 +2828,7 @@ static void sdvSpawnDiscordSparkleBurst(UIView *hostView, CGPoint origin, CGFloa
         float safePadVal = (_mobileCfg.safePaddingPx < 0) ? -4.0f : (float)_mobileCfg.safePaddingPx;
         [_pane addArrangedSubview:mkGroupedRows(@[
             [self mkSliderRow:@"Đệm lề né Tai thỏ / Dynamic Island" min:-4.0f max:80.0f val:safePadVal valText:safePadTxt tag:19],
-            [self mkSliderRow:@"Cỡ chữ & Menu PC / Mod (UI Scale)" min:0.70f max:1.50f val:uiScVal valText:uiScTxt tag:18]
+            [self mkSliderRow:@"Cỡ chữ & Menu PC / Mod (UI Scale)" min:0.70f max:2.50f val:uiScVal valText:uiScTxt tag:18]
         ], 14)];
 
     } else if (_ctrlSectionTab == 2) {
@@ -3155,7 +3155,7 @@ static void sdvSpawnDiscordSparkleBurst(UIView *hostView, CGPoint origin, CGFloa
             return;
         case 18:
             if (!_mobileCfg) _mobileCfg = [SDVMobileCtrlConfig loadFromDocuments:_root.path];
-            _mobileCfg.uiScaleOverride = (sl.value < 0.73f) ? 0.0f : sdvClampf(q, 0.75f, 1.50f);
+            _mobileCfg.uiScaleOverride = (sl.value < 0.73f) ? 0.0f : sdvClampf(q, 0.75f, 2.50f);
             [self syncLiveLabels];
             {
                 NSTimeInterval nowM = NSDate.date.timeIntervalSinceReferenceDate;
@@ -4510,6 +4510,7 @@ static BOOL sdvResolveXnaKeyString(NSString *rawKey, NSString **outLabel, NSInte
         [self access:YES block:^(NSURL *r) {
             res = sdvHealInstalledCaseSensitivity(r.path);
             syncContentPackLocaleFallbacks(r.path);
+            syncModI18nVietnameseAliases(r.path);
             [self scan:r];
         }];
     } done:^{
@@ -4831,6 +4832,7 @@ static NSArray<UTType *> *sdvAllArchivePickerTypes(void) {
     syncBundledSmapi(_root.path);
     syncBundledMobileControls(_root.path);
     syncContentPackLocaleFallbacks(_root.path);
+    syncModI18nVietnameseAliases(_root.path);
     NSDictionary *st = gameDataStatus(_root.path);
     if ([st[@"ready"] boolValue]) {
         [self refresh];
@@ -4964,10 +4966,27 @@ static NSArray<UTType *> *sdvAllArchivePickerTypes(void) {
         if (p[@"translationOwner"] != NSNull.null) {
             NSString *owner = p[@"translationOwner"];
             NSDictionary *combined = p[@"combinedLibrary"] ?: self->_library;
-            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Chọn mod nhận bản dịch" message:owner.length ? owner : @"Gói chỉ chứa i18n. Chọn đúng mod gốc cho bản dịch này." preferredStyle:UIAlertControllerStyleAlert];
-            for (NSString *key in [combined.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+            NSMutableArray<NSString *> *selectableKeys = [NSMutableArray array];
+            BOOL hasUserMods = (sdvCountSelectableMods(combined) > 0 && sdvCountSelectableMods(combined) < combined.count);
+            for (NSString *k in combined) {
+                if (hasUserMods && sdvIsProtectedSystemModKey(k.lowercaseString)) continue;
+                [selectableKeys addObject:k];
+            }
+            [selectableKeys sortUsingComparator:^NSComparisonResult(NSString *ka, NSString *kb) {
+                NSDictionary *ma = combined[ka][@"manifest"];
+                NSDictionary *mb = combined[kb][@"manifest"];
+                NSString *na = field(ma, @"Name").length ? field(ma, @"Name") : ka;
+                NSString *nb = field(mb, @"Name").length ? field(mb, @"Name") : kb;
+                return [na localizedCaseInsensitiveCompare:nb];
+            }];
+            NSString *msg = owner.length
+                ? [NSString stringWithFormat:@"Chọn đúng mod gốc để chép đè / thêm bản dịch từ \"%@\":", owner]
+                : @"Gói chỉ chứa tệp ghi đè / i18n. Chọn đúng mod gốc để cài vào:";
+            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Chọn mod nhận Việt hóa / ghi đè" message:msg preferredStyle:UIAlertControllerStyleAlert];
+            for (NSString *key in selectableKeys) {
                 NSDictionary *m = combined[key][@"manifest"];
-                [a addAction:[UIAlertAction actionWithTitle:field(m, @"Name").length ? field(m, @"Name") : key style:UIAlertActionStyleDefault handler:^(UIAlertAction *ac) {
+                NSString *title = field(m, @"Name").length ? field(m, @"Name") : key;
+                [a addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *ac) {
                     self->_translations[owner] = key;
                     [self prepare];
                 }]];
@@ -5080,6 +5099,7 @@ static NSArray<UTType *> *sdvAllArchivePickerTypes(void) {
             NSDictionary *p = plan(r.path, self->_stage, self->_prefs, self->_translations, self->_stagedFiles);
             written = installBatch(r, self->_stage, p[@"map"], p[@"obsoleteDisabled"], batchLabel);
             syncContentPackLocaleFallbacks(r.path);
+            syncModI18nVietnameseAliases(r.path);
             self->_plan = nil;
             [self->_stagedFiles removeAllObjects];
             self->_nextPkgIdx = 0;

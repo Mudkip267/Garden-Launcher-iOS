@@ -4016,7 +4016,8 @@ __attribute__((constructor)) static void startGardenControls(void) {
             syncBundledMobileControls(docs);
             NSUInteger hpFiles = sdvDeployActiveHotPatchFiles(docs);
             NSUInteger cpFallbackLinked = syncContentPackLocaleFallbacks(docs);
-            sdvBootLogFmt([NSString stringWithFormat:@"[BOOT 2] Bundled Lidgren / SMAPI (%@) / SDVMobileControls synced (ver=%@, hotpatch=%@:%lu, cpLocaleFallbacks=%lu)", smapiSyncNote ?: @"?", sdvEffectiveAppVersion(), hpBootNote ?: @"none", (unsigned long)hpFiles, (unsigned long)cpFallbackLinked]);
+            NSUInteger i18nAliased = syncModI18nVietnameseAliases(docs);
+            sdvBootLogFmt([NSString stringWithFormat:@"[BOOT 2] Bundled Lidgren / SMAPI (%@) / SDVMobileControls synced (ver=%@, hotpatch=%@:%lu, cpLocaleFallbacks=%lu, i18nAliases=%lu)", smapiSyncNote ?: @"?", sdvEffectiveAppVersion(), hpBootNote ?: @"none", (unsigned long)hpFiles, (unsigned long)cpFallbackLinked, (unsigned long)i18nAliased]);
             [SDVRamMonitor.shared startWithDocsPath:docs];
             sdvBootLog("[BOOT 3] SDVRamMonitor started");
         } @catch (NSException *ex) {

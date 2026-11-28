@@ -749,9 +749,14 @@ static NSUInteger syncContentPackLocaleFallbacks(NSString *docsPath) {
                     }
                 }}
 
+                NSString *trackerPath = join(packDir, @".garden_locale_fallbacks.plist");
+                NSMutableDictionary *tracked = [[NSDictionary dictionaryWithContentsOfFile:trackerPath] mutableCopy];
+                if (![tracked isKindOfClass:NSMutableDictionary.class]) tracked = [NSMutableDictionary dictionary];
+                BOOL trackedDirty = NO;
+
                 // Create 0-byte APFS copy-on-write clones (*.en.<ext> -> *.vi.<ext>, *_en.<ext> -> *_vi.<ext>, en/ -> vi/)
                 // Uses copyItemAtPath (APFS clonefile, st_nlink=1) instead of linkItemAtPath (hardlink st_nlink=2 breaks iOS AFC).
-                // Never overwrites any genuine existing Vietnamese asset!
+                // Refreshes untouched auto-clones if an overlay updates the English source, while NEVER overwriting genuine Vietnamese files!
                 for (NSString *fRel in packFiles) { @autoreleasepool {
                     NSString *ext = fRel.pathExtension;
                     if (!ext.length || ![assetExts containsObject:ext.lowercaseString]) continue;
@@ -793,22 +798,175 @@ static NSUInteger syncContentPackLocaleFallbacks(NSString *docsPath) {
                     if (!dstRel.length || [dstRel isEqualToString:fRel]) continue;
                     NSString *dstFull = join(packDir, dstRel);
                     if ([fm() fileExistsAtPath:dstFull]) {
+                        BOOL replaced = NO;
                         // Auto-heal legacy hardlinked fallbacks (st_nlink > 1) into independent APFS CoW clones (st_nlink = 1)
                         struct stat stSrc, stDst;
                         if (stat(srcFull.fileSystemRepresentation, &stSrc) == 0 &&
                             stat(dstFull.fileSystemRepresentation, &stDst) == 0 &&
                             stSrc.st_ino == stDst.st_ino && stDst.st_nlink > 1) {
                             [fm() removeItemAtPath:dstFull error:nil];
-                            if ([fm() copyItemAtPath:srcFull toPath:dstFull error:nil]) created++;
+                            if ([fm() copyItemAtPath:srcFull toPath:dstFull error:nil]) {
+                                created++;
+                                replaced = YES;
+                            }
+                        } else if ([tracked[dstRel] isKindOfClass:NSString.class]) {
+                            NSData *dd = [NSData dataWithContentsOfFile:dstFull options:NSDataReadingMappedIfSafe error:nil];
+                            NSData *sd = [NSData dataWithContentsOfFile:srcFull options:NSDataReadingMappedIfSafe error:nil];
+                            NSString *dstSha = dd.length ? hashData(dd) : @"";
+                            NSString *srcSha = sd.length ? hashData(sd) : @"";
+                            if (dstSha.length && srcSha.length &&
+                                [dstSha isEqualToString:tracked[dstRel]] &&
+                                ![srcSha isEqualToString:dstSha]) {
+                                sdvRemoveItemQuiet(dstFull);
+                                if ([fm() copyItemAtPath:srcFull toPath:dstFull error:nil]) {
+                                    tracked[dstRel] = srcSha;
+                                    trackedDirty = YES;
+                                    created++;
+                                    replaced = YES;
+                                }
+                            }
+                        }
+                        if (replaced && [tracked[dstRel] isKindOfClass:NSString.class] == NO) {
+                            NSData *sd = [NSData dataWithContentsOfFile:srcFull options:NSDataReadingMappedIfSafe error:nil];
+                            if (sd.length) { tracked[dstRel] = hashData(sd); trackedDirty = YES; }
                         }
                         continue;
                     }
 
                     [fm() createDirectoryAtPath:dstFull.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
                     if ([fm() copyItemAtPath:srcFull toPath:dstFull error:nil]) {
+                        NSData *sd = [NSData dataWithContentsOfFile:srcFull options:NSDataReadingMappedIfSafe error:nil];
+                        if (sd.length) {
+                            tracked[dstRel] = hashData(sd);
+                            trackedDirty = YES;
+                        }
                         created++;
                     }
                 }}
+                if (trackedDirty) {
+                    sdvPrepareWritableFileTarget(trackerPath);
+                    [tracked writeToFile:trackerPath atomically:YES];
+                }
+            }}
+        }
+    } @catch (NSException *ex) { }
+    return created;
+}
+
+static BOOL sdvSafeCaseRenameInDir(NSString *dirPath, NSString *oldName, NSString *newName);
+static NSArray<NSString *> *modManifestFiles(NSString *modsDir);
+
+// Ensures SMAPI locale `"vi"` (set by Kou.ViethoaSV) loads Vietnamese i18n translations even when a pack ships `vi-VN.json`/`vi_VN.json`,
+// and mirrors `vi.json` <-> `vi-VN.json` for packs that match either locale tag! Tracker lives OUTSIDE i18n/ (.plist) so SMAPI never parses it.
+static NSUInteger syncModI18nVietnameseAliases(NSString *docsPath) {
+    if (!docsPath.length) return 0;
+    NSUInteger created = 0;
+    @try {
+        NSMutableArray<NSString *> *modRoots = [NSMutableArray array];
+        NSString *m1 = join(docsPath, @"Mods");
+        NSString *m2 = join(join(docsPath, @"StardewValley"), @"Mods");
+        if (dir(m1)) [modRoots addObject:m1];
+        if (dir(m2) && ![m2 isEqualToString:m1]) [modRoots addObject:m2];
+
+        NSSet<NSString *> *skipTop = [NSSet setWithArray:@[
+            @"sdviostouchcontrols", @"sdvmobilecontrols"
+        ]];
+
+        for (NSString *modsDir in modRoots) {
+            for (NSString *mfRel in modManifestFiles(modsDir)) { @autoreleasepool {
+                NSString *top = mfRel.pathComponents.firstObject;
+                if (!top.length || [top hasPrefix:@"."] || [skipTop containsObject:top.lowercaseString]) continue;
+                NSString *packDir = join(modsDir, mfRel).stringByDeletingLastPathComponent;
+
+                // Ensure i18n folder is canonical lowercase on APFS Case-Sensitive
+                NSString *foundI18nName = nil;
+                for (NSString *entry in ([fm() contentsOfDirectoryAtPath:packDir error:nil] ?: @[])) {
+                    if ([entry.lowercaseString isEqualToString:@"i18n"] && dir(join(packDir, entry))) {
+                        foundI18nName = entry;
+                        break;
+                    }
+                }
+                if (!foundI18nName) continue;
+                if (![foundI18nName isEqualToString:@"i18n"]) {
+                    if (sdvSafeCaseRenameInDir(packDir, foundI18nName, @"i18n")) created++;
+                }
+                NSString *i18nDir = join(packDir, @"i18n");
+                if (!dir(i18nDir)) continue;
+
+                // Canonicalize locale filename casing inside i18n/
+                for (NSString *fn in ([fm() contentsOfDirectoryAtPath:i18nDir error:nil] ?: @[])) {
+                    NSString *lo = fn.lowercaseString;
+                    if ([lo isEqualToString:@"vi.json"] && ![fn isEqualToString:@"vi.json"]) {
+                        if (sdvSafeCaseRenameInDir(i18nDir, fn, @"vi.json")) created++;
+                    } else if ([lo isEqualToString:@"vi-vn.json"] && ![fn isEqualToString:@"vi-VN.json"]) {
+                        if (sdvSafeCaseRenameInDir(i18nDir, fn, @"vi-VN.json")) created++;
+                    } else if ([lo isEqualToString:@"vi_vn.json"] && ![fn isEqualToString:@"vi_VN.json"]) {
+                        if (sdvSafeCaseRenameInDir(i18nDir, fn, @"vi_VN.json")) created++;
+                    } else if ([lo isEqualToString:@"default.json"] && ![fn isEqualToString:@"default.json"]) {
+                        if (sdvSafeCaseRenameInDir(i18nDir, fn, @"default.json")) created++;
+                    }
+                }
+
+                NSString *viPath = join(i18nDir, @"vi.json");
+                NSString *viVnPath = join(i18nDir, @"vi-VN.json");
+                NSString *viUnderPath = join(i18nDir, @"vi_VN.json");
+                BOOL hasVi = [fm() fileExistsAtPath:viPath] && !dir(viPath);
+                BOOL hasViVn = [fm() fileExistsAtPath:viVnPath] && !dir(viVnPath);
+                BOOL hasViUnder = [fm() fileExistsAtPath:viUnderPath] && !dir(viUnderPath);
+                if (!hasVi && !hasViVn && !hasViUnder) continue;
+
+                NSString *trackerPath = join(packDir, @".garden_i18n_aliases.plist");
+                NSMutableDictionary *tracked = [[NSDictionary dictionaryWithContentsOfFile:trackerPath] mutableCopy];
+                if (![tracked isKindOfClass:NSMutableDictionary.class]) tracked = [NSMutableDictionary dictionary];
+                BOOL trackedDirty = NO;
+
+                __block NSUInteger localCreated = 0;
+                __block BOOL localDirty = NO;
+                void (^mirrorFile)(NSString *, NSString *, NSString *) = ^(NSString *srcPath, NSString *dstPath, NSString *dstKey) {
+                    NSData *sd = [NSData dataWithContentsOfFile:srcPath options:NSDataReadingMappedIfSafe error:nil];
+                    if (!sd.length) return;
+                    NSString *srcSha = hashData(sd);
+                    BOOL dstExists = [fm() fileExistsAtPath:dstPath] && !dir(dstPath);
+                    if (!dstExists) {
+                        sdvPrepareWritableFileTarget(dstPath);
+                        if ([fm() copyItemAtPath:srcPath toPath:dstPath error:nil]) {
+                            chmod(dstPath.fileSystemRepresentation, 0644);
+                            tracked[dstKey] = srcSha;
+                            localDirty = YES;
+                            localCreated++;
+                        }
+                        return;
+                    }
+                    if ([tracked[dstKey] isKindOfClass:NSString.class]) {
+                        NSData *dd = [NSData dataWithContentsOfFile:dstPath options:NSDataReadingMappedIfSafe error:nil];
+                        NSString *dstSha = dd.length ? hashData(dd) : @"";
+                        if (dstSha.length && [dstSha isEqualToString:tracked[dstKey]] && ![srcSha isEqualToString:dstSha]) {
+                            sdvRemoveItemQuiet(dstPath);
+                            if ([fm() copyItemAtPath:srcPath toPath:dstPath error:nil]) {
+                                chmod(dstPath.fileSystemRepresentation, 0644);
+                                tracked[dstKey] = srcSha;
+                                localDirty = YES;
+                                localCreated++;
+                            }
+                        }
+                    }
+                };
+
+                if (hasViVn || hasViUnder) {
+                    NSString *src = hasViVn ? viVnPath : viUnderPath;
+                    // If an untracked genuine vi.json exists, treat vi.json as authoritative; only create/update vi.json if missing or tracked alias
+                    mirrorFile(src, viPath, @"vi.json");
+                }
+                // Also re-check vi.json -> vi-VN.json so packs checking FullLocale both work
+                if ([fm() fileExistsAtPath:viPath] && !dir(viPath)) {
+                    mirrorFile(viPath, viVnPath, @"vi-VN.json");
+                }
+                created += localCreated;
+                trackedDirty = trackedDirty || localDirty;
+                if (trackedDirty) {
+                    sdvPrepareWritableFileTarget(trackerPath);
+                    [tracked writeToFile:trackerPath atomically:YES];
+                }
             }}
         }
     } @catch (NSException *ex) { }
@@ -2686,16 +2844,14 @@ static NSArray<NSDictionary *> *sdvDiagnoseMods(NSString *root) {
     return issues;
 }
 
-// Canonicalizes a relative path under Content/ (e.g. "portraits/abigail.xnb" -> "Portraits/Abigail.xnb") against existing StardewValley/Content on APFS
-static NSString *sdvCanonicalizeContentSubpath(NSString *root, NSString *subRel) {
-    if (!root.length || !subRel.length) return subRel;
-    NSString *contentRoot = nil;
-    @try { contentRoot = gamePath(root, @"Content"); } @catch (NSException *ex) { return subRel; }
-    if (!contentRoot.length || !dir(contentRoot)) return subRel;
+// Canonicalizes a relative path against existing files/folders in baseDir on APFS Case-Sensitive
+static NSString *sdvCanonicalizeSubpathInDir(NSString *baseDir, NSString *subRel) {
+    if (!baseDir.length || !subRel.length) return subRel;
+    if (!dir(baseDir)) return subRel;
 
     NSArray<NSString *> *parts = [clean(subRel) componentsSeparatedByString:@"/"];
     NSMutableArray<NSString *> *resolved = [NSMutableArray arrayWithCapacity:parts.count];
-    NSString *curDisk = contentRoot;
+    NSString *curDisk = baseDir;
     BOOL walkValid = YES;
     for (NSUInteger i = 0; i < parts.count; i++) {
         NSString *seg = parts[i];
@@ -2716,6 +2872,14 @@ static NSString *sdvCanonicalizeContentSubpath(NSString *root, NSString *subRel)
         curDisk = nextDisk;
     }
     return [resolved componentsJoinedByString:@"/"];
+}
+
+// Canonicalizes a relative path under Content/ (e.g. "portraits/abigail.xnb" -> "Portraits/Abigail.xnb") against existing StardewValley/Content on APFS
+static NSString *sdvCanonicalizeContentSubpath(NSString *root, NSString *subRel) {
+    if (!root.length || !subRel.length) return subRel;
+    NSString *contentRoot = nil;
+    @try { contentRoot = gamePath(root, @"Content"); } @catch (NSException *ex) { return subRel; }
+    return sdvCanonicalizeSubpathInDir(contentRoot, subRel);
 }
 
 // 1-tap APFS Case-Sensitivity Healer across installed Mods/ and StardewValley/Content/
@@ -2767,6 +2931,181 @@ static NSDictionary *sdvHealInstalledCaseSensitivity(NSString *root) {
         @"fixedDll": modRes[@"fixedDll"] ?: @0,
         @"fixedContent": @(fixedContent)
     };
+}
+
+static BOOL sdvIsProtectedSystemModKey(NSString *keyLow) {
+    if (!keyLow.length) return NO;
+    return [keyLow containsString:@"sdviostouchcontrols"] ||
+           [keyLow containsString:@"sdvmobilecontrols"] ||
+           [keyLow containsString:@"gardenlauncher.mobilecontrols"];
+}
+
+static NSUInteger sdvCountSelectableMods(NSDictionary *combinedLibrary) {
+    NSUInteger n = 0;
+    for (NSString *key in combinedLibrary) {
+        if (!sdvIsProtectedSystemModKey(key.lowercaseString)) n++;
+    }
+    return n > 0 ? n : combinedLibrary.count;
+}
+
+static NSString *sdvNormalizeModMatchToken(NSString *raw) {
+    if (!raw.length) return @"";
+    NSString *s = [raw stringByReplacingOccurrencesOfString:@"đ" withString:@"d"];
+    s = [s stringByReplacingOccurrencesOfString:@"Đ" withString:@"d"];
+    s = [s stringByFoldingWithOptions:NSDiacriticInsensitiveSearch | NSCaseInsensitiveSearch locale:NSLocale.currentLocale];
+    // Strip short bracket tags such as [CP], [AT], [JA], [FS], [VH]
+    NSMutableString *noBrackets = [NSMutableString stringWithCapacity:s.length];
+    NSUInteger i = 0;
+    while (i < s.length) {
+        unichar c = [s characterAtIndex:i];
+        if (c == '[') {
+            NSRange closeR = [s rangeOfString:@"]" options:0 range:NSMakeRange(i, s.length - i)];
+            if (closeR.location != NSNotFound && (closeR.location - i) <= 10) {
+                i = closeR.location + 1;
+                [noBrackets appendString:@" "];
+                continue;
+            }
+        }
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+            [noBrackets appendFormat:@"%c", (char)c];
+        } else {
+            [noBrackets appendString:@" "];
+        }
+        i++;
+    }
+    static NSSet<NSString *> *stopWords = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        stopWords = [NSSet setWithArray:@[
+            @"viethoa", @"viet", @"hoa", @"vietnamese", @"translation", @"translate", @"trans",
+            @"dich", @"patch", @"overlay", @"update", @"fix", @"vh", @"vn", @"vi", @"ban",
+            @"cp", @"ui", @"interface", @"mod", @"pack", @"v1", @"v2", @"v3"
+        ]];
+    });
+    NSMutableString *out = [NSMutableString string];
+    for (NSString *tok in [noBrackets componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceCharacterSet]) {
+        if (!tok.length || [stopWords containsObject:tok]) continue;
+        [out appendString:tok];
+    }
+    // Fallback if filtering "ui" stripped everything (e.g. a mod literally named "UI")
+    if (!out.length) {
+        for (NSString *tok in [noBrackets componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceCharacterSet]) {
+            if (!tok.length) continue;
+            if ([tok isEqualToString:@"ui"] || [tok isEqualToString:@"interface"]) [out appendString:tok];
+        }
+    }
+    return out;
+}
+
+static NSString *sdvMatchInstalledModForOverlay(NSString *owner, NSString *archiveName, NSDictionary *combinedLibrary) {
+    if (!combinedLibrary.count) return nil;
+    NSString *archStem = archiveName.length ? archiveName.stringByDeletingPathExtension : @"";
+    NSMutableArray<NSString *> *rawQueries = [NSMutableArray array];
+    if (owner.length) [rawQueries addObject:owner];
+    if (archStem.length && (!owner.length || [archStem caseInsensitiveCompare:owner] != NSOrderedSame)) [rawQueries addObject:archStem];
+    if (!rawQueries.count) return nil;
+
+    NSMutableArray<NSString *> *normQueries = [NSMutableArray array];
+    for (NSString *q in rawQueries) {
+        NSString *nq = sdvNormalizeModMatchToken(q);
+        if (nq.length >= 3 && ![normQueries containsObject:nq]) [normQueries addObject:nq];
+    }
+
+    NSString *bestKey = nil;
+    NSInteger bestScore = 0;
+    NSUInteger bestCount = 0;
+    BOOL includeProtected = (sdvCountSelectableMods(combinedLibrary) == 0);
+
+    for (NSString *key in combinedLibrary) {
+        if (!includeProtected && sdvIsProtectedSystemModKey(key.lowercaseString)) continue;
+        NSDictionary *entry = combinedLibrary[key];
+        NSDictionary *mf = [entry[@"manifest"] isKindOfClass:NSDictionary.class] ? entry[@"manifest"] : nil;
+        NSString *dirLeaf = [entry[@"dir"] isKindOfClass:NSString.class] ? [entry[@"dir"] lastPathComponent] : @"";
+        NSString *uid = field(mf, @"UniqueID");
+        NSString *name = field(mf, @"Name");
+        NSRange dotR = [uid rangeOfString:@"." options:NSBackwardsSearch];
+        NSString *uidSuffix = (dotR.location != NSNotFound && dotR.location + 1 < uid.length) ? [uid substringFromIndex:dotR.location + 1] : @"";
+
+        NSMutableArray<NSString *> *rawCands = [NSMutableArray array];
+        for (NSString *rc in @[dirLeaf ?: @"", uid ?: @"", uidSuffix ?: @"", name ?: @""]) {
+            if (rc.length && ![rawCands containsObject:rc]) [rawCands addObject:rc];
+        }
+
+        NSInteger candScore = 0;
+        for (NSString *q in rawQueries) {
+            for (NSString *c in rawCands) {
+                if ([q caseInsensitiveCompare:c] == NSOrderedSame) { candScore = MAX(candScore, 100); }
+            }
+        }
+        if (candScore < 100 && normQueries.count) {
+            for (NSString *c in rawCands) {
+                NSString *nc = sdvNormalizeModMatchToken(c);
+                if (nc.length < 3) continue;
+                for (NSString *nq in normQueries) {
+                    if ([nq isEqualToString:nc]) {
+                        candScore = MAX(candScore, 80);
+                    } else if (nq.length >= 5 && nc.length >= 5 && ([nq containsString:nc] || [nc containsString:nq])) {
+                        candScore = MAX(candScore, 50);
+                    }
+                }
+            }
+        }
+
+        if (candScore > bestScore) {
+            bestScore = candScore;
+            bestKey = key;
+            bestCount = 1;
+        } else if (candScore > 0 && candScore == bestScore && ![key isEqualToString:bestKey]) {
+            bestCount++;
+        }
+    }
+    return (bestScore >= 50 && bestCount == 1) ? bestKey : nil;
+}
+
+static NSString *sdvPackagePrefixForRel(NSString *rel) {
+    NSString *first = rel.pathComponents.firstObject;
+    return [first hasPrefix:@"pkg_"] ? first : @"";
+}
+
+static NSString *sdvPackageArchiveNameForRel(NSString *rel, NSArray<NSString *> *stagedFileNames) {
+    NSString *first = rel.pathComponents.firstObject;
+    if (![first hasPrefix:@"pkg_"] || first.length <= 4) return @"";
+    NSInteger idx = [[first substringFromIndex:4] integerValue];
+    if (idx >= 0 && (NSUInteger)idx < stagedFileNames.count) return stagedFileNames[(NSUInteger)idx] ?: @"";
+    return @"";
+}
+
+static NSString *sdvCanonicalI18nFileName(NSString *fn) {
+    NSString *lo = fn.lowercaseString;
+    if ([lo isEqualToString:@"vi.json"]) return @"vi.json";
+    if ([lo isEqualToString:@"vi-vn.json"]) return @"vi-VN.json";
+    if ([lo isEqualToString:@"vi_vn.json"]) return @"vi_VN.json";
+    if ([lo isEqualToString:@"default.json"]) return @"default.json";
+    if ([lo isEqualToString:@"en.json"]) return @"en.json";
+    if ([fn.pathExtension.lowercaseString isEqualToString:@"json"] && ![fn.pathExtension isEqualToString:@"json"]) {
+        return [[fn stringByDeletingPathExtension] stringByAppendingPathExtension:@"json"];
+    }
+    return fn;
+}
+
+static BOOL sdvIsLooseLocaleJsonName(NSString *fnLow) {
+    return [fnLow isEqualToString:@"vi.json"] ||
+           [fnLow isEqualToString:@"vi-vn.json"] ||
+           [fnLow isEqualToString:@"vi_vn.json"] ||
+           [fnLow isEqualToString:@"default.json"];
+}
+
+static BOOL sdvIsModInternalTopDir(NSString *segLow) {
+    static NSSet<NSString *> *internalDirs = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        internalDirs = [NSSet setWithArray:@[
+            @"assets", @"asset", @"i18n", @"data", @"sprites", @"maps", @"minigames",
+            @"portraits", @"characters", @"fonts", @"strings", @"loosesprites",
+            @"tilesheets", @"buildings", @"animals", @"terrainfeatures", @"content"
+        ]];
+    });
+    return [internalDirs containsObject:segLow];
 }
 
 // Plan installing ONE OR MULTIPLE staged packages inside `stage` (each package unpacked into `stage/pkg_<i>/...`)
@@ -2956,13 +3295,40 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
 
     // Pass 3a: Map all files belonging to discovered SMAPI mods first
     NSMutableArray *remaining = [NSMutableArray array];
+    NSMutableSet<NSString *> *overlayPartialBases = [NSMutableSet set];
     for (NSString *r in items) { @autoreleasepool {
         BOOL found = NO;
         for (NSString *base in bases) {
             NSString *tail = below(r, base);
             if (!tail) continue;
-            NSString *dst = join(incoming[base][@"dest"], tail);
-            if (!([tail.lowercaseString isEqual:@"config.json"] && [fm() fileExistsAtPath:gamePath(root, dst)])) {
+            NSDictionary *incMod = incoming[base];
+            NSDictionary *incManifest = incMod[@"m"];
+            NSString *incUidKey = field(incManifest, @"UniqueID").lowercaseString;
+            NSDictionary *existingMod = library[incUidKey];
+
+            // Protect existing C# mod manifest.json when an overlay package ships a partial manifest without EntryDll
+            if ([tail.lowercaseString isEqualToString:@"manifest.json"] && existingMod) {
+                NSString *oldEntryDll = field(existingMod[@"manifest"], @"EntryDll");
+                NSString *newEntryDll = field(incManifest, @"EntryDll");
+                BOOL missingNewDll = newEntryDll.length && ![fm() fileExistsAtPath:inside(stage, base.length ? join(base, newEntryDll) : newEntryDll)];
+                if (oldEntryDll.length && (!newEntryDll.length || missingNewDll)) {
+                    [overlayPartialBases addObject:base];
+                    found = YES;
+                    break;
+                }
+            }
+
+            // Canonicalize i18n/ & locale filename casing before matching existing APFS directory casing
+            NSMutableArray<NSString *> *tParts = [tail.pathComponents mutableCopy];
+            if (tParts.count >= 2 && [tParts.firstObject.lowercaseString isEqualToString:@"i18n"]) {
+                tParts[0] = @"i18n";
+                tParts[tParts.count - 1] = sdvCanonicalI18nFileName(tParts.lastObject);
+            }
+            NSString *normTail = [NSString pathWithComponents:tParts];
+            NSString *existingModDir = (modsRoot && [incMod[@"folder"] length]) ? join(modsRoot, incMod[@"folder"]) : nil;
+            NSString *canonTail = existingModDir ? sdvCanonicalizeSubpathInDir(existingModDir, normTail) : normTail;
+            NSString *dst = join(incMod[@"dest"], canonTail);
+            if (!([canonTail.lowercaseString isEqualToString:@"config.json"] && [fm() fileExistsAtPath:gamePath(root, dst)])) {
                 add(dst, r);
             }
             found = YES;
@@ -2975,13 +3341,19 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
         }
         if (!found) [remaining addObject:r];
     }}
+    for (NSString *pb in overlayPartialBases) {
+        NSDictionary *pm = incoming[pb][@"m"];
+        NSString *pName = field(pm, @"Name").length ? field(pm, @"Name") : field(pm, @"UniqueID");
+        if (pName.length) [names addObject:[NSString stringWithFormat:@"Việt hóa / Ghi đè → %@", pName]];
+    }
 
-    // Pass 3b: Map Content/ overrides (Vietnamese fonts, .xnb, Strings, Data), standalone i18n packs, and loose XNB files
-    NSArray *assets = nil;
+    // Pass 3b: Map Content/ overrides, standalone i18n packs, mod-overlay asset/json packs, and loose XNB files
     NSMutableSet *addedExtraNames = [NSMutableSet set];
+    NSMutableArray<NSString *> *postI18nRemaining = [NSMutableArray array];
     for (NSString *r in remaining) { @autoreleasepool {
         NSArray *parts = r.pathComponents;
         NSString *extLow = r.pathExtension.lowercaseString;
+        NSString *fnLow = r.lastPathComponent.lowercaseString;
 
         // Direct Content/ subfolder inside pack (e.g. LOANMODVIETHOA/Content/Fonts/..., Content/Strings/..., Content/Data/...)
         NSUInteger contentIdx = [parts indexOfObjectPassingTest:^BOOL(NSString *s, NSUInteger i, BOOL *stop) {
@@ -2990,7 +3362,6 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
         if (contentIdx != NSNotFound && contentIdx + 1 < parts.count) {
             if ([extLow isEqualToString:@"xnb"] || [extLow isEqualToString:@"json"] || [extLow isEqualToString:@"png"] || [extLow isEqualToString:@"tmx"] || [extLow isEqualToString:@"yaml"] || [extLow isEqualToString:@"fnt"]) {
                 NSString *subRel = [NSString pathWithComponents:[parts subarrayWithRange:NSMakeRange(contentIdx + 1, parts.count - contentIdx - 1)]];
-                NSString *fnLow = r.lastPathComponent.lowercaseString;
                 // Protect PC Content UI XNBs from Android/Mobile optional XNB folders bundled inside a Content Patcher ZIP
                 if (bases.count > 0 && [extLow isEqualToString:@"xnb"] &&
                     ([fnLow hasPrefix:@"mobileatlas"] || [fnLow isEqualToString:@"titlebuttons.xnb"] ||
@@ -3013,46 +3384,169 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
         }
 
         NSUInteger idx = [parts indexOfObjectPassingTest:^BOOL(NSString *s, NSUInteger i, BOOL *stop) {
-            return [s.lowercaseString isEqual:@"i18n"];
+            return [s.lowercaseString isEqualToString:@"i18n"];
         }];
-        if (idx != NSNotFound && [extLow isEqual:@"json"]) {
-            NSString *owner = (idx > 0 && ![parts[idx-1] hasPrefix:@"pkg_"]) ? parts[idx-1] : @"";
-            NSMutableArray *matches = [NSMutableArray array];
-            for (NSDictionary *mod in combinedLibrary.allValues) {
-                NSString *mdir = mod[@"dir"];
-                if (mdir.length && mdir.lastPathComponent && owner.length &&
-                    [owner caseInsensitiveCompare:mdir.lastPathComponent] == NSOrderedSame) {
-                    [matches addObject:mdir];
-                }
-            }
-            if (matches.count != 1) {
-                NSString *selected = translations[owner];
-                if (selected && combinedLibrary[selected]) {
-                    [matches removeAllObjects];
-                    [matches addObject:combinedLibrary[selected][@"dir"]];
-                } else if (bases.count > 0 || out.count > 0) {
-                    // Multi-mod pack contains an i18n file for a mod not currently installed -> warn & continue instead of aborting!
-                    if (owner.length) [warnings addObject:[NSString stringWithFormat:@"Bỏ qua bản dịch i18n cho mod chưa cài: %@", owner]];
-                    continue;
-                } else {
-                    if (!combinedLibrary.count) fail(@"Cài mod gốc trước (hoặc chọn chung với mod gốc) khi thêm bản dịch i18n.");
-                    translationOwner = owner;
-                    break;
-                }
-            }
+        BOOL hasPkgPrefix = (parts.count >= 2 && [parts.firstObject hasPrefix:@"pkg_"]);
+        NSUInteger depthNoPkg = hasPkgPrefix ? (parts.count - 1) : parts.count;
+        BOOL topIsInternal = (depthNoPkg >= 2 && sdvIsModInternalTopDir(parts[hasPkgPrefix ? 1 : 0].lowercaseString));
+        BOOL isLooseLocale = (idx == NSNotFound && sdvIsLooseLocaleJsonName(fnLow) && (depthNoPkg == 1 || (depthNoPkg == 2 && !topIsInternal)));
+        if ((idx != NSNotFound && [extLow isEqualToString:@"json"]) || isLooseLocale) {
             @try {
                 if (![jsonAt(inside(stage, r)) isKindOfClass:NSDictionary.class]) continue;
             } @catch (NSException *ex) {
                 [warnings addObject:[NSString stringWithFormat:@"Bỏ qua tệp dịch lỗi: %@", r.lastPathComponent]];
                 continue;
             }
-            NSString *targetDir = matches[0];
-            add(join(join(@"Mods", targetDir), [NSString pathWithComponents:[parts subarrayWithRange:NSMakeRange(idx, parts.count - idx)]]), r);
-            NSString *lbl = [NSString stringWithFormat:@"Bản dịch i18n → %@", targetDir.lastPathComponent];
+            NSString *pkgArchiveName = sdvPackageArchiveNameForRel(r, stagedFileNames);
+            NSString *owner = @"";
+            if (idx != NSNotFound) {
+                owner = (idx > 0 && ![parts[idx - 1] hasPrefix:@"pkg_"]) ? parts[idx - 1] : @"";
+            } else if (parts.count >= 2 && ![parts[parts.count - 2] hasPrefix:@"pkg_"]) {
+                owner = parts[parts.count - 2];
+            }
+            NSString *ownerKey = owner.length ? owner : (pkgArchiveName.stringByDeletingPathExtension.length ? pkgArchiveName.stringByDeletingPathExtension : @"i18n");
+
+            NSString *selected = translations[ownerKey] ?: (owner.length ? translations[owner] : nil);
+            NSString *targetKey = (selected && combinedLibrary[selected]) ? selected : sdvMatchInstalledModForOverlay(owner, pkgArchiveName, combinedLibrary);
+
+            if (!targetKey.length) {
+                if (bases.count > 0 && out.count > 0 && owner.length) {
+                    [warnings addObject:[NSString stringWithFormat:@"Bỏ qua bản dịch i18n cho mod chưa cài: %@", owner]];
+                    continue;
+                }
+                if (sdvCountSelectableMods(combinedLibrary) == 0) {
+                    fail(@"Cài mod gốc trước (hoặc chọn chung với mod gốc) khi thêm bản dịch i18n.");
+                }
+                translationOwner = ownerKey;
+                break;
+            }
+
+            NSDictionary *targetEntry = combinedLibrary[targetKey];
+            NSString *targetDir = targetEntry[@"dir"];
+            NSString *i18nRel = nil;
+            if (idx != NSNotFound) {
+                NSMutableArray<NSString *> *tailParts = [[parts subarrayWithRange:NSMakeRange(idx, parts.count - idx)] mutableCopy];
+                tailParts[0] = @"i18n";
+                tailParts[tailParts.count - 1] = sdvCanonicalI18nFileName(tailParts.lastObject);
+                i18nRel = [NSString pathWithComponents:tailParts];
+            } else {
+                i18nRel = join(@"i18n", sdvCanonicalI18nFileName(r.lastPathComponent));
+            }
+            NSString *canonI18nRel = modsRoot ? sdvCanonicalizeSubpathInDir(join(modsRoot, targetDir), i18nRel) : i18nRel;
+            add(join(join(@"Mods", targetDir), canonI18nRel), r);
+            NSString *targetDispName = field(targetEntry[@"manifest"], @"Name");
+            if (!targetDispName.length) targetDispName = targetDir.lastPathComponent;
+            NSString *lbl = [NSString stringWithFormat:@"Bản dịch i18n → %@", targetDispName];
             if (![addedExtraNames containsObject:lbl]) { [addedExtraNames addObject:lbl]; [names addObject:lbl]; }
             continue;
         }
 
+        [postI18nRemaining addObject:r];
+    }}
+
+    // Pass 3c: Map non-i18n mod overlay files (e.g. Cat Valley UI Việt hóa: assets/*.png, content.json, data/*.json without manifest.json)
+    NSMutableArray<NSString *> *looseXnbCandidates = [NSMutableArray array];
+    if (translationOwner == nil && postI18nRemaining.count) {
+        static NSSet<NSString *> *overlayExts = nil;
+        static dispatch_once_t onceOverlayExts;
+        dispatch_once(&onceOverlayExts, ^{
+            overlayExts = [NSSet setWithArray:@[@"png", @"json", @"tmx", @"tbin", @"yaml", @"fnt", @"xnb"]];
+        });
+
+        NSMutableDictionary<NSString *, NSMutableArray<NSString *> *> *byPkg = [NSMutableDictionary dictionary];
+        NSMutableArray<NSString *> *pkgOrder = [NSMutableArray array];
+        for (NSString *r in postI18nRemaining) {
+            NSString *pk = sdvPackagePrefixForRel(r);
+            NSMutableArray *arr = byPkg[pk];
+            if (!arr) {
+                arr = [NSMutableArray array];
+                byPkg[pk] = arr;
+                [pkgOrder addObject:pk];
+            }
+            [arr addObject:r];
+        }
+
+        for (NSString *pk in pkgOrder) {
+            NSArray<NSString *> *group = byPkg[pk];
+            NSMutableArray<NSString *> *eligible = [NSMutableArray array];
+            NSUInteger nonXnbCount = 0;
+            for (NSString *r in group) {
+                NSString *extLow = r.pathExtension.lowercaseString;
+                if ([overlayExts containsObject:extLow]) {
+                    [eligible addObject:r];
+                    if (![extLow isEqualToString:@"xnb"]) nonXnbCount++;
+                }
+            }
+            if (nonXnbCount == 0) {
+                for (NSString *r in group) {
+                    if ([r.pathExtension.lowercaseString isEqualToString:@"xnb"]) [looseXnbCandidates addObject:r];
+                }
+                continue;
+            }
+
+            // Strip pkg_NNN prefix & detect shared wrapper folder (e.g. "[CP] Cat Valley UI/assets/..." -> owner "[CP] Cat Valley UI", rel "assets/...")
+            NSMutableArray<NSString *> *trimmedList = [NSMutableArray arrayWithCapacity:eligible.count];
+            NSString *sharedTop = nil;
+            BOOL canStripWrapper = YES;
+            for (NSString *r in eligible) {
+                NSArray<NSString *> *parts = r.pathComponents;
+                NSArray<NSString *> *noPkgParts = (pk.length && parts.count >= 2 && [parts.firstObject isEqualToString:pk])
+                    ? [parts subarrayWithRange:NSMakeRange(1, parts.count - 1)]
+                    : parts;
+                NSString *rel = [NSString pathWithComponents:noPkgParts];
+                [trimmedList addObject:rel];
+                if (noPkgParts.count < 2 || sdvIsModInternalTopDir(noPkgParts.firstObject.lowercaseString)) {
+                    canStripWrapper = NO;
+                } else if (!sharedTop) {
+                    sharedTop = noPkgParts.firstObject;
+                } else if (![sharedTop isEqualToString:noPkgParts.firstObject]) {
+                    canStripWrapper = NO;
+                }
+            }
+
+            NSString *pkgArchiveName = sdvPackageArchiveNameForRel(eligible.firstObject, stagedFileNames);
+            NSString *owner = (canStripWrapper && sharedTop.length) ? sharedTop : @"";
+            NSString *ownerKey = owner.length ? owner : (pkgArchiveName.stringByDeletingPathExtension.length ? pkgArchiveName.stringByDeletingPathExtension : @"Overlay");
+
+            NSString *selected = translations[ownerKey] ?: (owner.length ? translations[owner] : nil);
+            NSString *targetKey = (selected && combinedLibrary[selected]) ? selected : sdvMatchInstalledModForOverlay(owner, pkgArchiveName, combinedLibrary);
+            if (!targetKey.length) {
+                if (sdvCountSelectableMods(combinedLibrary) == 0) {
+                    fail(@"Cài mod gốc trước (hoặc chọn chung với mod gốc) khi thêm gói Việt hóa / ghi đè.");
+                }
+                translationOwner = ownerKey;
+                break;
+            }
+
+            NSDictionary *targetEntry = combinedLibrary[targetKey];
+            NSString *targetDir = targetEntry[@"dir"];
+            NSString *targetFullDir = modsRoot ? join(modsRoot, targetDir) : nil;
+            for (NSUInteger i = 0; i < eligible.count; i++) {
+                NSString *srcRel = eligible[i];
+                NSString *modRel = trimmedList[i];
+                if (canStripWrapper && sharedTop.length) {
+                    NSArray<NSString *> *mp = modRel.pathComponents;
+                    if (mp.count >= 2) modRel = [NSString pathWithComponents:[mp subarrayWithRange:NSMakeRange(1, mp.count - 1)]];
+                }
+                NSString *canonModRel = targetFullDir ? sdvCanonicalizeSubpathInDir(targetFullDir, modRel) : modRel;
+                NSString *dst = join(join(@"Mods", targetDir), canonModRel);
+                if (!([canonModRel.lowercaseString isEqualToString:@"config.json"] && [fm() fileExistsAtPath:gamePath(root, dst)])) {
+                    add(dst, srcRel);
+                }
+            }
+            NSString *targetDispName = field(targetEntry[@"manifest"], @"Name");
+            if (!targetDispName.length) targetDispName = targetDir.lastPathComponent;
+            NSString *lbl = [NSString stringWithFormat:@"Ghi đè / Việt hóa → %@", targetDispName];
+            if (![addedExtraNames containsObject:lbl]) { [addedExtraNames addObject:lbl]; [names addObject:lbl]; }
+        }
+    }
+
+    // Pass 3d: Loose standalone XNB files -> Content/
+    NSArray *assets = nil;
+    for (NSString *r in looseXnbCandidates) { @autoreleasepool {
+        if (translationOwner != nil) break;
+        NSArray *parts = r.pathComponents;
+        NSString *extLow = r.pathExtension.lowercaseString;
         if (![extLow isEqual:@"xnb"]) continue;
         // If this archive already installs SMAPI/Content Patcher mods, never silently overwrite PC Content/*.xnb
         // with loose sibling Android/Mobile XNB files (e.g. TitleButtons.xnb, MenuTiles.xnb, MobileAtlas*.xnb).
@@ -3157,7 +3651,7 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
         if (badManifests.count) {
             fail([@"Không tìm thấy mod hợp lệ. Lỗi manifest: " stringByAppendingString:badManifests.firstObject]);
         }
-        fail(@"Gói cần có manifest.json, thư mục Content/, bản dịch i18n hoặc tệp XNB.");
+        fail(@"Gói cần có manifest.json, thư mục Content/, bản dịch i18n hoặc tệp ghi đè mod (assets / content.json / XNB).");
     }
     return @{
         @"map": out,

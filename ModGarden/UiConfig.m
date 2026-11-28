@@ -259,7 +259,7 @@ static long long sdvNextRev(void) {
 @property(nonatomic, assign) BOOL safeCrafting;
 @property(nonatomic, assign) NSInteger autoSaveMinutes; // 0=Off, 3, 5, 10
 @property(nonatomic, assign) BOOL reduceWeather;
-@property(nonatomic, assign) float uiScaleOverride; // 0 = game default, 0.75..1.50
+@property(nonatomic, assign) float uiScaleOverride; // 0 = game default, 0.75..2.50
 @property(nonatomic, assign) float buttonScale;
 @property(nonatomic, assign) BOOL showEmoteButton;
 @property(nonatomic, assign) BOOL autoRepeat;
@@ -384,7 +384,7 @@ static long long sdvNextRev(void) {
             c.reduceWeather = ([v isEqualToString:@"1"] || [v.lowercaseString isEqualToString:@"true"]);
         } else if ([k isEqualToString:@"uiscale"]) {
             float us = v.floatValue;
-            c.uiScaleOverride = (us >= 0.70f) ? sdvClampf(us, 0.75f, 1.50f) : 0.0f;
+            c.uiScaleOverride = (us >= 0.70f) ? sdvClampf(us, 0.75f, 2.50f) : 0.0f;
         } else if ([k isEqualToString:@"buttonscale"]) {
             c.buttonScale = sdvClampf(v.floatValue, 0.75f, 1.45f);
         } else if ([k isEqualToString:@"emotebtn"]) {
@@ -542,7 +542,7 @@ static long long sdvNextRev(void) {
         self.mobileShopAndDrag ? 1 : 0, self.autoKeyboard ? 1 : 0,
         self.safeCrafting ? 1 : 0, (long)self.autoSaveMinutes,
         self.reduceWeather ? 1 : 0,
-        (self.uiScaleOverride >= 0.70f) ? sdvClampf(self.uiScaleOverride, 0.75f, 1.50f) : 0.0f,
+        (self.uiScaleOverride >= 0.70f) ? sdvClampf(self.uiScaleOverride, 0.75f, 2.50f) : 0.0f,
         sdvClampf(self.buttonScale, 0.75f, 1.45f),
         self.showEmoteButton ? 1 : 0, self.autoRepeat ? 1 : 0,
         self.restoreToolAfterAuto ? 1 : 0, self.showSpecButton ? 1 : 0,

@@ -489,8 +489,10 @@ namespace SDVMobileControls
                         Game1.options.gamepadMode = Options.GamepadModes.ForceOn;
                     if (!Game1.options.gamepadControls)
                         Game1.options.gamepadControls = true;
+                    // Auto-enable controller rumble whenever a physical gamepad is active so iOS controllers vibrate out of the box!
+                    if (!Game1.options.rumble)
+                        Game1.options.rumble = true;
                     // CRITICAL for StardewValley.Rumble.update(): if playerOneIndex == -1, Rumble returns early before SetVibration!
-                    // (Respect user's Game1.options.rumble preference — never force it back ON if they disabled rumble!)
                     if ((int)Game1.playerOneIndex < 0)
                         Game1.playerOneIndex = PlayerIndex.One;
                 }
@@ -863,13 +865,17 @@ namespace SDVMobileControls
             isWarpingOrFading = false;
             try
             {
-                if (Game1.fadeToBlack || Game1.locationRequest != null || Game1.isWarping || Game1.pauseTime > 0f)
+                if (Game1.fadeToBlack || Game1.locationRequest != null || Game1.isWarping)
                 {
                     isWarpingOrFading = true;
                     return true;
                 }
             }
             catch { }
+            if (Game1.options != null && (IsPhysicalGamepadActive || _gpConnected) && !Game1.options.rumble)
+            {
+                try { Game1.options.rumble = true; } catch { }
+            }
             return (!IsPhysicalGamepadActive && !_gpConnected) ||
                    IsSuppressed ||
                    Game1.options == null ||
@@ -993,27 +999,26 @@ namespace SDVMobileControls
                 return;
             }
 
-            // Perceptual gamma shaping for iOS CoreHaptics ERM/Bluetooth gamepads:
-            // Raw linear CoreHaptics intensity feels way too strong on physical Xbox/Switch/PS/MFi motors
-            // (0.15 linear already feels near-max on many Bluetooth controllers!).
-            // - Subtle cues (<0.25: footsteps 0.10, reel 0.10, door 0.15, light hits): light right-motor tap ONLY (L=0)
+            // Calibrated ERM/CoreHaptics gamepad rumble curve:
+            // - Subtle cues (<0.25: footsteps 0.10, reel 0.10, door 0.15, light hits):
+            //   crisp right-motor tap above ERM stall threshold (0.18..0.32), heavy left motor OFF (0.0)
             // - Medium actions (0.25..0.60: horse dirt 0.30, fishing cast 0.50, tools): gentle balanced dual motor
-            // - Strong impacts (>=0.60: damage 0.75, fish bite 0.75-0.95, bombs 1.0): firm punch capped safely
+            // - Strong impacts (>=0.60: damage 0.75, fish bite 0.75-0.95, bombs 1.0): firm punch capped safely below harsh max
             float outL, outR;
             if (peak < 0.25f)
             {
                 outL = 0f;
-                outR = Math.Clamp(MathF.Pow(peak, 1.50f) * 0.65f, 0.03f, 0.14f);
+                outR = Math.Clamp(0.18f + peak * 0.55f, 0.18f, 0.32f);
             }
             else if (peak < 0.60f)
             {
-                outL = MathF.Pow(l, 1.70f) * 0.50f;
-                outR = MathF.Pow(r, 1.50f) * 0.55f;
+                outL = Math.Clamp(0.18f + (l - 0.25f) * 0.65f, 0.18f, 0.41f);
+                outR = Math.Clamp(0.30f + (r - 0.25f) * 0.55f, 0.30f, 0.50f);
             }
             else
             {
-                outL = MathF.Pow(l, 1.55f) * 0.68f;
-                outR = MathF.Pow(r, 1.45f) * 0.58f;
+                outL = Math.Clamp(0.45f + (l - 0.60f) * 0.85f, 0.45f, 0.79f);
+                outR = Math.Clamp(0.50f + (r - 0.60f) * 0.65f, 0.50f, 0.76f);
             }
             PushRumbleToNative(outL, outR, durationSec);
         }

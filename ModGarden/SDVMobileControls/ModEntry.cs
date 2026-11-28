@@ -359,6 +359,7 @@ namespace SDVMobileControls
             _bootGameLaunched = true;
             WriteBootStage("90|Kích hoạt GameLaunched — chuẩn bị vào game…");
             ReportNativeBoot(90, "Kích hoạt GameLaunched — chuẩn bị vào game…", "Hoàn tất đồng bộ Content Patcher & cảm ứng", 4);
+            try { if (Game1.options != null) Game1.options.rumble = true; } catch { }
             BindAllLoadedTouchVirtualPads("GameLaunched");
             EnsureGardenModHooksInstalled("GameLaunched");
             InstallMobileHarmonyPatches("GameLaunched");
@@ -373,6 +374,7 @@ namespace SDVMobileControls
 
         private void OnSaveLoaded(object sender, SaveLoadedEventArgs e)
         {
+            try { if (Game1.options != null) Game1.options.rumble = true; } catch { }
             try { RamOptimizer?.OnSaveLoaded(); } catch { }
             // Stagger portrait sync past bed wake-up fade so the player can walk immediately without hitching!
             SchedulePortraitSync(reloadAll: true, delayTicks: 35, reason: "SaveLoaded");
@@ -393,6 +395,7 @@ namespace SDVMobileControls
 
         private void OnDayStarted(object sender, DayStartedEventArgs e)
         {
+            try { if (Game1.options != null) Game1.options.rumble = true; } catch { }
             try { RamOptimizer?.OnDayStarted(); } catch { }
             SchedulePortraitSync(reloadAll: true, delayTicks: 35, reason: "DayStarted");
             ResetMailboxWatchdogSnapshot();
@@ -1779,9 +1782,49 @@ namespace SDVMobileControls
                     }
                 }
 
+                // 6. Fix iOS Exit-to-Title & GC Deadlock:
+                // SDViOSTouchControls.ModEntry.OnReturnedToTitle, PurgeNonCoreAssets, and MemoryWatchdog.ForceCollect(compact:true)
+                // call GC.WaitForPendingFinalizers() on the Main UI Thread while MonoGame RenderTarget2D.Finalize() calls
+                // Threading.BlockOnUIThread() on the Finalizer Thread -> classic A->B / B->A permanent freeze on Exit to Title!
+                if (!_titleDeadlockPatchesInstalled)
+                {
+                    foreach (Assembly asm in AppDomain.CurrentDomain.GetAssemblies())
+                    {
+                        Type tcMod = null;
+                        Type tcWatchdog = null;
+                        try
+                        {
+                            tcMod = asm.GetType("SDViOSTouchControls.ModEntry", throwOnError: false);
+                            tcWatchdog = asm.GetType("SDViOSTouchControls.MemoryWatchdog", throwOnError: false);
+                        }
+                        catch { continue; }
+                        if (tcMod == null && tcWatchdog == null) continue;
+
+                        if (tcMod != null)
+                        {
+                            _tcDeferredReturnedToTitle = asm.GetType("SDViOSTouchControls.DeferredMapLoader", throwOnError: false)?.GetMethod("OnReturnedToTitle", any);
+                            Type padType = asm.GetType("SDViOSTouchControls.TouchVirtualPad", throwOnError: false);
+                            _tcPadInstanceProp = padType?.GetProperty("Instance", any);
+                            _tcPadResetInput = padType?.GetMethod("ResetInputState", any);
+                            Type dispType = asm.GetType("SDViOSTouchControls.LazyIosDisplayDevice", throwOnError: false);
+                            _tcLazyDispInstanceProp = dispType?.GetProperty("Instance", any);
+                            _tcLazyDispPrune = dispType?.GetMethod("PruneTileSheets", any);
+
+                            patchedNow += ApplyExtPatch(tcMod.GetMethod("OnReturnedToTitle", any), nameof(PrefixSafeTouchControlsReturnedToTitle), 800, null, 400);
+                            patchedNow += ApplyExtPatch(tcMod.GetMethod("PurgeNonCoreAssets", any), nameof(PrefixSafePurgeNonCoreAssets), 800, null, 400);
+                        }
+                        if (tcWatchdog != null)
+                        {
+                            patchedNow += ApplyExtPatch(tcWatchdog.GetMethod("ForceCollect", any, null, new[] { typeof(string), typeof(int), typeof(bool) }, null), nameof(PrefixSafeWatchdogForceCollect), 800, null, 400);
+                        }
+                        _titleDeadlockPatchesInstalled = true;
+                        break;
+                    }
+                }
+
                 if (patchedNow > 0)
                 {
-                    _monitor?.Log($"[{phase}] Installed {patchedNow} External Peripheral Harmony patches (Full Gamepad + GCKeyboard + GCMouse, TouchHooks={PatchedTouchHookTypes.Count}).", LogLevel.Info);
+                    _monitor?.Log($"[{phase}] Installed {patchedNow} External Peripheral & Stability Harmony patches (Full Gamepad + GCKeyboard + GCMouse + ExitToTitleDeadlockGuard, TouchHooks={PatchedTouchHookTypes.Count}).", LogLevel.Info);
                 }
             }
             catch (Exception ex)
@@ -1845,6 +1888,67 @@ namespace SDVMobileControls
                 catch { }
                 return false;
             }
+            return true;
+        }
+
+        private static bool _titleDeadlockPatchesInstalled;
+        private static MethodInfo _tcDeferredReturnedToTitle;
+        private static PropertyInfo _tcPadInstanceProp;
+        private static MethodInfo _tcPadResetInput;
+        private static PropertyInfo _tcLazyDispInstanceProp;
+        private static MethodInfo _tcLazyDispPrune;
+
+        private static bool PrefixSafeTouchControlsReturnedToTitle()
+        {
+            try
+            {
+                try { _tcDeferredReturnedToTitle?.Invoke(null, null); } catch { }
+                try
+                {
+                    object pad = _tcPadInstanceProp?.GetValue(null);
+                    if (pad != null) _tcPadResetInput?.Invoke(pad, null);
+                }
+                catch { }
+                try
+                {
+                    object disp = _tcLazyDispInstanceProp?.GetValue(null);
+                    if (disp != null) _tcLazyDispPrune?.Invoke(disp, new object[] { null });
+                }
+                catch { }
+                // Non-blocking Gen1 GC only — NEVER call GC.WaitForPendingFinalizers() on the Main UI Thread
+                // (MonoGame RenderTarget2D.Finalize() calls Threading.BlockOnUIThread -> permanent deadlock!).
+                try { GC.Collect(1, GCCollectionMode.Optimized, blocking: false); } catch { }
+                _monitor?.Log("[GardenFix] Returned to title safely (avoided UI-thread GC.WaitForPendingFinalizers deadlock).", LogLevel.Info);
+            }
+            catch (Exception ex)
+            {
+                _monitor?.Log($"[GardenFix] Safe OnReturnedToTitle warning: {ex.Message}", LogLevel.Warn);
+            }
+            return false;
+        }
+
+        private static bool PrefixSafePurgeNonCoreAssets()
+        {
+            try
+            {
+                try
+                {
+                    object disp = _tcLazyDispInstanceProp?.GetValue(null);
+                    if (disp != null) _tcLazyDispPrune?.Invoke(disp, new object[] { null });
+                }
+                catch { }
+                try { GC.Collect(2, GCCollectionMode.Optimized, blocking: false); } catch { }
+            }
+            catch { }
+            return false;
+        }
+
+        private static bool PrefixSafeWatchdogForceCollect(ref bool __2)
+        {
+            // Force compact=false so SDViOSTouchControls.MemoryWatchdog.ForceCollect still frees Gen2 memory
+            // cleanly WITHOUT calling GC.WaitForPendingFinalizers() (which deadlocks MonoGame BlockOnUIThread!).
+            if (__2)
+                __2 = false;
             return true;
         }
 

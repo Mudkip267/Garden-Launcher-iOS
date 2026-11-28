@@ -3351,7 +3351,7 @@ static NSDictionary *plan(NSString *root, NSString *stage, NSArray *preferences,
     NSMutableSet *addedExtraNames = [NSMutableSet set];
     NSMutableArray<NSString *> *postI18nRemaining = [NSMutableArray array];
     for (NSString *r in remaining) { @autoreleasepool {
-        NSArray *parts = r.pathComponents;
+        NSArray<NSString *> *parts = r.pathComponents;
         NSString *extLow = r.pathExtension.lowercaseString;
         NSString *fnLow = r.lastPathComponent.lowercaseString;
 
